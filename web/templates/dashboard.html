@@ -118,6 +118,16 @@ function refreshEligible() {
 refreshDashboard();
 refreshEligible();
 setInterval(refreshDashboard, 5000);
-setInterval(refreshEligible, 30000);
+
+// eligible 列表跟随后端扫描节奏：检测 last_scan_time 变化才刷新
+let lastKnownScanTime = 0;
+setInterval(() => {
+    fetch('/api/eligible').then(r => r.json()).then(data => {
+        if (data.last_scan_time && data.last_scan_time !== lastKnownScanTime) {
+            lastKnownScanTime = data.last_scan_time;
+            refreshEligible();
+        }
+    });
+}, 10000);
 </script>
 {% endblock %}
