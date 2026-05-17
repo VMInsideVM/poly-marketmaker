@@ -195,8 +195,13 @@ def api_list_wallets():
 def api_add_wallet():
     data = request.get_json()
     private_key = data.get("private_key", "").strip()
+    # Remove non-ASCII characters (invisible Unicode, Chinese quotes, etc.)
+    private_key = private_key.encode("ascii", errors="ignore").decode("ascii").strip()
     if not private_key:
         return jsonify({"error": "请输入私钥"}), 400
+    # Ensure 0x prefix
+    if not private_key.startswith("0x"):
+        private_key = "0x" + private_key
 
     from api.polymarket_api import PolymarketAPI
 
