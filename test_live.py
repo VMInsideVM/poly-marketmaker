@@ -19,9 +19,22 @@ import hashlib
 def parse_end_date(s):
     if not s:
         return 0
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+    # 去掉末尾的时区偏移 (+00, +00:00, Z 等)
+    import re
+
+    # 匹配时间戳后的时区: +00, +00:00, +0000, Z
+    # 但不能误匹配日期中的 -01 (月/日)
+    s_clean = s.strip()
+    if s_clean.endswith("Z"):
+        s_clean = s_clean[:-1]
+    else:
+        # 只有在时间部分（含:）之后才去掉时区
+        m = re.search(r"(\d{2}:\d{2}:\d{2})[+-]\d{2}:?\d{0,2}$", s_clean)
+        if m:
+            s_clean = s_clean[: m.end(1)]
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(s, fmt).timestamp()
+            return datetime.strptime(s_clean, fmt).timestamp()
         except ValueError:
             continue
     return 0
@@ -193,7 +206,9 @@ def main():
         days_left = (end_ts - time.time()) / 86400 if end_ts else 0
 
         if days_left < min_days:
-            print(f"    ✗ 结算日期太近 ({days_left:.0f}天 < {min_days}天)")
+            print(
+                f"    ✗ 结算日期太近 ({days_left:.0f}天 < {min_days}天) end_date原始值: '{end_date_str}'"
+            )
             stats["date"] += 1
             continue
 

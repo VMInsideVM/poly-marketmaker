@@ -22,11 +22,21 @@ logger = logging.getLogger(__name__)
 
 def _parse_end_date(end_date_str: str) -> float:
     """Parse end_date string to Unix timestamp."""
+    import re
+
     if not end_date_str:
         return 0
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+    # 去掉末尾时区偏移 (+00, +00:00, Z 等)
+    s = end_date_str.strip()
+    if s.endswith("Z"):
+        s = s[:-1]
+    else:
+        m = re.search(r"(\d{2}:\d{2}:\d{2})[+-]\d{2}:?\d{0,2}$", s)
+        if m:
+            s = s[: m.end(1)]
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(end_date_str, fmt).timestamp()
+            return datetime.strptime(s, fmt).timestamp()
         except ValueError:
             continue
     return 0
