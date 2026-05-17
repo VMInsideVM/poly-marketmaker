@@ -20,7 +20,7 @@
     <thead>
         <tr>
             <th>钱包地址</th>
-            <th>余额 (USDC)</th>
+            <th>余额 (pUSD)</th>
             <th>挂单数</th>
             <th>持仓数</th>
             <th>状态</th>
@@ -37,7 +37,7 @@ function refreshDashboard() {
     fetch('/api/dashboard').then(r => r.json()).then(data => {
         document.getElementById('total-orders').textContent = data.total_orders;
         document.getElementById('total-positions').textContent = data.total_positions;
-        document.getElementById('total-pnl').textContent = (data.total_pnl || 0).toFixed(2) + ' USDC';
+        document.getElementById('total-pnl').textContent = (data.total_pnl || 0).toFixed(2) + ' pUSD';
         const tbody = document.getElementById('wallet-body');
         tbody.innerHTML = data.wallets.map(w => `
             <tr>

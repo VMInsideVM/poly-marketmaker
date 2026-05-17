@@ -4,6 +4,8 @@ import logging
 import requests
 from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
+    AssetType,
+    BalanceAllowanceParams,
     OrderArgs,
     OrderType,
     OrderPayload,
@@ -67,8 +69,9 @@ class PolymarketAPI:
     # --- Balance ---
 
     def get_balance(self) -> float:
-        """Get USDC balance for this wallet."""
-        bal = self.client.get_balance_allowance()
+        """Get pUSD (collateral) balance for this wallet."""
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        bal = self.client.get_balance_allowance(params)
         return float(bal.get("balance", 0))
 
     # --- Order Placement ---
