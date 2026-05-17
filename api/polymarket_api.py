@@ -184,6 +184,7 @@ class PolymarketAPI:
         max_spread: float = None,
         order_by: str = "rate_per_day",
         position: str = "DESC",
+        max_pages: int = 5,
     ) -> list[dict]:
         """Fetch markets with active rewards using GET /rewards/markets/multi.
 
@@ -236,7 +237,7 @@ class PolymarketAPI:
                     len(all_markets),
                 )
                 next_cursor = data.get("next_cursor", "LTE=")
-                if next_cursor == "LTE=" or not markets:
+                if next_cursor == "LTE=" or not markets or page >= max_pages:
                     break
         except Exception as e:
             logger.error("Failed to fetch rewards markets at page %d: %s", page, e)
