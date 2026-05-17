@@ -293,3 +293,73 @@ class PolymarketAPI:
         except Exception as e:
             logger.error("Failed to fetch current rewards: %s", e)
         return all_rewards
+
+    # --- Gamma API (market details) ---
+
+    @staticmethod
+    def get_market_by_id(market_id: str) -> dict:
+        """Get market details from Gamma API including end_date, tokens, etc.
+
+        Endpoint: GET https://gamma-api.polymarket.com/markets/{id}
+        """
+        try:
+            resp = requests.get(
+                f"https://gamma-api.polymarket.com/markets/{market_id}",
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error("Failed to get market %s from Gamma API: %s", market_id, e)
+            return {}
+
+    @staticmethod
+    def list_markets(**filters) -> list[dict]:
+        """List markets from Gamma API with filters.
+
+        Endpoint: GET https://gamma-api.polymarket.com/markets
+        Supports filters: active, closed, end_date_min, end_date_max, etc.
+        """
+        try:
+            resp = requests.get(
+                "https://gamma-api.polymarket.com/markets",
+                params=filters,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error("Failed to list markets from Gamma API: %s", e)
+            return []
+
+    # --- Per-market rewards ---
+
+    @staticmethod
+    def get_rewards_for_market(condition_id: str) -> list[dict]:
+        """Get raw rewards for a specific market.
+
+        Endpoint: GET /rewards/markets/{condition_id}
+        Returns per-token reward configs with rate_per_day.
+        """
+        all_data = []
+        next_cursor = ""
+        try:
+            while True:
+                params = {}
+                if next_cursor:
+                    params["next_cursor"] = next_cursor
+                resp = requests.get(
+                    f"{REWARDS_API}/rewards/markets/{condition_id}",
+                    params=params,
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                items = data.get("data", [])
+                all_data.extend(items)
+                next_cursor = data.get("next_cursor", "LTE=")
+                if next_cursor == "LTE=" or not items:
+                    break
+        except Exception as e:
+            logger.error("Failed to get rewards for market %s: %s", condition_id, e)
+        return all_data

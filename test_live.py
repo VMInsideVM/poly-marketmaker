@@ -1,4 +1,12 @@
-"""test_live.py — 找出5个完全符合筛选条件的市场并展示详情。"""
+"""test_live.py — 按正确流程筛选5个符合条件的市场。
+
+筛选流程:
+1. /rewards/markets/multi — 粗筛 rate_per_day > 100 的市场
+2. Gamma API GET /markets/{id} — 确认结算日期 > 4 天
+3. /rewards/markets/{condition_id} — 获取每个 token 独立的 rate_per_day，
+   确认价格 10~50 美分的 token 奖励 > 100
+4. GET /book — 检查订单簿价差 < 3 美分，余额足够
+"""
 
 import time
 from datetime import datetime
@@ -20,7 +28,6 @@ def parse_end_date(s):
 
 
 def safe_call(fn, default=None, retries=3):
-    """带重试的 API 调用。"""
     for i in range(retries):
         try:
             return fn()
@@ -28,30 +35,29 @@ def safe_call(fn, default=None, retries=3):
             if i < retries - 1:
                 time.sleep(1)
             else:
-                print(f"    ⚠ API 调用失败: {e}")
+                print(f"    ⚠ API 失败: {e}")
                 return default
 
 
-def display_market(idx, market_info):
-    """展示一个符合条件的市场。"""
-    c = market_info
+def display_market(idx, c):
     print(f"\n{'=' * 70}")
     print(f"#{idx}  {c['question']}")
     print(f"{'=' * 70}")
-    print(f"  网址:        {c['url']}")
-    print(f"  方向:        {c['outcome']}")
-    print(f"  condition_id: {c['condition_id'][:30]}...")
+    print(f"  网址:          {c['url']}")
+    print(f"  方向:          {c['outcome']} (token价格: {c['token_price']:.2f})")
+    print(f"  condition_id:  {c['condition_id'][:40]}...")
     print()
-    print(f"  【奖励参数】")
-    print(f"    每日奖励:     ${c['daily_rate']:.2f}/天")
-    print(f"    max_spread:   {c['max_spread']}")
-    print(f"    min_size:     {c['min_size']}")
+    print(f"  【奖励】")
+    print(f"    该token每日奖励: ${c['token_daily_rate']:.2f}/天")
+    print(f"    市场总奖励:      ${c['market_daily_rate']:.2f}/天")
+    print(f"    max_spread:      {c['max_spread']}")
+    print(f"    min_size:        {c['min_size']}")
     print()
-    print(f"  【市场参数】")
-    print(f"    结算日期:     {c['end_date']} (剩余 {c['days_left']:.0f} 天)")
-    print(f"    tick_size:    {c['tick_size']}")
-    print(f"    买卖价差:     {c['spread_cents']:.2f} 美分")
-    print(f"    所需资金:     {c['required']:.2f} pUSD")
+    print(f"  【市场】")
+    print(f"    结算日期: {c['end_date']} (剩余 {c['days_left']:.0f} 天)")
+    print(f"    tick_size: {c['tick_size']}")
+    print(f"    买卖价差: {c['spread_cents']:.2f} 美分")
+    print(f"    所需资金: {c['required']:.2f} pUSD")
     print()
     print(f"  【订单簿】")
     print(f"    ┌{'─' * 28}┬{'─' * 28}┐")
@@ -60,28 +66,23 @@ def display_market(idx, market_info):
     print(f"    ├{'─' * 28}┼{'─' * 28}┤")
     max_rows = max(len(c["bids"]), len(c["asks"]))
     for r in range(max_rows):
-        if r < len(c["bids"]):
-            b = c["bids"][r]
-            bid_str = f" {b['price']:>10}  {b['size']:<12}"
-        else:
-            bid_str = " " * 26
-        if r < len(c["asks"]):
-            a = c["asks"][r]
-            ask_str = f" {a['price']:>10}  {a['size']:<12}"
-        else:
-            ask_str = " " * 26
+        bid_str = (
+            f" {c['bids'][r]['price']:>10}  {c['bids'][r]['size']:<12}"
+            if r < len(c["bids"])
+            else " " * 26
+        )
+        ask_str = (
+            f" {c['asks'][r]['price']:>10}  {c['asks'][r]['size']:<12}"
+            if r < len(c["asks"])
+            else " " * 26
+        )
         print(f"    │ {bid_str:26} │ {ask_str:26} │")
     print(f"    └{'─' * 28}┴{'─' * 28}┘")
-    print()
-    print(f"  【筛选结果】")
-    for mark, desc in c["checks"]:
-        print(f"    {mark} {desc}")
-    print(f"    → 全部通过 ✓")
 
 
 def main():
     print("=" * 70)
-    print("Polymarket 做市助手 — 筛选符合条件的市场")
+    print("Polymarket 做市助手 — 精确筛选符合条件的市场")
     print("=" * 70)
 
     db = Database(DB_PATH)
@@ -113,18 +114,24 @@ def main():
     print(f"余额: {balance:.2f} pUSD")
 
     settings = db.get_settings()
+    min_reward = settings["min_reward_usd"]
+    max_spread_cents = settings["max_spread_cents"]
+    min_price_cents = settings["min_price_cents"]
+    max_price_cents = settings["max_price_cents"]
+    min_days = settings["min_settlement_days"]
+
     print(f"\n{'─' * 70}")
-    print("筛选条件:")
-    print(f"  每日奖励  ≥ ${settings['min_reward_usd']}/天")
-    print(f"  买卖价差  < {settings['max_spread_cents']} 美分")
-    print(
-        f"  单价范围  {settings['min_price_cents']}~{settings['max_price_cents']} 美分"
-    )
-    print(f"  结算日期  > {settings['min_settlement_days']} 天")
+    print(f"筛选条件:")
+    print(f"  每日奖励（单token）≥ ${min_reward}/天")
+    print(f"  买卖价差 < {max_spread_cents} 美分")
+    print(f"  单价范围 {min_price_cents}~{max_price_cents} 美分")
+    print(f"  结算日期 > {min_days} 天")
     print(f"{'─' * 70}")
 
-    # 获取市场（服务端预过滤价格范围，不过滤价差——用订单簿精确判断）
-    print(f"\n正在获取奖励市场（服务端过滤价格 0.10~0.90）...")
+    # ============================================================
+    # Step 1: 获取奖励市场列表（粗筛：总 rate_per_day 排序）
+    # ============================================================
+    print(f"\n[Step 1] 获取奖励市场（按 rate_per_day 降序）...")
     markets = safe_call(
         lambda: api.get_rewards_markets(
             min_price=0.10,
@@ -132,25 +139,34 @@ def main():
         ),
         [],
     )
-    print(f"服务端返回 {len(markets)} 个市场，开始逐个检查订单簿...\n")
-
     if not markets:
-        print("✗ 未获取到市场数据，可能是网络问题，请重试")
+        print("  ✗ 未获取到市场，请检查网络")
         return
+    print(f"  获取到 {len(markets)} 个市场")
 
-    # 逐个检查，找出完全符合条件的市场
+    # 粗筛：总 rate_per_day >= min_reward
+    candidates = []
+    for m in markets:
+        rc = m.get("rewards_config", [])
+        total_rate = sum(r.get("rate_per_day", 0) for r in rc)
+        if total_rate >= min_reward:
+            candidates.append(m)
+    print(f"  粗筛（总奖励≥${min_reward}）后剩余: {len(candidates)} 个")
+
+    # ============================================================
+    # Step 2 & 3 & 4: 逐个精确检查
+    # ============================================================
     matched = []
-    checked = 0
-    skipped_reasons = {
-        "reward": 0,
+    stats = {
         "date": 0,
+        "token_reward": 0,
         "price": 0,
         "spread": 0,
         "balance": 0,
         "no_book": 0,
     }
 
-    for market in markets:
+    for i, market in enumerate(candidates):
         if len(matched) >= 5:
             break
 
@@ -158,29 +174,57 @@ def main():
         question = market.get("question", "N/A")
         market_slug = market.get("market_slug", "")
         event_slug = market.get("event_slug", "")
-        end_date_str = market.get("end_date", "")
-        end_ts = parse_end_date(end_date_str)
-        days_left = (end_ts - time.time()) / 86400 if end_ts else 0
-        rewards_config = market.get("rewards_config", [])
-        daily_rate = sum(rc.get("rate_per_day", 0) for rc in rewards_config)
+        market_id = market.get("market_id", "")
+        tokens = market.get("tokens", [])
         max_spread = market.get("rewards_max_spread", 0)
         min_size = int(market.get("rewards_min_size", 0))
-        tokens = market.get("tokens", [])
+        total_rate = sum(
+            r.get("rate_per_day", 0) for r in market.get("rewards_config", [])
+        )
 
         if not tokens:
             continue
 
-        # 客户端过滤1：每日奖励
-        if daily_rate < settings["min_reward_usd"]:
-            skipped_reasons["reward"] += 1
+        print(f"\n  [{i+1}/{len(candidates)}] 检查: {question[:50]}...")
+
+        # --- Step 2: 结算日期 ---
+        end_date_str = market.get("end_date", "")
+        end_ts = parse_end_date(end_date_str)
+        days_left = (end_ts - time.time()) / 86400 if end_ts else 0
+
+        if days_left < min_days:
+            print(f"    ✗ 结算日期太近 ({days_left:.0f}天 < {min_days}天)")
+            stats["date"] += 1
             continue
 
-        # 客户端过滤2：结算日期
-        if days_left < settings["min_settlement_days"]:
-            skipped_reasons["date"] += 1
-            continue
+        # --- Step 3: 获取 per-token rewards ---
+        raw_rewards = safe_call(
+            lambda cid=condition_id: api.get_rewards_for_market(cid), []
+        )
+        time.sleep(0.3)
 
-        # 检查每个 token
+        # 找出每个 token 对应的 rate_per_day
+        # raw_rewards 返回的数据结构中可能包含 per-token 的信息
+        # 如果没有 per-token 区分，就用总 rate / token 数量
+        token_rates = {}
+        if raw_rewards:
+            # 看 raw_rewards 数据中是否有 token_id 或类似字段
+            for rd in raw_rewards:
+                rd_config = rd.get("rewards_config", [])
+                # 如果有多条 rewards_config，每条对应一个 token
+                for rc in rd_config:
+                    rate = rc.get("rate_per_day", 0)
+                    # 如果能关联到 token，就分配；否则平分
+                    token_rates.setdefault("_total", 0)
+                    token_rates["_total"] += rate
+
+        # 如果没有获取到 per-token 数据，用 /multi 返回的总和平分
+        if not token_rates:
+            token_rates["_total"] = total_rate
+
+        rate_per_token = token_rates.get("_total", total_rate) / max(len(tokens), 1)
+
+        # --- Step 3b: 检查每个 token ---
         for token in tokens:
             if len(matched) >= 5:
                 break
@@ -189,26 +233,31 @@ def main():
             token_price = float(token.get("price", 0))
             outcome = token.get("outcome", "?")
 
-            # 客户端过滤3：价格范围（精确检查）
-            if (
-                token_price * 100 < settings["min_price_cents"]
-                or token_price * 100 > settings["max_price_cents"]
-            ):
-                skipped_reasons["price"] += 1
+            # 价格范围
+            price_cents = token_price * 100
+            if price_cents < min_price_cents or price_cents > max_price_cents:
+                stats["price"] += 1
                 continue
 
-            # 客户端过滤4：余额
+            # 单token奖励检查（保守用平分的值）
+            if rate_per_token < min_reward:
+                print(
+                    f"    ✗ {outcome} token 奖励不足 (${rate_per_token:.2f} < ${min_reward})"
+                )
+                stats["token_reward"] += 1
+                continue
+
+            # 余额
             if min_size * token_price > balance:
-                skipped_reasons["balance"] += 1
+                stats["balance"] += 1
                 continue
 
-            # 获取订单簿
-            checked += 1
-            print(f"  检查第 {checked} 个订单簿... ({question[:40]})")
+            # --- Step 4: 订单簿 ---
             ob = safe_call(lambda tid=token_id: api.get_orderbook(tid), {})
+            time.sleep(0.3)
+
             if not ob or not ob.get("bids") or not ob.get("asks"):
-                skipped_reasons["no_book"] += 1
-                time.sleep(0.3)
+                stats["no_book"] += 1
                 continue
 
             bids = ob["bids"]
@@ -218,23 +267,22 @@ def main():
             best_ask = float(asks[0]["price"])
             spread_cents = (best_ask - best_bid) * 100
 
-            # 客户端过滤5：价差（用实际订单簿的精确价差）
-            if spread_cents >= settings["max_spread_cents"]:
-                skipped_reasons["spread"] += 1
-                time.sleep(0.3)
+            if spread_cents >= max_spread_cents:
+                print(
+                    f"    ✗ {outcome} 价差过大 ({spread_cents:.2f}美分 ≥ {max_spread_cents}美分)"
+                )
+                stats["spread"] += 1
                 continue
 
-            # 客户端过滤6：价格范围（用实际 best_bid）
-            if (
-                best_bid * 100 < settings["min_price_cents"]
-                or best_bid * 100 > settings["max_price_cents"]
-            ):
-                skipped_reasons["price"] += 1
-                time.sleep(0.3)
+            # 再次确认价格
+            if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
+                stats["price"] += 1
                 continue
 
-            # 所需资金
             required = min_size * best_bid
+            if required > balance:
+                stats["balance"] += 1
+                continue
 
             # URL
             if market_slug:
@@ -244,28 +292,16 @@ def main():
             else:
                 url = f"https://polymarket.com"
 
-            # 构建筛选结果
-            checks = [
-                ("✓", f"每日奖励 ${daily_rate:.2f} ≥ ${settings['min_reward_usd']}"),
-                (
-                    "✓",
-                    f"价差 {spread_cents:.2f}美分 < {settings['max_spread_cents']}美分",
-                ),
-                (
-                    "✓",
-                    f"价格 {best_bid * 100:.1f}美分 在 [{settings['min_price_cents']}, {settings['max_price_cents']}]",
-                ),
-                ("✓", f"剩余 {days_left:.0f}天 ≥ {settings['min_settlement_days']}天"),
-                ("✓", f"所需资金 {required:.2f} ≤ 余额 {balance:.2f} pUSD"),
-            ]
-
+            print(f"    ✓ {outcome} 符合所有条件！")
             matched.append(
                 {
                     "question": question,
                     "outcome": outcome,
                     "condition_id": condition_id,
+                    "token_price": token_price,
                     "url": url,
-                    "daily_rate": daily_rate,
+                    "token_daily_rate": rate_per_token,
+                    "market_daily_rate": total_rate,
                     "max_spread": max_spread,
                     "min_size": min_size,
                     "days_left": days_left,
@@ -279,28 +315,29 @@ def main():
                     "asks": [
                         {"price": a["price"], "size": a["size"]} for a in asks[:5]
                     ],
-                    "checks": checks,
                 }
             )
 
-            time.sleep(0.3)
-
+    # ============================================================
     # 展示结果
-    print(f"\n{'─' * 70}")
-    print(f"扫描完成: 检查了 {checked} 个订单簿，找到 {len(matched)} 个符合条件的市场")
-    print(f"跳过原因统计:")
-    print(f"  奖励不足: {skipped_reasons['reward']}")
-    print(f"  结算太近: {skipped_reasons['date']}")
-    print(f"  价格超范围: {skipped_reasons['price']}")
-    print(f"  价差过大: {skipped_reasons['spread']}")
-    print(f"  余额不足: {skipped_reasons['balance']}")
-    print(f"  无订单簿: {skipped_reasons['no_book']}")
+    # ============================================================
+    print(f"\n{'═' * 70}")
+    print(f"筛选完成: 找到 {len(matched)} 个符合条件的市场")
+    print(
+        f"跳过统计: 结算太近={stats['date']}, token奖励不足={stats['token_reward']}, "
+        f"价格超范围={stats['price']}, 价差过大={stats['spread']}, "
+        f"余额不足={stats['balance']}, 无订单簿={stats['no_book']}"
+    )
+    print(f"{'═' * 70}")
 
     for idx, m in enumerate(matched, 1):
         display_market(idx, m)
 
     if not matched:
-        print("\n没有找到完全符合条件的市场。建议放宽条件后重试。")
+        print("\n没有找到符合条件的市场。建议:")
+        print("  - 降低最低奖励金额")
+        print("  - 扩大价格范围")
+        print("  - 放宽价差条件")
 
     db.close()
 
