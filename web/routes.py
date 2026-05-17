@@ -31,6 +31,7 @@ app.secret_key = os.urandom(32)
 db: Database = None
 manager: EngineManager = None
 encryption_key: bytes = None
+_api_cache: dict = {}  # Cache PolymarketAPI instances by address
 
 
 def init_app(database: Database):
@@ -46,6 +47,19 @@ def init_manager(mgr: EngineManager):
 def set_encryption_key(key: bytes):
     global encryption_key
     encryption_key = key
+
+
+def _get_cached_api(address: str, encrypted_key: str):
+    """Get or create a cached PolymarketAPI instance for balance queries."""
+    if address in _api_cache:
+        return _api_cache[address]
+    from utils.crypto import decrypt
+    from api.polymarket_api import PolymarketAPI
+
+    pk = decrypt(encrypted_key, encryption_key)
+    api = PolymarketAPI(pk)
+    _api_cache[address] = api
+    return api
 
 
 def login_required(f):
@@ -186,15 +200,9 @@ def api_list_wallets():
                 except Exception:
                     pass
             elif encrypted_key and encryption_key:
-                # Engine not running, but still try to fetch balance
                 try:
-                    from utils.crypto import decrypt
-
-                    pk = decrypt(encrypted_key, encryption_key)
-                    from api.polymarket_api import PolymarketAPI
-
-                    tmp_api = PolymarketAPI(pk)
-                    w["balance"] = tmp_api.get_balance()
+                    api = _get_cached_api(w["address"], encrypted_key)
+                    w["balance"] = api.get_balance()
                 except Exception:
                     pass
     return jsonify(wallets)
@@ -413,13 +421,8 @@ def api_dashboard():
                     pass
             elif not running and encryption_key:
                 try:
-                    from utils.crypto import decrypt
-
-                    pk = decrypt(w["encrypted_key"], encryption_key)
-                    from api.polymarket_api import PolymarketAPI
-
-                    tmp_api = PolymarketAPI(pk)
-                    balance = tmp_api.get_balance()
+                    api = _get_cached_api(w["address"], w["encrypted_key"])
+                    balance = api.get_balance()
                 except Exception:
                     pass
         wallet_summaries.append(
