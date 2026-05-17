@@ -29,6 +29,23 @@
     </thead>
     <tbody id="wallet-body"></tbody>
 </table>
+
+<h2>符合条件的市场 (Eligible Markets)</h2>
+<p id="scan-time" style="color:#888; font-size:13px;"></p>
+<table class="data-table" id="eligible-table">
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>市场名称</th>
+            <th>方向</th>
+            <th>每日奖励</th>
+            <th>挂单价格</th>
+            <th>挂单数量</th>
+            <th>Competitiveness</th>
+        </tr>
+    </thead>
+    <tbody id="eligible-body"></tbody>
+</table>
 {% endblock %}
 
 {% block scripts %}
@@ -73,7 +90,34 @@ function walletAction(address, action) {
     });
 }
 
+function refreshEligible() {
+    fetch('/api/eligible').then(r => r.json()).then(data => {
+        const markets = data.markets || [];
+        const scanTime = data.last_scan_time;
+        if (scanTime) {
+            document.getElementById('scan-time').textContent =
+                `上次扫描: ${new Date(scanTime * 1000).toLocaleString('zh-CN')} (共 ${markets.length} 个)`;
+        } else {
+            document.getElementById('scan-time').textContent = '尚未扫描';
+        }
+        const tbody = document.getElementById('eligible-body');
+        tbody.innerHTML = markets.map((m, i) => `
+            <tr>
+                <td>${i + 1}</td>
+                <td title="${m.market_id}">${m.market_name}</td>
+                <td>${m.outcome}</td>
+                <td>$${m.daily_reward.toFixed(2)}/天</td>
+                <td>${m.order_price.toFixed(4)}</td>
+                <td>${m.order_size}</td>
+                <td>${m.market_competitiveness || '-'}</td>
+            </tr>
+        `).join('');
+    });
+}
+
 refreshDashboard();
+refreshEligible();
 setInterval(refreshDashboard, 5000);
+setInterval(refreshEligible, 30000);
 </script>
 {% endblock %}

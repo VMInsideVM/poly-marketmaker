@@ -393,6 +393,23 @@ def api_get_history():
     return jsonify(trades)
 
 
+# --- API: Eligible Markets ---
+
+
+@app.route("/api/eligible", methods=["GET"])
+@login_required
+def api_eligible_markets():
+    """Get the latest list of eligible markets from the shared scanner."""
+    if not manager:
+        return jsonify({"markets": [], "last_scan_time": 0})
+    return jsonify(
+        {
+            "markets": manager.eligible_markets,
+            "last_scan_time": manager.last_scan_time,
+        }
+    )
+
+
 # --- API: Dashboard Summary ---
 
 

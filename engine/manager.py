@@ -189,6 +189,8 @@ class EngineManager:
         self._scanner_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._scanner_api: PolymarketAPI | None = None  # Shared API for scanning
+        self.eligible_markets: list[dict] = []  # Latest scan results
+        self.last_scan_time: float = 0
 
     def start_all(self):
         """Start all wallet workers + shared scanner."""
@@ -261,9 +263,13 @@ class EngineManager:
 
     def _do_scan(self):
         """Run one scan cycle: find eligible markets, distribute to wallets."""
+        import time as _time
+
         # Use shared API for market scanning (no wallet-specific data needed)
         scanner = MarketScanner(self._scanner_api, self.db, "")
         eligible = scanner.scan()
+        self.eligible_markets = eligible
+        self.last_scan_time = _time.time()
         logger.info("Scanner found %d eligible markets", len(eligible))
 
         # Also get raw rewards markets for existing-order checks

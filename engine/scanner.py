@@ -177,6 +177,9 @@ class MarketScanner:
                         "token_id": token_id,
                         "market_name": market.get("question", ""),
                         "outcome": token.get("outcome", ""),
+                        "market_competitiveness": market.get(
+                            "market_competitiveness", 0
+                        ),
                         "end_date": end_date_str,
                         "daily_reward": market_reward,
                         "rewards_max_spread": max_spread_reward,
