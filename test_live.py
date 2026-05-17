@@ -380,6 +380,11 @@ def main():
     print(f"{'═' * 70}")
 
     if matched:
+        # 按 market_competitiveness 降序排序
+        matched.sort(
+            key=lambda x: float(x.get("market_competitiveness", 0) or 0), reverse=True
+        )
+
         # 汇总表格
         print(f"\n{'─' * 120}")
         print(
