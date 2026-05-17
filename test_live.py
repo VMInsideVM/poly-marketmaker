@@ -179,14 +179,12 @@ def main():
     }
 
     for i, market in enumerate(candidates):
-        if len(matched) >= 5:
-            break
-
         condition_id = market.get("condition_id", "")
         question = market.get("question", "N/A")
         market_slug = market.get("market_slug", "")
         event_slug = market.get("event_slug", "")
         market_id = market.get("market_id", "")
+        market_competitiveness = market.get("market_competitiveness", "N/A")
         tokens = market.get("tokens", [])
         max_spread = market.get("rewards_max_spread", 0)
         min_size = int(market.get("rewards_min_size", 0))
@@ -204,9 +202,10 @@ def main():
         end_ts = parse_end_date(end_date_str)
         days_left = (end_ts - time.time()) / 86400 if end_ts else 0
 
-        if days_left < min_days:
+        # 只排除 0~4 天之间的市场，负数（解析失败或无限期）算通过
+        if 0 <= days_left < min_days:
             print(
-                f"    ✗ 结算日期太近 ({days_left:.0f}天 < {min_days}天) end_date原始值: '{end_date_str}'"
+                f"    ✗ 结算日期太近 ({days_left:.0f}天，在0~{min_days}天之间) end_date原始值: '{end_date_str}'"
             )
             stats["date"] += 1
             continue
@@ -279,11 +278,8 @@ def main():
             stats["price"] += 1
             continue
 
-        # 对每个符合价格的 token 检查订单簿
+        # 对每个符合价格的 token 检查订单簿（只要一个符合就行）
         for token in valid_tokens:
-            if len(matched) >= 5:
-                break
-
             token_id = token.get("token_id", "")
             token_price = float(token.get("price", 0))
             outcome = token.get("outcome", "?")
@@ -316,13 +312,17 @@ def main():
                 stats["no_book"] += 1
                 continue
 
-            bids = ob["bids"]
-            asks = ob["asks"]
+            bids = sorted(
+                ob["bids"], key=lambda x: float(x["price"]), reverse=True
+            )  # 降序，买一在前
+            asks = sorted(ob["asks"], key=lambda x: float(x["price"]))  # 升序，卖一在前
             tick_size = ob.get("tick_size", "0.01")
-            best_bid = float(bids[0]["price"])
-            best_ask = float(asks[0]["price"])
+            best_bid = float(bids[0]["price"])  # 买一（最高买价）
+            best_ask = float(asks[0]["price"])  # 卖一（最低卖价）
 
-            print(f"    {outcome} orderbook: bid1={bids[0]}, ask1={asks[0]}")
+            print(
+                f"    {outcome} 买一={bids[0]}, 卖一={asks[0]}, 价差={( best_ask - best_bid) * 100:.2f}美分"
+            )
 
             # 确认价格（用实际 best_bid）
             if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
@@ -345,6 +345,8 @@ def main():
                     "question": question,
                     "outcome": outcome,
                     "condition_id": condition_id,
+                    "token_id": token_id,
+                    "market_competitiveness": market_competitiveness,
                     "token_price": token_price,
                     "url": url,
                     "market_daily_rate": market_reward,
@@ -363,6 +365,7 @@ def main():
                     ],
                 }
             )
+            break  # 该 market 已找到一个符合的 token，不再检查其他 token
 
     # ============================================================
     # 展示结果
@@ -376,10 +379,23 @@ def main():
     )
     print(f"{'═' * 70}")
 
-    for idx, m in enumerate(matched, 1):
-        display_market(idx, m)
+    if matched:
+        # 汇总表格
+        print(f"\n{'─' * 120}")
+        print(
+            f"{'#':<4} {'Market Name':<40} {'Condition ID':<68} {'Token ID':<80} {'Competitiveness':<16}"
+        )
+        print(f"{'─' * 120}")
+        for idx, m in enumerate(matched, 1):
+            print(
+                f"{idx:<4} {m['question']:<40} {m['condition_id']:<68} {m['token_id']:<80} {m['market_competitiveness']}"
+            )
+        print(f"{'─' * 120}")
 
-    if not matched:
+        # 详细展示
+        for idx, m in enumerate(matched, 1):
+            display_market(idx, m)
+    else:
         print("\n没有找到符合条件的市场。建议:")
         print("  - 降低最低奖励金额")
         print("  - 扩大价格范围")
