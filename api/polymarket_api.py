@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 POLYMARKET_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
 
-# Rewards API base — public endpoint
-REWARDS_API = "https://data-api.polymarket.com"
+# Rewards API is part of the CLOB API
+REWARDS_API = POLYMARKET_HOST
 
 
 class PolymarketAPI:
@@ -103,26 +103,72 @@ class PolymarketAPI:
         """Get trade history for this wallet."""
         return self.client.get_trades()
 
-    # --- Rewards (public API) ---
+    # --- Rewards (CLOB API - public endpoints) ---
 
     @staticmethod
     def get_rewards_markets() -> list[dict]:
-        """Fetch all markets with active rewards from Polymarket data API."""
+        """Fetch all markets with active rewards using /rewards/markets/multi.
+
+        Uses the CLOB endpoint GET /rewards/markets/multi which returns
+        markets with reward configs, token info, spread, end_date, etc.
+
+        Returns normalized list of dicts with keys:
+          - market_id, condition_id, question, end_date
+          - tokens: [{token_id, outcome, price}, ...]
+          - rewards_max_spread, rewards_min_size
+          - rewards_config: [{rate_per_day, total_rewards, end_date, ...}, ...]
+          - spread, volume_24hr
+        """
+        all_markets = []
+        next_cursor = ""
         try:
-            resp = requests.get(f"{REWARDS_API}/rewards/markets", timeout=30)
-            resp.raise_for_status()
-            return resp.json()
+            while True:
+                params = {"page_size": 500}
+                if next_cursor:
+                    params["next_cursor"] = next_cursor
+                resp = requests.get(
+                    f"{REWARDS_API}/rewards/markets/multi",
+                    params=params,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                markets = data.get("data", [])
+                all_markets.extend(markets)
+                next_cursor = data.get("next_cursor", "LTE=")
+                if next_cursor == "LTE=" or not markets:
+                    break
         except Exception as e:
             logger.error("Failed to fetch rewards markets: %s", e)
-            return []
+        return all_markets
 
     @staticmethod
-    def get_market_info(market_id: str) -> dict:
-        """Get detailed market info including settlement date."""
+    def get_rewards_current() -> list[dict]:
+        """Fetch current active rewards configurations using /rewards/markets/current.
+
+        Returns list of dicts with keys:
+          - condition_id, rewards_max_spread, rewards_min_size
+          - rewards_config: [{rate_per_day, total_rewards, ...}, ...]
+        """
+        all_rewards = []
+        next_cursor = ""
         try:
-            resp = requests.get(f"{REWARDS_API}/markets/{market_id}", timeout=15)
-            resp.raise_for_status()
-            return resp.json()
+            while True:
+                params = {}
+                if next_cursor:
+                    params["next_cursor"] = next_cursor
+                resp = requests.get(
+                    f"{REWARDS_API}/rewards/markets/current",
+                    params=params,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                rewards = data.get("data", [])
+                all_rewards.extend(rewards)
+                next_cursor = data.get("next_cursor", "LTE=")
+                if next_cursor == "LTE=" or not rewards:
+                    break
         except Exception as e:
-            logger.error("Failed to fetch market info for %s: %s", market_id, e)
-            return {}
+            logger.error("Failed to fetch current rewards: %s", e)
+        return all_rewards
