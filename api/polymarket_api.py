@@ -129,7 +129,7 @@ class PolymarketAPI:
     ) -> dict:
         """Place a market sell order (FOK).
 
-        Uses MarketOrderArgsV2 with amount (USDC value to sell).
+        Uses MarketOrderArgsV2 with amount (pUSD value to sell).
         """
         market_args = MarketOrderArgsV2(
             token_id=token_id,
