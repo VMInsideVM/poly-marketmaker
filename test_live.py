@@ -1,23 +1,11 @@
-"""test_live.py — 展示5个奖励市场的完整参数，验证筛选逻辑。"""
+"""test_live.py — 用 Gamma API + CLOB API 组合筛选，找出5个符合条件的市场。"""
 
 import time
-import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from models.database import Database
 from utils.crypto import decrypt, derive_key
 from config import DB_PATH
 import hashlib
-
-
-def parse_end_date(s):
-    if not s:
-        return 0
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(s, fmt).timestamp()
-        except ValueError:
-            continue
-    return 0
 
 
 def safe_call(fn, default=None, retries=3):
@@ -33,9 +21,54 @@ def safe_call(fn, default=None, retries=3):
                 return default
 
 
+def display_market(idx, c):
+    """展示一个符合条件的市场。"""
+    print(f"\n{'=' * 70}")
+    print(f"#{idx}  {c['question']}")
+    print(f"{'=' * 70}")
+    print(f"  网址:        {c['url']}")
+    print(f"  方向:        {c['outcome']}")
+    print()
+    print(f"  【奖励参数】")
+    print(f"    每日奖励:     ${c['daily_rate']:.2f}/天")
+    print(f"    max_spread:   {c['max_spread']}")
+    print(f"    min_size:     {c['min_size']}")
+    print()
+    print(f"  【市场参数】")
+    print(f"    结算日期:     {c['end_date']} (剩余 {c['days_left']:.0f} 天)")
+    print(f"    tick_size:    {c['tick_size']}")
+    print(f"    买卖价差:     {c['spread_cents']:.2f} 美分")
+    print(f"    所需资金:     {c['required']:.2f} pUSD")
+    print()
+    print(f"  【订单簿】")
+    print(f"    ┌{'─' * 28}┬{'─' * 28}┐")
+    print(f"    │ {'买盘 (Bids)':^26} │ {'卖盘 (Asks)':^26} │")
+    print(f"    │ {'价格':>10}  {'数量':<12} │ {'价格':>10}  {'数量':<12} │")
+    print(f"    ├{'─' * 28}┼{'─' * 28}┤")
+    max_rows = max(len(c["bids"]), len(c["asks"]))
+    for r in range(max_rows):
+        if r < len(c["bids"]):
+            b = c["bids"][r]
+            bid_str = f" {b['price']:>10}  {b['size']:<12}"
+        else:
+            bid_str = " " * 26
+        if r < len(c["asks"]):
+            a = c["asks"][r]
+            ask_str = f" {a['price']:>10}  {a['size']:<12}"
+        else:
+            ask_str = " " * 26
+        print(f"    │ {bid_str:26} │ {ask_str:26} │")
+    print(f"    └{'─' * 28}┴{'─' * 28}┘")
+    print()
+    print(f"  【筛选结果】")
+    for mark, desc in c["checks"]:
+        print(f"    {mark} {desc}")
+    print(f"    → 全部通过 ✓")
+
+
 def main():
     print("=" * 70)
-    print("Polymarket 做市助手 — 市场参数展示（5个市场）")
+    print("Polymarket 做市助手 — 市场筛选（Gamma + CLOB 组合）")
     print("=" * 70)
 
     db = Database(DB_PATH)
@@ -66,189 +99,237 @@ def main():
     print(f"\n钱包: {api.get_address()}")
     print(f"余额: {balance:.2f} pUSD")
 
-    # 筛选条件
     settings = db.get_settings()
     print(f"\n{'─' * 70}")
-    print("当前筛选条件:")
-    print(f"  最低奖励 (rate_per_day)  ≥ {settings['min_reward_usd']} USD/天")
-    print(f"  买卖价差上限            < {settings['max_spread_cents']} 美分")
+    print("筛选条件:")
+    print(f"  每日奖励  ≥ ${settings['min_reward_usd']}/天")
+    print(f"  买卖价差  < {settings['max_spread_cents']} 美分")
     print(
-        f"  单价范围                {settings['min_price_cents']}~{settings['max_price_cents']} 美分"
+        f"  单价范围  {settings['min_price_cents']}~{settings['max_price_cents']} 美分"
     )
-    print(f"  结算日期                > {settings['min_settlement_days']} 天")
+    print(f"  结算日期  > {settings['min_settlement_days']} 天")
+    print(f"{'─' * 70}")
 
-    # 获取市场（服务端预过滤价格和价差）
-    print(f"\n正在获取奖励市场（服务端预过滤）...")
-    markets = safe_call(
+    # ===== Step 1: Gamma API 精确筛选 =====
+    min_end_date = (
+        datetime.now() + timedelta(days=settings["min_settlement_days"])
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(
+        f"\n[Step 1] Gamma API 筛选 (end_date > {min_end_date[:10]}, closed=false)..."
+    )
+    gamma_markets = safe_call(
+        lambda: api.list_markets(
+            end_date_min=min_end_date,
+            closed=False,
+            limit=200,
+        ),
+        [],
+    )
+    print(f"  Gamma 返回 {len(gamma_markets)} 个市场")
+
+    if not gamma_markets:
+        print("✗ Gamma API 未返回数据")
+        return
+
+    # 构建 condition_id -> Gamma 市场数据 的映射
+    gamma_by_condition = {}
+    for gm in gamma_markets:
+        cid = gm.get("conditionId", "")
+        if cid:
+            gamma_by_condition[cid] = gm
+
+    # ===== Step 2: CLOB API 获取奖励数据 =====
+    print(
+        f"\n[Step 2] CLOB API 获取奖励市场 (按 rate_per_day 降序, 价格 {settings['min_price_cents']/100}~{settings['max_price_cents']/100})..."
+    )
+    clob_markets = safe_call(
         lambda: api.get_rewards_markets(
             min_price=settings["min_price_cents"] / 100,
             max_price=settings["max_price_cents"] / 100,
             max_spread=settings["max_spread_cents"] / 100,
+            max_pages=3,
         ),
         [],
     )
-    print(f"共获取 {len(markets)} 个奖励市场\n")
+    print(f"  CLOB 返回 {len(clob_markets)} 个奖励市场")
 
-    if not markets:
-        print("✗ 未获取到市场数据")
+    if not clob_markets:
+        print("✗ CLOB API 未返回数据")
         return
 
-    # 取前5个市场展示
-    count = 0
-    for market in markets:
-        if count >= 5:
+    # ===== Step 3: 交叉匹配 + 订单簿检查 =====
+    print(f"\n[Step 3] 交叉匹配并检查订单簿...\n")
+
+    matched = []
+    checked = 0
+    skip_reasons = {
+        "no_gamma": 0,
+        "reward": 0,
+        "price": 0,
+        "balance": 0,
+        "spread": 0,
+        "no_book": 0,
+    }
+
+    for market in clob_markets:
+        if len(matched) >= 5:
             break
 
+        condition_id = market.get("condition_id", "")
         question = market.get("question", "N/A")
-        condition_id = market.get("condition_id", "N/A")
         market_slug = market.get("market_slug", "")
         end_date_str = market.get("end_date", "")
-        end_ts = parse_end_date(end_date_str)
-        days_left = (end_ts - time.time()) / 86400 if end_ts else 0
         rewards_config = market.get("rewards_config", [])
         daily_rate = sum(rc.get("rate_per_day", 0) for rc in rewards_config)
-        total_rewards = sum(rc.get("total_rewards", 0) for rc in rewards_config)
-        max_spread = market.get("rewards_max_spread", "N/A")
-        min_size = market.get("rewards_min_size", "N/A")
+        max_spread = market.get("rewards_max_spread", 0)
+        min_size = int(market.get("rewards_min_size", 0))
         tokens = market.get("tokens", [])
+
+        # 交叉验证：必须在 Gamma 结果中（即满足 end_date > min_days）
+        if condition_id not in gamma_by_condition:
+            skip_reasons["no_gamma"] += 1
+            continue
+
+        # 奖励筛选
+        if daily_rate < settings["min_reward_usd"]:
+            skip_reasons["reward"] += 1
+            continue
+
+        gamma_data = gamma_by_condition[condition_id]
+        gamma_slug = gamma_data.get("slug", "")
 
         if not tokens:
             continue
 
-        token = tokens[0]  # 只看第一个token
-        token_id = token.get("token_id", "")
-        token_price = float(token.get("price", 0))
-        outcome = token.get("outcome", "?")
+        for token in tokens:
+            if len(matched) >= 5:
+                break
 
-        # 获取订单簿
-        ob = safe_call(lambda tid=token_id: api.get_orderbook(tid), {})
-        if not ob:
-            continue
+            token_id = token.get("token_id", "")
+            token_price = float(token.get("price", 0))
+            outcome = token.get("outcome", "?")
 
-        bids = ob.get("bids", [])
-        asks = ob.get("asks", [])
-        tick_size = ob.get("tick_size", "N/A")
+            # 价格范围
+            if (
+                token_price * 100 < settings["min_price_cents"]
+                or token_price * 100 > settings["max_price_cents"]
+            ):
+                skip_reasons["price"] += 1
+                continue
 
-        best_bid = float(bids[0]["price"]) if bids else 0
-        best_ask = float(asks[0]["price"]) if asks else 0
-        spread_cents = (best_ask - best_bid) * 100 if best_bid and best_ask else 0
+            # 余额
+            if min_size * token_price > balance:
+                skip_reasons["balance"] += 1
+                continue
 
-        # URL
-        url = (
-            f"https://polymarket.com/market/{market_slug}"
-            if market_slug
-            else f"https://polymarket.com"
-        )
+            # 订单簿
+            checked += 1
+            print(f"  [{checked}] 检查: {question[:45]}... ({outcome})")
+            ob = safe_call(lambda tid=token_id: api.get_orderbook(tid), {})
+            if not ob or not ob.get("bids") or not ob.get("asks"):
+                skip_reasons["no_book"] += 1
+                time.sleep(0.3)
+                continue
 
-        count += 1
-        print(f"{'=' * 70}")
-        print(f"市场 #{count}: {question}")
-        print(f"{'=' * 70}")
-        print(f"  网址:        {url}")
-        print(f"  condition_id: {condition_id[:30]}...")
-        print(f"  方向:        {outcome}")
-        print(f"  token价格:   {token_price}")
-        print(f"")
+            bids = ob["bids"]
+            asks = ob["asks"]
+            tick_size = ob.get("tick_size", "0.01")
+            best_bid = float(bids[0]["price"])
+            best_ask = float(asks[0]["price"])
+            spread_cents = (best_ask - best_bid) * 100
 
-        # 奖励参数
-        print(f"  【奖励参数】")
-        print(f"    每日奖励:     ${daily_rate:.2f}/天")
-        print(f"    总奖励:       ${total_rewards:.2f}")
-        print(f"    max_spread:   {max_spread}")
-        print(f"    min_size:     {min_size}")
-        print(f"    rewards_config 原始数据:")
-        for rc in rewards_config:
-            print(f"      {rc}")
-        print(f"")
+            # 价差
+            if spread_cents >= settings["max_spread_cents"]:
+                skip_reasons["spread"] += 1
+                time.sleep(0.3)
+                continue
 
-        # 市场参数
-        print(f"  【市场参数】")
-        print(f"    结算日期:     {end_date_str} (剩余 {days_left:.0f} 天)")
-        print(f"    tick_size:    {tick_size}")
-        print(f"    当前价差:     {spread_cents:.2f} 美分")
-        print(f"")
+            # 实际价格范围
+            if (
+                best_bid * 100 < settings["min_price_cents"]
+                or best_bid * 100 > settings["max_price_cents"]
+            ):
+                skip_reasons["price"] += 1
+                time.sleep(0.3)
+                continue
 
-        # 订单簿
-        print(f"  【订单簿】")
-        print(f"    ┌{'─' * 28}┬{'─' * 28}┐")
-        print(f"    │ {'买盘 (Bids)':^26} │ {'卖盘 (Asks)':^26} │")
-        print(f"    │ {'价格':>10}  {'数量':<12} │ {'价格':>10}  {'数量':<12} │")
-        print(f"    ├{'─' * 28}┼{'─' * 28}┤")
-        max_rows = max(len(bids[:5]), len(asks[:5]))
-        for r in range(max_rows):
-            if r < len(bids):
-                bid_str = f" {bids[r]['price']:>10}  {bids[r]['size']:<12}"
+            required = min_size * best_bid
+
+            # Gamma end_date (更可靠)
+            gamma_end = gamma_data.get("endDate", end_date_str)
+            days_left = 0
+            try:
+                if gamma_end:
+                    end_dt = datetime.fromisoformat(gamma_end.replace("Z", "+00:00"))
+                    days_left = (end_dt.timestamp() - time.time()) / 86400
+            except Exception:
+                days_left = 999
+
+            # URL
+            if gamma_slug:
+                url = f"https://polymarket.com/market/{gamma_slug}"
+            elif market_slug:
+                url = f"https://polymarket.com/market/{market_slug}"
             else:
-                bid_str = " " * 26
-            if r < len(asks):
-                ask_str = f" {asks[r]['price']:>10}  {asks[r]['size']:<12}"
-            else:
-                ask_str = " " * 26
-            print(f"    │ {bid_str:26} │ {ask_str:26} │")
-        print(f"    └{'─' * 28}┴{'─' * 28}┘")
+                url = "https://polymarket.com"
 
-        # 筛选判断
-        print(f"")
-        print(f"  【筛选结果】")
-        checks = []
+            checks = [
+                ("✓", f"每日奖励 ${daily_rate:.2f} ≥ ${settings['min_reward_usd']}"),
+                (
+                    "✓",
+                    f"价差 {spread_cents:.2f}美分 < {settings['max_spread_cents']}美分",
+                ),
+                (
+                    "✓",
+                    f"价格 {best_bid * 100:.1f}美分 在 [{settings['min_price_cents']}, {settings['max_price_cents']}]",
+                ),
+                ("✓", f"剩余 {days_left:.0f}天 ≥ {settings['min_settlement_days']}天"),
+                ("✓", f"所需资金 {required:.2f} ≤ 余额 {balance:.2f} pUSD"),
+            ]
 
-        # 1. 奖励金额
-        ok = daily_rate >= settings["min_reward_usd"]
-        checks.append(
-            (
-                "✓" if ok else "✗",
-                f"每日奖励 ${daily_rate:.2f} {'≥' if ok else '<'} ${settings['min_reward_usd']}",
+            matched.append(
+                {
+                    "question": question,
+                    "outcome": outcome,
+                    "url": url,
+                    "daily_rate": daily_rate,
+                    "max_spread": max_spread,
+                    "min_size": min_size,
+                    "days_left": days_left,
+                    "end_date": gamma_end or end_date_str,
+                    "tick_size": tick_size,
+                    "spread_cents": spread_cents,
+                    "required": required,
+                    "bids": [
+                        {"price": b["price"], "size": b["size"]} for b in bids[:5]
+                    ],
+                    "asks": [
+                        {"price": a["price"], "size": a["size"]} for a in asks[:5]
+                    ],
+                    "checks": checks,
+                }
             )
-        )
 
-        # 2. 价差
-        ok = spread_cents < settings["max_spread_cents"]
-        checks.append(
-            (
-                "✓" if ok else "✗",
-                f"价差 {spread_cents:.2f}美分 {'<' if ok else '≥'} {settings['max_spread_cents']}美分",
-            )
-        )
+            time.sleep(0.3)
 
-        # 3. 价格范围
-        price_cents = best_bid * 100
-        ok = settings["min_price_cents"] <= price_cents <= settings["max_price_cents"]
-        checks.append(
-            (
-                "✓" if ok else "✗",
-                f"价格 {price_cents:.1f}美分 {'在' if ok else '不在'} [{settings['min_price_cents']}, {settings['max_price_cents']}]",
-            )
-        )
+    # 结果
+    print(f"\n{'─' * 70}")
+    print(f"扫描完成: 检查了 {checked} 个订单簿，找到 {len(matched)} 个符合条件的市场")
+    print(f"跳过原因:")
+    print(f"  不在Gamma结果中(结算太近): {skip_reasons['no_gamma']}")
+    print(f"  奖励不足: {skip_reasons['reward']}")
+    print(f"  价格超范围: {skip_reasons['price']}")
+    print(f"  余额不足: {skip_reasons['balance']}")
+    print(f"  价差过大: {skip_reasons['spread']}")
+    print(f"  无订单簿: {skip_reasons['no_book']}")
 
-        # 4. 结算日期
-        ok = days_left >= settings["min_settlement_days"]
-        checks.append(
-            (
-                "✓" if ok else "✗",
-                f"剩余 {days_left:.0f}天 {'≥' if ok else '<'} {settings['min_settlement_days']}天",
-            )
-        )
+    for idx, m in enumerate(matched, 1):
+        display_market(idx, m)
 
-        # 5. 余额
-        required = float(min_size) * best_bid if min_size != "N/A" and best_bid else 0
-        ok = required <= balance
-        checks.append(
-            (
-                "✓" if ok else "✗",
-                f"所需资金 {required:.2f} {'≤' if ok else '>'} 余额 {balance:.2f} pUSD",
-            )
-        )
-
-        all_pass = all(c[0] == "✓" for c in checks)
-        for mark, desc in checks:
-            print(f"    {mark} {desc}")
-        print(f"    → {'全部通过 ✓' if all_pass else '未通过 ✗'}")
-        print(f"")
-
-        time.sleep(0.5)  # 避免请求太快
+    if not matched:
+        print("\n没有找到完全符合条件的市场。建议放宽条件后重试。")
 
     db.close()
-    print("诊断完成。")
 
 
 if __name__ == "__main__":

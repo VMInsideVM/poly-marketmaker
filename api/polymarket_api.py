@@ -16,6 +16,7 @@ from py_clob_client_v2.clob_types import (
 logger = logging.getLogger(__name__)
 
 POLYMARKET_HOST = "https://clob.polymarket.com"
+GAMMA_API = "https://gamma-api.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
 
 # Rewards API is part of the CLOB API
@@ -273,3 +274,55 @@ class PolymarketAPI:
         except Exception as e:
             logger.error("Failed to fetch current rewards: %s", e)
         return all_rewards
+
+    @staticmethod
+    def list_markets(
+        end_date_min: str = None,
+        rewards_min_size: float = None,
+        closed: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+        order: str = None,
+        ascending: bool = None,
+    ) -> list[dict]:
+        """Fetch markets from Gamma API (GET /markets) with precise filters.
+
+        Gamma API supports filters not available in CLOB API:
+          - end_date_min: ISO datetime string, filter markets ending after this date
+          - rewards_min_size: minimum reward size
+          - closed: filter closed markets (default False)
+
+        Returns list of market dicts with keys:
+          - id, question, conditionId, slug, endDate, liquidity, volume, etc.
+          Note: does NOT include rewards_config (rate_per_day). Use
+          get_rewards_current() or get_rewards_markets() for that.
+        """
+        all_markets = []
+        try:
+            while True:
+                params = {"limit": limit, "offset": offset, "closed": closed}
+                if end_date_min:
+                    params["end_date_min"] = end_date_min
+                if rewards_min_size is not None:
+                    params["rewards_min_size"] = rewards_min_size
+                if order:
+                    params["order"] = order
+                if ascending is not None:
+                    params["ascending"] = ascending
+                logger.info("Fetching Gamma markets offset=%d...", offset)
+                resp = requests.get(
+                    f"{GAMMA_API}/markets",
+                    params=params,
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                markets = resp.json()
+                if not markets:
+                    break
+                all_markets.extend(markets)
+                if len(markets) < limit:
+                    break  # Last page
+                offset += limit
+        except Exception as e:
+            logger.error("Failed to fetch Gamma markets: %s", e)
+        return all_markets
