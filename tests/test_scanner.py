@@ -12,6 +12,12 @@ def _make_scanner(balance=500.0, settings=None):
     db = MagicMock()
 
     api.get_balance.return_value = balance
+    # Default: get_spread returns 0.01 (1 cent, passes 3-cent filter)
+    api.get_spread.return_value = 0.01
+    # Default: get_rewards_for_market returns matching rewards_config
+    api.get_rewards_for_market.return_value = [
+        {"rewards_config": [{"rate_per_day": 150.0}]}
+    ]
 
     default_settings = {
         "min_reward_usd": 100.0,

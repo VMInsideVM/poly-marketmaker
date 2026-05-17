@@ -1,17 +1,16 @@
 """engine/scanner.py — Market scanner that filters eligible markets.
 
-Polymarket /rewards/markets/multi API response fields:
-  - condition_id: market identifier
-  - market_id: numeric market ID
-  - question: market question text
-  - end_date: settlement date string like "2024-08-10 00:00:00"
-  - tokens: [{token_id, outcome, price}, ...]
-  - rewards_max_spread: max spread in ticks for reward eligibility
-  - rewards_min_size: min order size for reward eligibility
-  - rewards_config: [{rate_per_day, total_rewards, end_date, ...}, ...]
-  - spread: current market spread
+Filtering flow (matches test_live.py logic):
+1. /rewards/markets/multi — fetch markets sorted by rate_per_day DESC
+2. Filter: total rate_per_day >= min_reward (from rewards_config sum)
+3. Filter: settlement date (only exclude 0~4 days, negative = pass)
+4. /rewards/markets/{condition_id} — get precise per-market reward
+5. Filter: at least one token price in [min_price, max_price]
+6. GET /spread — fast spread check per token
+7. GET /book — full orderbook for strategy calculation
 """
 
+import re
 import time
 import logging
 from datetime import datetime
@@ -22,11 +21,8 @@ logger = logging.getLogger(__name__)
 
 def _parse_end_date(end_date_str: str) -> float:
     """Parse end_date string to Unix timestamp."""
-    import re
-
     if not end_date_str:
         return 0
-    # 去掉末尾时区偏移 (+00, +00:00, Z 等)
     s = end_date_str.strip()
     if s.endswith("Z"):
         s = s[:-1]
@@ -42,11 +38,6 @@ def _parse_end_date(end_date_str: str) -> float:
     return 0
 
 
-def _calc_total_rewards(rewards_config: list[dict]) -> float:
-    """Calculate total daily reward value from rewards_config array."""
-    return sum(rc.get("rate_per_day", 0) for rc in rewards_config)
-
-
 class MarketScanner:
     def __init__(self, api, db, wallet_address: str):
         self.api = api
@@ -54,128 +45,151 @@ class MarketScanner:
         self.wallet_address = wallet_address
 
     def scan(self) -> list[dict]:
-        """Scan all reward markets and return eligible ones with order prices.
+        """Scan reward markets and return eligible ones with order prices.
 
-        Each token in a market is evaluated independently (YES and NO are
-        separate orderbooks on Polymarket).
+        Returns list of dicts, each representing one token to place an order on.
         """
         settings = self.db.get_settings()
         balance = self.api.get_balance()
-        markets = self.api.get_rewards_markets()
+        min_reward = settings["min_reward_usd"]
+        min_price_cents = settings["min_price_cents"]
+        max_price_cents = settings["max_price_cents"]
+        max_spread_cents = settings["max_spread_cents"]
+        min_days = settings["min_settlement_days"]
+
+        # Step 1: Fetch markets (server-side filter: price 0.10~0.90, sorted by rate)
+        markets = self.api.get_rewards_markets(
+            min_price=0.10,
+            max_price=0.90,
+        )
+
         eligible = []
 
         for market in markets:
-            # Each market has multiple tokens (YES/NO), evaluate each
             tokens = market.get("tokens", [])
-            for token in tokens:
-                result = self._evaluate_token(market, token, settings, balance)
-                if result is not None:
-                    eligible.append(result)
+            if not tokens:
+                continue
+
+            condition_id = market.get("condition_id", "")
+            rewards_config = market.get("rewards_config", [])
+            total_rate = sum(rc.get("rate_per_day", 0) for rc in rewards_config)
+
+            # Step 2: Coarse reward filter
+            if total_rate < min_reward:
+                continue
+
+            # Step 3: Settlement date (only exclude 0~min_days, negative = pass)
+            end_date_str = market.get("end_date", "")
+            end_ts = _parse_end_date(end_date_str)
+            days_left = (end_ts - time.time()) / 86400 if end_ts else -1
+            if 0 <= days_left < min_days:
+                continue
+
+            # Cooldown check
+            if self.db.is_in_cooldown(self.wallet_address, condition_id):
+                continue
+
+            # Step 4: Get precise reward via /rewards/markets/{condition_id}
+            raw_rewards = self.api.get_rewards_for_market(condition_id)
+            market_reward = 0
+            for rd in raw_rewards:
+                for rc in rd.get("rewards_config", []):
+                    market_reward += rc.get("rate_per_day", 0)
+            if not raw_rewards:
+                market_reward = total_rate
+            if market_reward < min_reward:
+                continue
+
+            # Step 5: Find tokens with price in range
+            valid_tokens = [
+                t
+                for t in tokens
+                if min_price_cents <= float(t.get("price", 0)) * 100 <= max_price_cents
+            ]
+            if not valid_tokens:
+                continue
+
+            # Step 6 & 7: Check each valid token
+            max_spread_reward = int(market.get("rewards_max_spread", 2))
+            min_size = int(market.get("rewards_min_size", 0))
+            neg_risk = market.get("neg_risk", False)
+
+            for token in valid_tokens:
+                token_id = token.get("token_id", "")
+                token_price = float(token.get("price", 0))
+
+                # Step 6: Fast spread check
+                spread_val = self.api.get_spread(token_id)
+                if spread_val < 0:
+                    continue
+                if spread_val * 100 >= max_spread_cents:
+                    continue
+
+                # Step 7: Full orderbook
+                try:
+                    orderbook = self.api.get_orderbook(token_id)
+                except Exception as e:
+                    logger.warning("Failed to get orderbook for %s: %s", token_id, e)
+                    continue
+
+                bids = sorted(
+                    orderbook.get("bids", []),
+                    key=lambda x: float(x["price"]),
+                    reverse=True,
+                )
+                asks = sorted(
+                    orderbook.get("asks", []), key=lambda x: float(x["price"])
+                )
+                if not bids or not asks:
+                    continue
+
+                best_bid = float(bids[0]["price"])
+                best_ask = float(asks[0]["price"])
+
+                # Confirm price range with actual best_bid
+                if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
+                    continue
+
+                # Balance check
+                if min_size * best_bid > balance:
+                    continue
+
+                # Calculate reward range and determine order price
+                tick_size_str = orderbook.get("tick_size", "0.01")
+                tick_size = float(tick_size_str)
+                midpoint = (best_bid + best_ask) / 2
+                reward_range_min = midpoint - max_spread_reward * tick_size
+                reward_range_max = midpoint + max_spread_reward * tick_size
+
+                order_price = determine_order_price(
+                    bids=bids,
+                    max_spread=max_spread_reward,
+                    tick_size=tick_size,
+                    reward_range_min=reward_range_min,
+                    reward_range_max=reward_range_max,
+                )
+                if order_price is None:
+                    continue
+
+                eligible.append(
+                    {
+                        "market_id": condition_id,
+                        "token_id": token_id,
+                        "market_name": market.get("question", ""),
+                        "outcome": token.get("outcome", ""),
+                        "end_date": end_date_str,
+                        "daily_reward": market_reward,
+                        "rewards_max_spread": max_spread_reward,
+                        "rewards_min_size": min_size,
+                        "tick_size": tick_size,
+                        "tick_size_str": tick_size_str,
+                        "neg_risk": neg_risk,
+                        "reward_range_min": reward_range_min,
+                        "reward_range_max": reward_range_max,
+                        "order_price": order_price,
+                        "order_size": min_size,
+                    }
+                )
+                # Both tokens can be eligible independently
 
         return eligible
-
-    def _evaluate_token(
-        self, market: dict, token: dict, settings: dict, balance: float
-    ) -> dict | None:
-        """Evaluate a single token in a market. Return enriched dict if eligible."""
-        market_id = market.get("condition_id", market.get("market_id", ""))
-        token_id = token.get("token_id", "")
-        token_price = float(token.get("price", 0))
-
-        # Filter: reward amount (total daily rate in USD)
-        rewards_config = market.get("rewards_config", [])
-        daily_reward = _calc_total_rewards(rewards_config)
-        if daily_reward < settings["min_reward_usd"]:
-            return None
-
-        # Filter: settlement date
-        end_date_str = market.get("end_date", "")
-        end_date_ts = _parse_end_date(end_date_str)
-        days_remaining = (end_date_ts - time.time()) / 86400
-        if days_remaining < settings["min_settlement_days"]:
-            return None
-
-        # Filter: cooldown
-        if self.db.is_in_cooldown(self.wallet_address, market_id):
-            return None
-
-        # Filter: token price range (quick pre-filter before fetching orderbook)
-        if (
-            token_price * 100 < settings["min_price_cents"]
-            or token_price * 100 > settings["max_price_cents"]
-        ):
-            return None
-
-        # Get orderbook for this specific token
-        try:
-            orderbook = self.api.get_orderbook(token_id)
-        except Exception as e:
-            logger.warning("Failed to get orderbook for %s: %s", token_id, e)
-            return None
-
-        bids = orderbook.get("bids", [])
-        asks = orderbook.get("asks", [])
-        if not bids or not asks:
-            return None
-
-        best_bid = float(bids[0]["price"])
-        best_ask = float(asks[0]["price"])
-
-        # Filter: bid-ask spread
-        spread_cents = (best_ask - best_bid) * 100
-        if spread_cents >= settings["max_spread_cents"]:
-            return None
-
-        # Filter: price range (from actual orderbook)
-        if (
-            best_bid * 100 < settings["min_price_cents"]
-            or best_bid * 100 > settings["max_price_cents"]
-        ):
-            return None
-
-        # Reward parameters
-        max_spread = int(market.get("rewards_max_spread", 2))
-        min_size = int(market.get("rewards_min_size", 0))
-
-        # Calculate reward range: midpoint +/- max_spread ticks
-        # The tick_size comes from the orderbook response (GET /book)
-        midpoint = (best_bid + best_ask) / 2
-        tick_size_str = orderbook.get("tick_size", "0.01")
-        tick_size = float(tick_size_str)
-
-        reward_range_min = midpoint - max_spread * tick_size
-        reward_range_max = midpoint + max_spread * tick_size
-
-        # Determine order price using strategy
-        order_price = determine_order_price(
-            bids=bids,
-            max_spread=max_spread,
-            tick_size=tick_size,
-            reward_range_min=reward_range_min,
-            reward_range_max=reward_range_max,
-        )
-        if order_price is None:
-            return None
-
-        # Filter: balance sufficient for min_size
-        required = min_size * order_price
-        if required > balance:
-            return None
-
-        return {
-            "market_id": market_id,
-            "token_id": token_id,
-            "market_name": market.get("question", ""),
-            "outcome": token.get("outcome", ""),
-            "end_date": end_date_str,
-            "daily_reward": daily_reward,
-            "rewards_max_spread": max_spread,
-            "rewards_min_size": min_size,
-            "tick_size": tick_size,
-            "tick_size_str": tick_size_str,  # string for API calls ("0.01" or "0.001")
-            "neg_risk": market.get("neg_risk", False),
-            "reward_range_min": reward_range_min,
-            "reward_range_max": reward_range_max,
-            "order_price": order_price,
-            "order_size": min_size,
-        }
