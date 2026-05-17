@@ -178,14 +178,19 @@ class PolymarketAPI:
     # --- Rewards (CLOB API - public endpoints) ---
 
     @staticmethod
-    def get_rewards_markets() -> list[dict]:
-        """Fetch all markets with active rewards using /rewards/markets/multi.
+    def get_rewards_markets(
+        min_price: float = None,
+        max_price: float = None,
+        max_spread: float = None,
+    ) -> list[dict]:
+        """Fetch markets with active rewards using GET /rewards/markets/multi.
 
-        Uses the CLOB endpoint GET /rewards/markets/multi which returns
-        markets with reward configs, token info, spread, end_date, etc.
+        Supports server-side filtering to reduce data transfer:
+          - min_price/max_price: filter by first token price
+          - max_spread: filter by current spread
 
-        Returns normalized list of dicts with keys:
-          - market_id, condition_id, question, end_date
+        Returns list of dicts with keys:
+          - condition_id, market_id, question, market_slug, end_date
           - tokens: [{token_id, outcome, price}, ...]
           - rewards_max_spread, rewards_min_size
           - rewards_config: [{rate_per_day, total_rewards, end_date, ...}, ...]
@@ -193,25 +198,40 @@ class PolymarketAPI:
         """
         all_markets = []
         next_cursor = ""
+        page = 0
         try:
             while True:
-                params = {"page_size": 500}
+                page += 1
+                params = {"page_size": 100}
+                if min_price is not None:
+                    params["min_price"] = min_price
+                if max_price is not None:
+                    params["max_price"] = max_price
+                if max_spread is not None:
+                    params["max_spread"] = max_spread
                 if next_cursor:
                     params["next_cursor"] = next_cursor
+                logger.info("Fetching rewards markets page %d...", page)
                 resp = requests.get(
                     f"{REWARDS_API}/rewards/markets/multi",
                     params=params,
-                    timeout=30,
+                    timeout=15,
                 )
                 resp.raise_for_status()
                 data = resp.json()
                 markets = data.get("data", [])
                 all_markets.extend(markets)
+                logger.info(
+                    "Page %d: got %d markets (total: %d)",
+                    page,
+                    len(markets),
+                    len(all_markets),
+                )
                 next_cursor = data.get("next_cursor", "LTE=")
                 if next_cursor == "LTE=" or not markets:
                     break
         except Exception as e:
-            logger.error("Failed to fetch rewards markets: %s", e)
+            logger.error("Failed to fetch rewards markets at page %d: %s", page, e)
         return all_markets
 
     @staticmethod
