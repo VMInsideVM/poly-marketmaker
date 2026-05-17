@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>配置</h1>
+
+<section class="config-section">
+    <h2>钱包管理</h2>
+    <div class="form-inline">
+        <input type="password" id="new-private-key" placeholder="输入钱包私钥">
+        <button class="btn btn-primary" onclick="addWallet()">添加钱包</button>
+    </div>
+    <table class="data-table" id="wallet-config-table">
+        <thead>
+            <tr><th>地址</th><th>状态</th><th>操作</th></tr>
+        </thead>
+        <tbody id="wallet-config-body"></tbody>
+    </table>
+</section>
+
+<section class="config-section">
+    <h2>策略参数</h2>
+    <form id="settings-form">
+        <div class="form-grid">
+            <div class="form-group">
+                <label>最低奖励金额 (USD)</label>
+                <input type="number" name="min_reward_usd" step="1">
+            </div>
+            <div class="form-group">
+                <label>买卖价差上限 (美分)</label>
+                <input type="number" name="max_spread_cents" step="0.1">
+            </div>
+            <div class="form-group">
+                <label>单价范围下限 (美分)</label>
+                <input type="number" name="min_price_cents" step="1">
+            </div>
+            <div class="form-group">
+                <label>单价范围上限 (美分)</label>
+                <input type="number" name="max_price_cents" step="1">
+            </div>
+            <div class="form-group">
+                <label>最短结算天数</label>
+                <input type="number" name="min_settlement_days" step="1">
+            </div>
+            <div class="form-group">
+                <label>止损比例 (%)</label>
+                <input type="number" name="stop_loss_pct" step="1">
+            </div>
+        </div>
+
+        <h2>运行参数</h2>
+        <div class="form-grid">
+            <div class="form-group">
+                <label>市场扫描间隔 (秒)</label>
+                <input type="number" name="scan_interval_sec" step="1">
+            </div>
+            <div class="form-group">
+                <label>成交检查间隔 (秒)</label>
+                <input type="number" name="fill_check_interval_sec" step="1">
+            </div>
+            <div class="form-group">
+                <label>成交后冷却时间 (分钟)</label>
+                <input type="number" name="cooldown_minutes" step="1">
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary">保存设置</button>
+    </form>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let originalSettings = {};
+let currentSettings = {};
+
+function loadSettings() {
+    fetch('/api/settings').then(r => r.json()).then(data => {
+        originalSettings = {...data};
+        currentSettings = {...data};
+        const form = document.getElementById('settings-form');
+        Object.keys(data).forEach(key => {
+            const input = form.querySelector(`[name="${key}"]`);
+            if (input) input.value = data[key];
+        });
+    });
+}
+
+function loadWallets() {
+    fetch('/api/wallets').then(r => r.json()).then(wallets => {
+        const tbody = document.getElementById('wallet-config-body');
+        tbody.innerHTML = wallets.map(w => `
+            <tr>
+                <td title="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</td>
+                <td>
+                    <label class="switch">
+                        <input type="checkbox" ${w.enabled ? 'checked' : ''}
+                            onchange="toggleWallet('${w.address}', this.checked)">
+                        <span class="slider"></span>
+                    </label>
+                </td>
+                <td>
+                    <button class="btn btn-sm btn-danger" onclick="removeWallet('${w.address}')">删除</button>
+                </td>
+            </tr>
+        `).join('');
+    });
+}
+
+function addWallet() {
+    const input = document.getElementById('new-private-key');
+    const key = input.value.trim();
+    if (!key) { alert('请输入私钥'); return; }
+    fetch('/api/wallets', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({private_key: key}),
+    }).then(r => r.json()).then(data => {
+        if (data.error) { alert(data.error); return; }
+        input.value = '';
+        loadWallets();
+    });
+}
+
+function removeWallet(address) {
+    if (!confirm('确定删除该钱包？相关订单数据将保留在历史记录中。')) return;
+    fetch(`/api/wallets/${address}`, {method: 'DELETE'}).then(() => loadWallets());
+}
+
+function toggleWallet(address, enabled) {
+    fetch(`/api/wallets/${address}/toggle`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled}),
+    });
+}
+
+document.getElementById('settings-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const formData = new FormData(this);
+    const data = {};
+    formData.forEach((val, key) => { data[key] = parseFloat(val); });
+    fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data),
+    }).then(r => r.json()).then(resp => {
+        alert(resp.message);
+        originalSettings = {...data};
+    });
+});
+
+document.getElementById('settings-form').addEventListener('input', function() {
+    const formData = new FormData(this);
+    formData.forEach((val, key) => { currentSettings[key] = parseFloat(val); });
+});
+
+window.addEventListener('beforeunload', function(e) {
+    const hasChanges = Object.keys(originalSettings).some(
+        k => currentSettings[k] !== originalSettings[k]
+    );
+    if (hasChanges) {
+        e.preventDefault();
+        e.returnValue = '参数已修改但未保存，确定要离开吗？';
+    }
+});
+
+document.querySelectorAll('.nav-links a').forEach(link => {
+    link.addEventListener('click', function(e) {
+        const hasChanges = Object.keys(originalSettings).some(
+            k => currentSettings[k] !== originalSettings[k]
+        );
+        if (hasChanges && !confirm('参数已修改但未保存，是否离开？')) {
+            e.preventDefault();
+        }
+    });
+});
+
+loadSettings();
+loadWallets();
+</script>
+{% endblock %}

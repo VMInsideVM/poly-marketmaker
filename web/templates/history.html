@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>历史记录</h1>
+
+<div class="filter-bar">
+    <label>钱包：</label>
+    <select id="wallet-filter" onchange="refreshHistory()">
+        <option value="">全部</option>
+    </select>
+    <label>开始日期：</label>
+    <input type="date" id="start-date" onchange="refreshHistory()">
+    <label>结束日期：</label>
+    <input type="date" id="end-date" onchange="refreshHistory()">
+</div>
+
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>时间</th><th>钱包</th><th>市场</th>
+            <th>方向</th><th>价格</th><th>数量</th><th>盈亏</th>
+        </tr>
+    </thead>
+    <tbody id="history-body"></tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function refreshHistory() {
+    const wallet = document.getElementById('wallet-filter').value;
+    const startDate = document.getElementById('start-date').value;
+    const endDate = document.getElementById('end-date').value;
+    const params = new URLSearchParams();
+    if (wallet) params.set('wallet', wallet);
+    if (startDate) params.set('start', new Date(startDate).getTime() / 1000);
+    if (endDate) params.set('end', new Date(endDate + 'T23:59:59').getTime() / 1000);
+
+    fetch(`/api/history?${params}`).then(r => r.json()).then(trades => {
+        const sideLabels = {buy: '买入', sell: '卖出', stop_loss: '止损'};
+        document.getElementById('history-body').innerHTML = trades.map(t => `
+            <tr>
+                <td>${new Date(t.created_at * 1000).toLocaleString('zh-CN')}</td>
+                <td title="${t.wallet}">${t.wallet.slice(0,6)}...${t.wallet.slice(-4)}</td>
+                <td>${t.market_name}</td>
+                <td class="${t.side === 'buy' ? 'buy-side' : t.side === 'stop_loss' ? 'loss' : 'sell-side'}">${sideLabels[t.side] || t.side}</td>
+                <td>${t.price.toFixed(4)}</td>
+                <td>${t.size}</td>
+                <td class="${t.pnl >= 0 ? 'profit' : 'loss'}">${t.pnl.toFixed(2)}</td>
+            </tr>
+        `).join('');
+    });
+}
+
+fetch('/api/wallets').then(r => r.json()).then(wallets => {
+    const select = document.getElementById('wallet-filter');
+    wallets.forEach(w => {
+        const opt = document.createElement('option');
+        opt.value = w.address;
+        opt.textContent = `${w.address.slice(0,6)}...${w.address.slice(-4)}`;
+        select.appendChild(opt);
+    });
+});
+
+refreshHistory();
+</script>
+{% endblock %}

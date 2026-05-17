@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>订单管理</h1>
+
+<div class="filter-bar">
+    <label>钱包筛选：</label>
+    <select id="wallet-filter" onchange="refreshOrders()">
+        <option value="">全部</option>
+    </select>
+</div>
+
+<h2>当前挂单</h2>
+<div class="batch-controls">
+    <button class="btn btn-sm btn-danger" onclick="cancelSelected()">批量撤单</button>
+</div>
+<table class="data-table">
+    <thead>
+        <tr>
+            <th><input type="checkbox" id="select-all" onchange="toggleAll(this)"></th>
+            <th>钱包</th><th>市场</th><th>价格</th><th>数量</th><th>时间</th><th>操作</th>
+        </tr>
+    </thead>
+    <tbody id="orders-body"></tbody>
+</table>
+
+<h2>当前持仓</h2>
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>钱包</th><th>市场</th><th>买入价</th><th>当前价</th>
+            <th>卖单价</th><th>止损价</th><th>盈亏</th>
+        </tr>
+    </thead>
+    <tbody id="positions-body"></tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function getFilter() {
+    return document.getElementById('wallet-filter').value;
+}
+
+function refreshOrders() {
+    const wallet = getFilter();
+    const qs = wallet ? `?wallet=${wallet}` : '';
+
+    fetch(`/api/orders${qs}`).then(r => r.json()).then(orders => {
+        document.getElementById('orders-body').innerHTML = orders.map(o => `
+            <tr>
+                <td><input type="checkbox" class="order-check" value="${o.order_id}"></td>
+                <td title="${o.wallet}">${o.wallet.slice(0,6)}...${o.wallet.slice(-4)}</td>
+                <td>${o.market_name}</td>
+                <td>${o.price.toFixed(4)}</td>
+                <td>${o.size}</td>
+                <td>${new Date(o.created_at * 1000).toLocaleString('zh-CN')}</td>
+                <td><button class="btn btn-sm btn-danger" onclick="cancelOrder('${o.order_id}')">撤单</button></td>
+            </tr>
+        `).join('');
+    });
+
+    fetch(`/api/positions${qs}`).then(r => r.json()).then(positions => {
+        document.getElementById('positions-body').innerHTML = positions.map(p => `
+            <tr>
+                <td title="${p.wallet}">${p.wallet.slice(0,6)}...${p.wallet.slice(-4)}</td>
+                <td>${p.market_name}</td>
+                <td>${p.buy_price.toFixed(4)}</td>
+                <td>${p.current_price != null ? p.current_price.toFixed(4) : '-'}</td>
+                <td>${p.buy_price.toFixed(4)}</td>
+                <td>${p.stop_price != null ? p.stop_price.toFixed(4) : '-'}</td>
+                <td class="${(p.pnl || 0) >= 0 ? 'profit' : 'loss'}">${(p.pnl || 0).toFixed(2)}</td>
+            </tr>
+        `).join('');
+    });
+}
+
+function cancelOrder(orderId) {
+    if (!confirm('确定撤销该订单？')) return;
+    fetch(`/api/orders/${orderId}/cancel`, {method: 'POST'}).then(() => refreshOrders());
+}
+
+function toggleAll(checkbox) {
+    document.querySelectorAll('.order-check').forEach(c => c.checked = checkbox.checked);
+}
+
+function cancelSelected() {
+    const ids = [...document.querySelectorAll('.order-check:checked')].map(c => c.value);
+    if (!ids.length) { alert('请先勾选要撤销的订单'); return; }
+    if (!confirm(`确定撤销 ${ids.length} 笔订单？`)) return;
+    fetch('/api/orders/cancel-batch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({order_ids: ids}),
+    }).then(() => refreshOrders());
+}
+
+fetch('/api/wallets').then(r => r.json()).then(wallets => {
+    const select = document.getElementById('wallet-filter');
+    wallets.forEach(w => {
+        const opt = document.createElement('option');
+        opt.value = w.address;
+        opt.textContent = `${w.address.slice(0,6)}...${w.address.slice(-4)}`;
+        select.appendChild(opt);
+    });
+});
+
+refreshOrders();
+setInterval(refreshOrders, 5000);
+</script>
+{% endblock %}

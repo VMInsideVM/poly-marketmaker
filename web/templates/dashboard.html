@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>仪表盘</h1>
+    <div class="controls">
+        <button class="btn btn-success" onclick="engineAction('start-all')">全部启动</button>
+        <button class="btn btn-danger" onclick="engineAction('stop-all', '止损监控将停止，确定要停止所有引擎吗？')">全部停止</button>
+        <button class="btn btn-warning" onclick="engineAction('restart', '将重启所有引擎以加载新参数，确定吗？')">重启引擎</button>
+    </div>
+</div>
+
+<div class="summary-cards" id="summary">
+    <div class="card"><h3>总挂单</h3><p id="total-orders">-</p></div>
+    <div class="card"><h3>总持仓</h3><p id="total-positions">-</p></div>
+    <div class="card"><h3>总盈亏</h3><p id="total-pnl">-</p></div>
+</div>
+
+<h2>钱包状态</h2>
+<table class="data-table" id="wallet-table">
+    <thead>
+        <tr>
+            <th>钱包地址</th>
+            <th>余额 (USDC)</th>
+            <th>挂单数</th>
+            <th>持仓数</th>
+            <th>状态</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody id="wallet-body"></tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function refreshDashboard() {
+    fetch('/api/dashboard').then(r => r.json()).then(data => {
+        document.getElementById('total-orders').textContent = data.total_orders;
+        document.getElementById('total-positions').textContent = data.total_positions;
+        document.getElementById('total-pnl').textContent = (data.total_pnl || 0).toFixed(2) + ' USDC';
+        const tbody = document.getElementById('wallet-body');
+        tbody.innerHTML = data.wallets.map(w => `
+            <tr>
+                <td title="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</td>
+                <td>${w.balance != null ? w.balance.toFixed(2) : '-'}</td>
+                <td>${w.open_orders}</td>
+                <td>${w.positions}</td>
+                <td><span class="status ${w.running ? 'running' : 'stopped'}">${w.running ? '运行中' : '已停止'}</span></td>
+                <td>
+                    ${w.running
+                        ? `<button class="btn btn-sm btn-danger" onclick="walletAction('${w.address}', 'stop')">停止</button>`
+                        : `<button class="btn btn-sm btn-success" onclick="walletAction('${w.address}', 'start')">启动</button>`
+                    }
+                </td>
+            </tr>
+        `).join('');
+    });
+}
+
+function engineAction(action, confirmMsg) {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    fetch(`/api/engine/${action}`, {method: 'POST'}).then(r => r.json()).then(data => {
+        if (data.message) alert(data.message);
+        refreshDashboard();
+    });
+}
+
+function walletAction(address, action) {
+    if (action === 'stop' && !confirm('止损监控将停止，确定要停止该钱包引擎吗？')) return;
+    fetch(`/api/engine/${address}/${action}`, {method: 'POST'}).then(r => r.json()).then(data => {
+        if (data.message) alert(data.message);
+        refreshDashboard();
+    });
+}
+
+refreshDashboard();
+setInterval(refreshDashboard, 5000);
+</script>
+{% endblock %}
