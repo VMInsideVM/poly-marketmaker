@@ -123,15 +123,16 @@ def main():
     print(f"  结算日期  > {settings['min_settlement_days']} 天")
     print(f"{'─' * 70}")
 
-    # 获取市场（服务端只过滤价差，价格客户端过滤以支持任意token匹配）
-    print(f"\n正在获取奖励市场（服务端过滤价差，按奖励降序）...")
+    # 获取市场（服务端预过滤价格范围，不过滤价差——用订单簿精确判断）
+    print(f"\n正在获取奖励市场（服务端过滤价格 0.10~0.90）...")
     markets = safe_call(
         lambda: api.get_rewards_markets(
-            max_spread=settings["max_spread_cents"] / 100,
+            min_price=0.10,
+            max_price=0.90,
         ),
         [],
     )
-    print(f"服务端返回 {len(markets)} 个市场，开始逐个检查...\n")
+    print(f"服务端返回 {len(markets)} 个市场，开始逐个检查订单簿...\n")
 
     if not markets:
         print("✗ 未获取到市场数据，可能是网络问题，请重试")

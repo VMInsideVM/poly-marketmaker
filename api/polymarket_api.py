@@ -180,32 +180,38 @@ class PolymarketAPI:
 
     @staticmethod
     def get_rewards_markets(
+        min_price: float = None,
+        max_price: float = None,
         max_spread: float = None,
         order_by: str = "rate_per_day",
         position: str = "DESC",
-        max_pages: int = 0,
+        max_pages: int = 5,
     ) -> list[dict]:
         """Fetch markets with active rewards using GET /rewards/markets/multi.
 
-        Server-side filtering:
-          - max_spread: filter by current spread (applies to the market)
-          - order_by/position: sort (default: rate_per_day DESC)
-        Note: min_price/max_price NOT used server-side because the API only
-        filters by the first token's price, which misses markets where a
-        non-first token is in range. Price filtering is done client-side.
+        Supports server-side filtering and sorting:
+          - min_price/max_price: filter by first token price
+          - max_spread: filter by current spread
+          - order_by: sort field (rate_per_day, volume_24hr, spread, end_date, etc.)
+          - position: ASC or DESC
 
-        Args:
-            max_pages: max pages to fetch, 0 = fetch all pages.
-
-        Returns list of market dicts.
+        Returns list of dicts with keys:
+          - condition_id, market_id, question, market_slug, end_date
+          - tokens: [{token_id, outcome, price}, ...]
+          - rewards_max_spread, rewards_min_size
+          - rewards_config: [{rate_per_day, total_rewards, end_date, ...}, ...]
+          - spread, volume_24hr
         """
         all_markets = []
         next_cursor = ""
         page = 0
-        session = requests.Session()
         while True:
             page += 1
-            params = {"page_size": 100}
+            params = {"page_size": 500}
+            if min_price is not None:
+                params["min_price"] = min_price
+            if max_price is not None:
+                params["max_price"] = max_price
             if max_spread is not None:
                 params["max_spread"] = max_spread
             if order_by:
@@ -214,35 +220,33 @@ class PolymarketAPI:
                 params["position"] = position
             if next_cursor:
                 params["next_cursor"] = next_cursor
+            logger.info("Fetching rewards markets page %d...", page)
 
-            # Retry up to 3 times per page
+            # Retry per page
             resp_data = None
             for attempt in range(3):
                 try:
-                    logger.info(
-                        "Fetching rewards markets page %d (attempt %d)...",
-                        page,
-                        attempt + 1,
-                    )
-                    resp = session.get(
+                    resp = requests.get(
                         f"{REWARDS_API}/rewards/markets/multi",
                         params=params,
-                        timeout=15,
+                        timeout=20,
                     )
                     resp.raise_for_status()
                     resp_data = resp.json()
                     break
                 except Exception as e:
-                    logger.warning(
-                        "Page %d attempt %d failed: %s", page, attempt + 1, e
-                    )
                     if attempt < 2:
+                        logger.warning(
+                            "Page %d attempt %d failed: %s, retrying...",
+                            page,
+                            attempt + 1,
+                            e,
+                        )
                         time.sleep(2)
+                    else:
+                        logger.error("Page %d failed after 3 attempts: %s", page, e)
 
             if resp_data is None:
-                logger.error(
-                    "Failed to fetch page %d after 3 attempts, stopping.", page
-                )
                 break
 
             markets = resp_data.get("data", [])
@@ -253,14 +257,10 @@ class PolymarketAPI:
                 len(markets),
                 len(all_markets),
             )
-
             next_cursor = resp_data.get("next_cursor", "LTE=")
-            if next_cursor == "LTE=" or not markets:
-                break
-            if max_pages > 0 and page >= max_pages:
+            if next_cursor == "LTE=" or not markets or page >= max_pages:
                 break
 
-        session.close()
         return all_markets
 
     @staticmethod
