@@ -3,7 +3,13 @@
 import logging
 import requests
 from py_clob_client_v2.client import ClobClient
-from py_clob_client_v2.clob_types import OrderArgs, OrderType
+from py_clob_client_v2.clob_types import (
+    OrderArgs,
+    OrderType,
+    OrderPayload,
+    MarketOrderArgsV2,
+    PartialCreateOrderOptions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,15 +23,31 @@ REWARDS_API = POLYMARKET_HOST
 class PolymarketAPI:
     """Wrapper for one wallet's Polymarket connection."""
 
-    def __init__(self, private_key: str):
+    def __init__(self, private_key: str, signature_type: int = 2, funder: str = None):
+        """Initialize with private key.
+
+        Args:
+            private_key: Hex private key string.
+            signature_type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE (default).
+            funder: Proxy wallet address. If None, derived from private key.
+        """
         self.private_key = private_key
+        # Step 1: Create temp client to derive API creds
+        temp_client = ClobClient(
+            host=POLYMARKET_HOST,
+            key=private_key,
+            chain_id=CHAIN_ID,
+        )
+        api_creds = temp_client.create_or_derive_api_creds()
+        # Step 2: Create full client with L2 auth
         self.client = ClobClient(
             host=POLYMARKET_HOST,
-            chain_id=CHAIN_ID,
             key=private_key,
+            chain_id=CHAIN_ID,
+            creds=api_creds,
+            signature_type=signature_type,
+            funder=funder or temp_client.get_address(),
         )
-        # Derive or create API credentials (L2 auth)
-        self.client.set_api_creds(self.client.create_or_derive_api_creds())
 
     def get_address(self) -> str:
         """Return wallet address derived from private key."""
@@ -51,53 +73,99 @@ class PolymarketAPI:
 
     # --- Order Placement ---
 
-    def place_limit_buy(self, token_id: str, price: float, size: int) -> dict:
-        """Place a limit buy order. Returns order response with order_id."""
+    def place_limit_buy(
+        self,
+        token_id: str,
+        price: float,
+        size: int,
+        tick_size: str = "0.01",
+        neg_risk: bool = False,
+    ) -> dict:
+        """Place a limit buy order.
+
+        Returns dict with "orderID" and "status" keys.
+        """
         order_args = OrderArgs(
             token_id=token_id,
             price=price,
-            size=size,
+            size=float(size),
             side="BUY",
         )
-        return self.client.create_and_post_order(order_args, OrderType.GTC)
+        options = PartialCreateOrderOptions(
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+        )
+        return self.client.create_and_post_order(order_args, options, OrderType.GTC)
 
-    def place_limit_sell(self, token_id: str, price: float, size: int) -> dict:
-        """Place a limit sell order at specified price."""
+    def place_limit_sell(
+        self,
+        token_id: str,
+        price: float,
+        size: int,
+        tick_size: str = "0.01",
+        neg_risk: bool = False,
+    ) -> dict:
+        """Place a limit sell order at specified price.
+
+        Returns dict with "orderID" and "status" keys.
+        """
         order_args = OrderArgs(
             token_id=token_id,
             price=price,
-            size=size,
+            size=float(size),
             side="SELL",
         )
-        return self.client.create_and_post_order(order_args, OrderType.GTC)
+        options = PartialCreateOrderOptions(
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+        )
+        return self.client.create_and_post_order(order_args, options, OrderType.GTC)
 
-    def place_market_sell(self, token_id: str, size: int) -> dict:
-        """Place a market sell order (FOK)."""
-        order_args = OrderArgs(
+    def place_market_sell(
+        self, token_id: str, size: int, tick_size: str = "0.01", neg_risk: bool = False
+    ) -> dict:
+        """Place a market sell order (FOK).
+
+        Uses MarketOrderArgsV2 with amount (USDC value to sell).
+        """
+        market_args = MarketOrderArgsV2(
             token_id=token_id,
-            price=0.001,  # Very low price for market sell
-            size=size,
+            amount=float(size),
             side="SELL",
         )
-        return self.client.create_and_post_order(order_args, OrderType.FOK)
+        options = PartialCreateOrderOptions(
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+        )
+        return self.client.create_and_post_market_order(
+            market_args, options, OrderType.FOK
+        )
 
     # --- Order Management ---
 
     def cancel_order(self, order_id: str) -> dict:
-        """Cancel a single order."""
-        return self.client.cancel(order_id)
+        """Cancel a single order by ID."""
+        return self.client.cancel_order(OrderPayload(orderID=order_id))
 
     def cancel_all_orders(self) -> dict:
         """Cancel all open orders for this wallet."""
         return self.client.cancel_all()
 
     def get_order(self, order_id: str) -> dict:
-        """Get order details by ID."""
+        """Get order details by ID.
+
+        Returns dict with keys: id, status, side, original_size,
+        size_matched, price, asset_id, market, etc.
+        """
         return self.client.get_order(order_id)
 
     def get_open_orders(self) -> list:
-        """Get all open orders for this wallet."""
-        return self.client.get_orders(open_only=True)
+        """Get all open orders for this wallet.
+
+        Returns list of order dicts with keys: id, status, side,
+        original_size, size_matched, price, asset_id, market, etc.
+        """
+        return self.client.get_open_orders()
 
     def get_trades(self) -> list:
         """Get trade history for this wallet."""

@@ -91,6 +91,8 @@ class WalletEngine:
                     market["token_id"],
                     market["order_price"],
                     market["order_size"],
+                    tick_size=market.get("tick_size_str", "0.01"),
+                    neg_risk=market.get("neg_risk", False),
                 )
                 order_id = resp.get("orderID", "")
                 self.db.record_order(
@@ -118,26 +120,48 @@ class WalletEngine:
         try:
             open_orders = self.db.get_open_buy_orders(self.wallet_address)
             markets = self.api.get_rewards_markets()
+            # Build lookup by condition_id
+            market_by_id = {
+                m.get("condition_id", m.get("market_id", "")): m for m in markets
+            }
+
             for order in open_orders:
-                market_data = next(
-                    (m for m in markets if m["market_id"] == order["market_id"]), None
-                )
+                market_data = market_by_id.get(order["market_id"])
                 if market_data is None:
+                    # Market no longer has rewards, cancel
                     self.api.cancel_order(order["order_id"])
                     self.db.update_order_status(order["order_id"], "cancelled")
                     continue
 
-                reward_min = market_data.get("reward_range_min", 0)
-                reward_max = market_data.get("reward_range_max", 1)
-                if not (reward_min <= order["price"] <= reward_max):
-                    self.api.cancel_order(order["order_id"])
-                    self.db.update_order_status(order["order_id"], "cancelled")
-                    logger.info(
-                        "Cancelled order %s: price %.4f outside reward range [%.4f, %.4f]",
+                # Calculate reward range from orderbook midpoint and max_spread
+                try:
+                    ob = self.api.get_orderbook(order["token_id"])
+                    bids = ob.get("bids", [])
+                    asks = ob.get("asks", [])
+                    if bids and asks:
+                        midpoint = (
+                            float(bids[0]["price"]) + float(asks[0]["price"])
+                        ) / 2
+                        tick_size = float(ob.get("tick_size", "0.01"))
+                        max_spread = int(market_data.get("rewards_max_spread", 2))
+                        reward_min = midpoint - max_spread * tick_size
+                        reward_max = midpoint + max_spread * tick_size
+
+                        if not (reward_min <= order["price"] <= reward_max):
+                            self.api.cancel_order(order["order_id"])
+                            self.db.update_order_status(order["order_id"], "cancelled")
+                            logger.info(
+                                "Cancelled order %s: price %.4f outside reward range [%.4f, %.4f]",
+                                order["order_id"],
+                                order["price"],
+                                reward_min,
+                                reward_max,
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "Error checking reward range for order %s: %s",
                         order["order_id"],
-                        order["price"],
-                        reward_min,
-                        reward_max,
+                        e,
                     )
         except Exception as e:
             logger.error("Error checking existing orders: %s", e)

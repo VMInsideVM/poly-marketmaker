@@ -128,16 +128,10 @@ class MarketScanner:
         min_size = int(market.get("rewards_min_size", 0))
 
         # Calculate reward range: midpoint +/- max_spread ticks
-        # The tick_size determines price granularity
+        # The tick_size comes from the orderbook response (GET /book)
         midpoint = (best_bid + best_ask) / 2
-        tick_size = 0.01  # default 1 cent
-        # Polymarket markets use either 0.01 or 0.001 tick sizes
-        # Check if prices suggest fine-grained ticks
-        if any(
-            "." in str(b["price"]) and len(str(b["price"]).split(".")[-1]) >= 3
-            for b in bids[:3]
-        ):
-            tick_size = 0.001
+        tick_size_str = orderbook.get("tick_size", "0.01")
+        tick_size = float(tick_size_str)
 
         reward_range_min = midpoint - max_spread * tick_size
         reward_range_max = midpoint + max_spread * tick_size
@@ -168,6 +162,8 @@ class MarketScanner:
             "rewards_max_spread": max_spread,
             "rewards_min_size": min_size,
             "tick_size": tick_size,
+            "tick_size_str": tick_size_str,  # string for API calls ("0.01" or "0.001")
+            "neg_risk": market.get("neg_risk", False),
             "reward_range_min": reward_range_min,
             "reward_range_max": reward_range_max,
             "order_price": order_price,

@@ -27,7 +27,8 @@ class OrderMonitor:
     def _process_order(self, order: dict, settings: dict):
         order_id = order["order_id"]
         remote = self.api.get_order(order_id)
-        size_matched = int(remote.get("size_matched", 0))
+        # size_matched is a string like "100.0" from the API
+        size_matched = int(float(remote.get("size_matched", "0")))
         prev_matched = self._last_matched.get(order_id, 0)
         new_fill = size_matched - prev_matched
 
@@ -63,7 +64,9 @@ class OrderMonitor:
             size=new_fill,
         )
 
-        is_fully_filled = remote.get("status") == "MATCHED"
+        # Fully filled when size_matched equals original_size
+        original_size = int(float(remote.get("original_size", "0")))
+        is_fully_filled = size_matched >= original_size
         if is_fully_filled:
             self.db.update_order_status(order_id, "filled")
             del self._last_matched[order_id]

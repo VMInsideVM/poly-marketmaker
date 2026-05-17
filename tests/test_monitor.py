@@ -32,7 +32,11 @@ class TestCheckBuyOrders:
                 "size": 1000,
             }
         ]
-        api.get_order.return_value = {"status": "MATCHED", "size_matched": "1000"}
+        api.get_order.return_value = {
+            "status": "MATCHED",
+            "size_matched": "1000",
+            "original_size": "1000",
+        }
         api.place_limit_sell.return_value = {"orderID": "sell1"}
 
         monitor.check_buy_orders()
@@ -54,7 +58,11 @@ class TestCheckBuyOrders:
                 "size": 1000,
             }
         ]
-        api.get_order.return_value = {"status": "OPEN", "size_matched": "600"}
+        api.get_order.return_value = {
+            "status": "OPEN",
+            "size_matched": "600",
+            "original_size": "1000",
+        }
         api.place_limit_sell.return_value = {"orderID": "sell1"}
 
         monitor.check_buy_orders()
