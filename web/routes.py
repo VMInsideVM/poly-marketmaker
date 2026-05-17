@@ -194,14 +194,28 @@ def api_list_wallets():
 @login_required
 def api_add_wallet():
     data = request.get_json()
-    private_key = data.get("private_key", "").strip()
-    # Remove non-ASCII characters (invisible Unicode, Chinese quotes, etc.)
-    private_key = private_key.encode("ascii", errors="ignore").decode("ascii").strip()
-    if not private_key:
-        return jsonify({"error": "请输入私钥"}), 400
-    # Ensure 0x prefix
-    if not private_key.startswith("0x"):
-        private_key = "0x" + private_key
+    raw_key = data.get("private_key", "")
+    # Only keep hex characters (0-9, a-f, A-F) and 'x' for 0x prefix
+    import re
+
+    private_key = re.sub(r"[^0-9a-fA-Fx]", "", raw_key)
+    # Remove any 0x prefix, then re-add it
+    private_key = (
+        private_key.lstrip("0x")
+        if private_key.startswith("0x") or private_key.startswith("0X")
+        else private_key
+    )
+    private_key = re.sub(r"[^0-9a-fA-F]", "", private_key)  # strip any remaining x
+    if not private_key or len(private_key) != 64:
+        return (
+            jsonify(
+                {
+                    "error": f"私钥格式错误：需要64位十六进制字符，当前{len(private_key)}位"
+                }
+            ),
+            400,
+        )
+    private_key = "0x" + private_key
 
     from api.polymarket_api import PolymarketAPI
 
