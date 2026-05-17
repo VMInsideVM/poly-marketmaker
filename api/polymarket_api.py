@@ -25,12 +25,12 @@ REWARDS_API = POLYMARKET_HOST
 class PolymarketAPI:
     """Wrapper for one wallet's Polymarket connection."""
 
-    def __init__(self, private_key: str, signature_type: int = 2, funder: str = None):
+    def __init__(self, private_key: str, signature_type: int = 0, funder: str = None):
         """Initialize with private key.
 
         Args:
             private_key: Hex private key string.
-            signature_type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE (default).
+            signature_type: 0=EOA (default), 1=POLY_PROXY, 2=GNOSIS_SAFE.
             funder: Proxy wallet address. If None, derived from private key.
         """
         self.private_key = private_key
