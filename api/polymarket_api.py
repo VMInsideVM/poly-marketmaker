@@ -182,12 +182,16 @@ class PolymarketAPI:
         min_price: float = None,
         max_price: float = None,
         max_spread: float = None,
+        order_by: str = "rate_per_day",
+        position: str = "DESC",
     ) -> list[dict]:
         """Fetch markets with active rewards using GET /rewards/markets/multi.
 
-        Supports server-side filtering to reduce data transfer:
+        Supports server-side filtering and sorting:
           - min_price/max_price: filter by first token price
           - max_spread: filter by current spread
+          - order_by: sort field (rate_per_day, volume_24hr, spread, end_date, etc.)
+          - position: ASC or DESC
 
         Returns list of dicts with keys:
           - condition_id, market_id, question, market_slug, end_date
@@ -209,6 +213,10 @@ class PolymarketAPI:
                     params["max_price"] = max_price
                 if max_spread is not None:
                     params["max_spread"] = max_spread
+                if order_by:
+                    params["order_by"] = order_by
+                if position:
+                    params["position"] = position
                 if next_cursor:
                     params["next_cursor"] = next_cursor
                 logger.info("Fetching rewards markets page %d...", page)
