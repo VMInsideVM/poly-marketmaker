@@ -38,7 +38,7 @@ class PolymarketAPI:
             key=private_key,
             chain_id=CHAIN_ID,
         )
-        api_creds = temp_client.create_or_derive_api_creds()
+        api_creds = temp_client.create_or_derive_api_key()
         # Step 2: Create full client with L2 auth
         self.client = ClobClient(
             host=POLYMARKET_HOST,
