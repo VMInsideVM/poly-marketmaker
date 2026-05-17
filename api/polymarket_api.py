@@ -69,10 +69,11 @@ class PolymarketAPI:
     # --- Balance ---
 
     def get_balance(self) -> float:
-        """Get pUSD (collateral) balance for this wallet."""
+        """Get pUSD (collateral) balance for this wallet, in human-readable units."""
         params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         bal = self.client.get_balance_allowance(params)
-        return float(bal.get("balance", 0))
+        raw = float(bal.get("balance", 0))
+        return raw / 1e6  # pUSD has 6 decimals
 
     # --- Order Placement ---
 
