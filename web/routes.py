@@ -174,19 +174,29 @@ def api_save_settings():
 def api_list_wallets():
     wallets = db.list_wallets()
     for w in wallets:
-        w.pop("encrypted_key", None)
-    if manager:
-        for w in wallets:
+        encrypted_key = w.pop("encrypted_key", None)
+        w["running"] = False
+        w["balance"] = None
+        if manager:
             eng = manager.engines.get(w["address"])
             if eng and eng.running:
+                w["running"] = True
                 try:
                     w["balance"] = eng.api.get_balance()
                 except Exception:
-                    w["balance"] = None
-                w["running"] = True
-            else:
-                w["balance"] = None
-                w["running"] = False
+                    pass
+            elif encrypted_key and encryption_key:
+                # Engine not running, but still try to fetch balance
+                try:
+                    from utils.crypto import decrypt
+
+                    pk = decrypt(encrypted_key, encryption_key)
+                    from api.polymarket_api import PolymarketAPI
+
+                    tmp_api = PolymarketAPI(pk)
+                    w["balance"] = tmp_api.get_balance()
+                except Exception:
+                    pass
     return jsonify(wallets)
 
 
@@ -399,6 +409,17 @@ def api_dashboard():
                 running = True
                 try:
                     balance = eng.api.get_balance()
+                except Exception:
+                    pass
+            elif not running and encryption_key:
+                try:
+                    from utils.crypto import decrypt
+
+                    pk = decrypt(w["encrypted_key"], encryption_key)
+                    from api.polymarket_api import PolymarketAPI
+
+                    tmp_api = PolymarketAPI(pk)
+                    balance = tmp_api.get_balance()
                 except Exception:
                     pass
         wallet_summaries.append(
