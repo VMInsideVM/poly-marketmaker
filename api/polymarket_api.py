@@ -62,6 +62,26 @@ class PolymarketAPI:
         """Get orderbook for a token. Returns {bids: [...], asks: [...]}."""
         return self.client.get_order_book(token_id)
 
+    def get_spread(self, token_id: str) -> float:
+        """Get spread for a token via GET /spread.
+
+        Returns spread as float (e.g., 0.02 = 2 cents).
+        Returns -1 if no orderbook exists.
+        """
+        try:
+            resp = requests.get(
+                f"{POLYMARKET_HOST}/spread",
+                params={"token_id": token_id},
+                timeout=10,
+            )
+            if resp.status_code == 404:
+                return -1
+            resp.raise_for_status()
+            return float(resp.json().get("spread", "0"))
+        except Exception as e:
+            logger.warning("Failed to get spread for %s: %s", token_id, e)
+            return -1
+
     def get_last_trade_price(self, token_id: str) -> float:
         """Get last trade price for a token."""
         resp = self.client.get_last_trade_price(token_id)

@@ -58,11 +58,10 @@ def display_market(idx, c):
     print(f"{'=' * 70}")
     print(f"  网址:          {c['url']}")
     print(f"  方向:          {c['outcome']} (token价格: {c['token_price']:.2f})")
-    print(f"  condition_id:  {c['condition_id'][:40]}...")
+    print(f"  condition_id:  {c['condition_id']}")
     print()
     print(f"  【奖励】")
-    print(f"    该token每日奖励: ${c['token_daily_rate']:.2f}/天")
-    print(f"    市场总奖励:      ${c['market_daily_rate']:.2f}/天")
+    print(f"    市场每日奖励:    ${c['market_daily_rate']:.2f}/天")
     print(f"    max_spread:      {c['max_spread']}")
     print(f"    min_size:        {c['min_size']}")
     print()
@@ -198,7 +197,7 @@ def main():
         if not tokens:
             continue
 
-        print(f"\n  [{i+1}/{len(candidates)}] 检查: {question[:50]}...")
+        print(f"\n  [{i+1}/{len(candidates)}] 检查: {question}")
 
         # --- Step 2: 结算日期 ---
         end_date_str = market.get("end_date", "")
@@ -218,58 +217,100 @@ def main():
         )
         time.sleep(0.3)
 
-        # 找出每个 token 对应的 rate_per_day
-        # raw_rewards 返回的数据结构中可能包含 per-token 的信息
-        # 如果没有 per-token 区分，就用总 rate / token 数量
-        token_rates = {}
-        if raw_rewards:
-            # 看 raw_rewards 数据中是否有 token_id 或类似字段
-            for rd in raw_rewards:
-                rd_config = rd.get("rewards_config", [])
-                # 如果有多条 rewards_config，每条对应一个 token
-                for rc in rd_config:
-                    rate = rc.get("rate_per_day", 0)
-                    # 如果能关联到 token，就分配；否则平分
-                    token_rates.setdefault("_total", 0)
-                    token_rates["_total"] += rate
+        # 展示 raw_rewards 的完整 rewards_config
+        print(f"    [raw rewards] 返回 {len(raw_rewards)} 条数据:")
+        total_from_raw = 0
+        per_config_rates = []
+        for rd in raw_rewards:
+            rd_cid = rd.get("condition_id", "?")
+            rd_question = rd.get("question", "")
+            if rd_question:
+                print(f"      condition_id={rd_cid}")
+                print(f"      question={rd_question}")
+            rd_config = rd.get("rewards_config", [])
+            for rc in rd_config:
+                rc_id = rc.get("id", "?")
+                rate = rc.get("rate_per_day", 0)
+                asset = rc.get("asset_address", "?")
+                start = rc.get("start_date", "?")
+                end = rc.get("end_date", "?")
+                print(
+                    f"      id={rc_id}, rate_per_day=${rate}, asset={asset}, period={start}~{end}"
+                )
+                total_from_raw += rate
+                per_config_rates.append(rate)
 
-        # 如果没有获取到 per-token 数据，用 /multi 返回的总和平分
-        if not token_rates:
-            token_rates["_total"] = total_rate
+        if not per_config_rates:
+            print(f"      (无数据，使用 /multi 的总和)")
+            total_from_raw = total_rate
 
-        rate_per_token = token_rates.get("_total", total_rate) / max(len(tokens), 1)
+        # 该 market 的总每日奖励 = rewards_config 中所有 rate_per_day 之和
+        market_reward = total_from_raw
+        print(f"    该market总 rate_per_day=${market_reward:.2f}")
 
-        # --- Step 3b: 检查每个 token ---
-        for token in tokens:
+        # 判断该 market 的奖励是否 >= 阈值
+        if market_reward < min_reward:
+            print(f"    ✗ market奖励不足 (${market_reward:.2f} < ${min_reward})")
+            stats["token_reward"] += 1
+            continue
+
+        # --- Step 3b: 检查该 market 是否有 token 价格在 10~50 美分之间 ---
+        # 展示所有 token 的价格
+        print(f"    tokens:")
+        for t in tokens:
+            t_price = float(t.get("price", 0))
+            t_outcome = t.get("outcome", "?")
+            in_range = min_price_cents <= t_price * 100 <= max_price_cents
+            mark = "✓" if in_range else "✗"
+            print(
+                f"      {mark} {t_outcome}: {t_price * 100:.1f}美分 {'(符合)' if in_range else '(超范围)'}"
+            )
+
+        # 找到价格在范围内的 token
+        valid_tokens = [
+            t
+            for t in tokens
+            if min_price_cents <= float(t.get("price", 0)) * 100 <= max_price_cents
+        ]
+        if not valid_tokens:
+            print(
+                f"    ✗ 该market没有价格在 [{min_price_cents}, {max_price_cents}] 美分范围内的token"
+            )
+            stats["price"] += 1
+            continue
+
+        # 对每个符合价格的 token 检查订单簿
+        for token in valid_tokens:
             if len(matched) >= 5:
                 break
 
             token_id = token.get("token_id", "")
             token_price = float(token.get("price", 0))
             outcome = token.get("outcome", "?")
+            print(f"    检查 {outcome} token_id={token_id}")
 
-            # 价格范围
-            price_cents = token_price * 100
-            if price_cents < min_price_cents or price_cents > max_price_cents:
-                stats["price"] += 1
+            # --- Step 4a: 用 GET /spread 快速筛选价差 ---
+            spread_val = safe_call(lambda tid=token_id: api.get_spread(tid), -1)
+            time.sleep(0.2)
+
+            if spread_val is None or spread_val < 0:
+                print(f"    ✗ {outcome} 无订单簿")
+                stats["no_book"] += 1
                 continue
 
-            # 单token奖励检查（保守用平分的值）
-            if rate_per_token < min_reward:
+            spread_cents = spread_val * 100
+            print(f"    {outcome} spread={spread_cents:.2f}美分 (via GET /spread)")
+
+            if spread_cents >= max_spread_cents:
                 print(
-                    f"    ✗ {outcome} token 奖励不足 (${rate_per_token:.2f} < ${min_reward})"
+                    f"    ✗ {outcome} 价差过大 ({spread_cents:.2f}美分 >= {max_spread_cents}美分)"
                 )
-                stats["token_reward"] += 1
+                stats["spread"] += 1
                 continue
 
-            # 余额
-            if min_size * token_price > balance:
-                stats["balance"] += 1
-                continue
-
-            # --- Step 4: 订单簿 ---
+            # --- Step 4b: 价差通过，拉完整订单簿 ---
             ob = safe_call(lambda tid=token_id: api.get_orderbook(tid), {})
-            time.sleep(0.3)
+            time.sleep(0.2)
 
             if not ob or not ob.get("bids") or not ob.get("asks"):
                 stats["no_book"] += 1
@@ -280,24 +321,15 @@ def main():
             tick_size = ob.get("tick_size", "0.01")
             best_bid = float(bids[0]["price"])
             best_ask = float(asks[0]["price"])
-            spread_cents = (best_ask - best_bid) * 100
 
-            if spread_cents >= max_spread_cents:
-                print(
-                    f"    ✗ {outcome} 价差过大 ({spread_cents:.2f}美分 ≥ {max_spread_cents}美分)"
-                )
-                stats["spread"] += 1
-                continue
+            print(f"    {outcome} orderbook: bid1={bids[0]}, ask1={asks[0]}")
 
-            # 再次确认价格
+            # 确认价格（用实际 best_bid）
             if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
                 stats["price"] += 1
                 continue
 
             required = min_size * best_bid
-            if required > balance:
-                stats["balance"] += 1
-                continue
 
             # URL
             if market_slug:
@@ -315,8 +347,7 @@ def main():
                     "condition_id": condition_id,
                     "token_price": token_price,
                     "url": url,
-                    "token_daily_rate": rate_per_token,
-                    "market_daily_rate": total_rate,
+                    "market_daily_rate": market_reward,
                     "max_spread": max_spread,
                     "min_size": min_size,
                     "days_left": days_left,
