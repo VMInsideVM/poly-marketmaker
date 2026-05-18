@@ -42,7 +42,8 @@ class OrderMonitor:
         funder = self._funder()
         try:
             params = TradeParams(
-                maker_address=funder, after=str(int(self._after_ts)) or None
+                maker_address=funder,
+                after=(str(int(self._after_ts)) if self._after_ts else None),
             )
             trades = self.api.get_trades(params)
         except Exception as e:
@@ -165,7 +166,7 @@ class OrderMonitor:
         for o in open_orders:
             if o.get("side") != "BUY":
                 continue
-            if int(float(o.get("size_matched", 0) or 0)) != 0:
+            if float(o.get("size_matched", 0) or 0) > 0:
                 continue
             try:
                 self._check_compliance(o)

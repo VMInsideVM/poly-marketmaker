@@ -128,6 +128,29 @@ class TestCheckBuyOrders:
         assert ("t1", "o1") in monitor._seen_fill_keys
         assert monitor._after_ts == 9999.0
 
+    def test_handle_fill_exception_still_marks_seen(self):
+        """If place_limit_sell raises, seen-key and watermark must still be updated."""
+        monitor, api, db = _make_monitor()
+        api.get_trades.return_value = []
+        api.place_limit_sell.side_effect = Exception("boom")
+
+        with patch("engine.monitor.select_new_buy_fills") as mock_fills:
+            mock_fills.return_value = [
+                {
+                    "trade_id": "T",
+                    "order_id": "O",
+                    "asset_id": "A",
+                    "price": 0.5,
+                    "size": 10.0,
+                    "market": "M",
+                    "ts": 123.0,
+                }
+            ]
+            monitor.check_buy_orders()  # must not raise
+
+        assert ("T", "O") in monitor._seen_fill_keys
+        assert monitor._after_ts == 123.0
+
 
 # ---------------------------------------------------------------------------
 # Step 2: check_stop_loss — Data API positions
