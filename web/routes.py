@@ -53,7 +53,6 @@ def _get_cached_api(address: str, encrypted_key: str, funder: str = ""):
     """Get or create a cached PolymarketAPI instance for balance queries."""
     if address in _api_cache:
         return _api_cache[address]
-    from utils.crypto import decrypt
     from api.polymarket_api import PolymarketAPI
 
     pk = decrypt(encrypted_key, encryption_key)
@@ -433,7 +432,10 @@ def api_cancel_batch():
     items = data.get("orders", [])  # [{order_id, wallet}, ...]
     by_wallet = {}
     for it in items:
-        by_wallet.setdefault(it["wallet"], []).append(it["order_id"])
+        w, oid = it.get("wallet"), it.get("order_id")
+        if not w or not oid:
+            continue
+        by_wallet.setdefault(w, []).append(oid)
     apis = _wallet_apis()
     for addr, ids in by_wallet.items():
         api = apis.get(addr)
@@ -449,19 +451,22 @@ def api_cancel_batch():
 @login_required
 def api_cancel_order(order_id):
     wallet = request.args.get("wallet")
-    api = _wallet_apis(wallet).get(wallet) if wallet else None
-    if not api:
-        # fall back: try every enabled wallet
-        for a in _wallet_apis().values():
-            try:
-                a.cancel_orders([order_id])
-            except Exception:
-                pass
+    apis = _wallet_apis(wallet)
+    if wallet:
+        api = apis.get(wallet)
+        if api is None:
+            return jsonify({"error": "钱包不可用"}), 404
+        try:
+            api.cancel_orders([order_id])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
         return jsonify({"ok": True})
-    try:
-        api.cancel_orders([order_id])
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    # no wallet specified: try every enabled wallet (single _wallet_apis call)
+    for a in apis.values():
+        try:
+            a.cancel_orders([order_id])
+        except Exception:
+            pass
     return jsonify({"ok": True})
 
 
