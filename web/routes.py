@@ -272,6 +272,9 @@ def api_toggle_wallet(address):
 # --- API: Engine Control ---
 
 
+# --- Auto mode ---
+
+
 @app.route("/api/engine/start-all", methods=["POST"])
 @login_required
 def api_start_all():
@@ -286,6 +289,25 @@ def api_stop_all():
     if manager:
         manager.stop_all()
     return jsonify({"ok": True, "message": "止损监控已停止，请注意现有持仓风险"})
+
+
+@app.route("/api/engine/restart", methods=["POST"])
+@login_required
+def api_restart():
+    if manager:
+        manager.restart_all()
+    return jsonify({"ok": True})
+
+
+# --- Manual mode ---
+
+
+@app.route("/api/engine/start-monitors", methods=["POST"])
+@login_required
+def api_start_monitors():
+    if manager:
+        manager.start_monitors()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/engine/scan", methods=["POST"])

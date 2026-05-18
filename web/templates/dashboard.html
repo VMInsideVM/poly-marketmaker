@@ -3,11 +3,19 @@
 <div class="page-header">
     <h1>仪表盘</h1>
     <div class="controls">
-        <button class="btn btn-success" onclick="engineAction('start-all')">启动监控</button>
-        <button class="btn btn-danger" onclick="engineAction('stop-all', '止损监控将停止，确定要停止吗？')">停止监控</button>
-        <button class="btn btn-primary" onclick="scanMarkets()">扫描市场</button>
-        <button class="btn btn-success" onclick="placeOrders()">分发挂单</button>
-        <button class="btn btn-danger" onclick="cancelAllOrders()">全部撤单</button>
+        <button class="btn btn-success" onclick="engineAction('start-all')">全部启动</button>
+        <button class="btn btn-danger" onclick="engineAction('stop-all', '止损监控将停止，确定要停止所有引擎吗？')">全部停止</button>
+        <button class="btn btn-warning" onclick="engineAction('restart', '将重启所有引擎以加载新参数，确定吗？')">重启引擎</button>
+    </div>
+</div>
+
+<div class="config-section" style="margin-bottom:16px;">
+    <h3>手动调试</h3>
+    <div class="controls">
+        <button class="btn btn-sm btn-primary" onclick="engineAction('start-monitors')">启动监控</button>
+        <button class="btn btn-sm btn-primary" onclick="scanMarkets()">扫描市场</button>
+        <button class="btn btn-sm btn-success" onclick="placeOrders()">分发挂单</button>
+        <button class="btn btn-sm btn-danger" onclick="cancelAllOrders()">全部撤单</button>
     </div>
 </div>
 

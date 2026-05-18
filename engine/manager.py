@@ -192,22 +192,25 @@ class EngineManager:
         self.eligible_markets: list[dict] = []  # Latest scan results
         self.last_scan_time: float = 0
 
-    def start_all(self):
-        """Start all wallet workers + monitor threads.
+    # === Auto mode: full engine lifecycle ===
 
-        Runs startup_recovery first to clean up stale state.
-        Does NOT start scanning or placing orders — use scan_markets() and place_all_orders().
-        """
+    def start_all(self):
+        """Start everything: recovery + wallet workers + auto scanner loop."""
         self.startup_recovery()
 
         wallets = self.db.list_wallets()
         for w in wallets:
             if w["enabled"]:
                 self.start_wallet(w["address"], w["encrypted_key"])
-        logger.info("Started %d wallet workers", len(self.engines))
+
+        # Start auto scanner loop
+        self._stop_event.clear()
+        self._scanner_thread = threading.Thread(target=self._scanner_loop, daemon=True)
+        self._scanner_thread.start()
+        logger.info("Engine started: %d wallets + auto scanner", len(self.engines))
 
     def stop_all(self):
-        """Stop scanner + all wallet workers, cancel all buy orders."""
+        """Stop everything: scanner + all wallet workers, cancel all buy orders."""
         self._stop_event.set()
         if self._scanner_thread:
             self._scanner_thread.join(timeout=30)
@@ -215,7 +218,24 @@ class EngineManager:
 
         for address in list(self.engines.keys()):
             self.stop_wallet(address)
-        logger.info("Engine manager stopped")
+        logger.info("Engine stopped")
+
+    def restart_all(self):
+        """Restart with fresh settings."""
+        self.stop_all()
+        self.start_all()
+
+    # === Manual mode: step-by-step controls ===
+
+    def start_monitors(self):
+        """Start wallet workers (monitor only, no auto scanning)."""
+        self.startup_recovery()
+
+        wallets = self.db.list_wallets()
+        for w in wallets:
+            if w["enabled"]:
+                self.start_wallet(w["address"], w["encrypted_key"])
+        logger.info("Started %d wallet monitors", len(self.engines))
 
     def cancel_all_buy_orders(self):
         """Cancel all buy orders across all wallets."""
