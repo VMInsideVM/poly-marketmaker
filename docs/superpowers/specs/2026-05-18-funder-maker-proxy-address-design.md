@@ -28,7 +28,10 @@ funder=funder or temp_client.get_address(),
    （git `4e12601`/`f6e43e9`），最新 `1139272` 已 revert 回 sig=2 并说明
    "资金在 proxy wallet，不在 deposit wallet"——该值很可能是 deposit wallet
    地址，与 sig=2 需要的 Safe 地址不一致；
-2. 当前 `add_wallet`/`list_wallets` 既不写也不读该列，数据流断裂。
+2. 当前 `add_wallet`/`list_wallets` 既不写也不读该列，数据流断裂；
+3. `models/database.py` 的 `_create_tables()` 中 `wallets` 表 schema **不含**
+   `funder` 列，亦无任何迁移逻辑——线上库有该列仅因早期已 revert 的代码建过，
+   全新安装会建出无 `funder` 列的表。故需在 schema 中补列并提供幂等迁移。
 
 ## 目标
 
@@ -92,8 +95,12 @@ maker 地址。
 
 ### 2. `models/database.py`
 
+- `_create_tables()`：`wallets` 表 schema 增加 `funder TEXT` 列。
+- `init()`：增加幂等迁移——`PRAGMA table_info(wallets)` 检查，若无 `funder`
+  列则 `ALTER TABLE wallets ADD COLUMN funder TEXT`（SQLite 无
+  `ADD COLUMN IF NOT EXISTS`，须先查后加）。兼顾全新库与已有库。
 - `add_wallet(self, address, encrypted_key, funder=None)`：INSERT 带上 `funder`
-  列（列已存在）。
+  列。
 - `list_wallets()`：SELECT 增加 `funder`，供仪表盘展示。
 - 新增 `update_wallet_funder(self, address, funder)`：供回填使用。
 
@@ -141,7 +148,7 @@ maker 地址。
 | 文件 | 改动 |
 |---|---|
 | `api/polymarket_api.py` | 新增 RELAYER_URL 常量、`derive_proxy_address` 静态方法、改写 `__init__` funder 解析、`self.funder` |
-| `models/database.py` | `add_wallet` 带 funder、`list_wallets` 返回 funder、新增 `update_wallet_funder` |
+| `models/database.py` | schema 补 `funder` 列 + `init()` 幂等迁移、`add_wallet` 带 funder、`list_wallets` 返回 funder、新增 `update_wallet_funder` |
 | `web/routes.py` | `api_add_wallet` 持久化并返回 `api.funder` |
 | `engine/manager.py` | `startup_recovery` 回填 funder |
 | `tests/test_proxy_derivation.py` | 新增纯逻辑测试 |
