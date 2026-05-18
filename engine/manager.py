@@ -300,15 +300,24 @@ class EngineManager:
         logger.info("Saved %d eligible markets to database", len(eligible))
 
     def place_all_orders(self):
-        """Distribute eligible markets to all wallets for order placement."""
+        """Distribute eligible markets to all wallets for order placement.
+
+        Orders are placed from lowest competitiveness first (less competition = more reward share).
+        """
         if not self.eligible_markets:
             logger.warning("No eligible markets to place orders on")
             return
 
+        # Sort: lowest competitiveness first
+        sorted_markets = sorted(
+            self.eligible_markets,
+            key=lambda m: float(m.get("market_competitiveness", 0) or 0),
+        )
+
         for address, worker in self.engines.items():
             if worker.running:
                 try:
-                    worker.place_orders(self.eligible_markets)
+                    worker.place_orders(sorted_markets)
                 except Exception as e:
                     logger.error("Error placing orders for %s: %s", address, e)
         logger.info(
