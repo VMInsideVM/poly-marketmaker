@@ -26,13 +26,13 @@ REWARDS_API = POLYMARKET_HOST
 class PolymarketAPI:
     """Wrapper for one wallet's Polymarket connection."""
 
-    def __init__(self, private_key: str, signature_type: int = 2, funder: str = None):
+    def __init__(self, private_key: str, signature_type: int = 3, funder: str = None):
         """Initialize with private key.
 
         Args:
             private_key: Hex private key string.
-            signature_type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE (default, for browser wallets).
-            funder: Proxy wallet address. If None, derived from private key.
+            signature_type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE, 3=POLY_1271 (default, deposit wallet).
+            funder: Deposit/proxy wallet address (from polymarket.com/settings).
         """
         self.private_key = private_key
         # Step 1: Create temp client to derive API creds
@@ -49,7 +49,7 @@ class PolymarketAPI:
             chain_id=CHAIN_ID,
             creds=api_creds,
             signature_type=signature_type,
-            funder=funder or temp_client.get_address(),
+            funder=funder,
         )
 
     def get_address(self) -> str:

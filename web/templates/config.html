@@ -6,6 +6,7 @@
     <h2>钱包管理</h2>
     <div class="form-inline">
         <input type="password" id="new-private-key" placeholder="输入钱包私钥">
+        <input type="text" id="new-funder" placeholder="Deposit Wallet 地址 (polymarket.com/settings)">
         <button class="btn btn-primary" onclick="addWallet()">添加钱包</button>
     </div>
     <table class="data-table" id="wallet-config-table">
@@ -105,16 +106,20 @@ function loadWallets() {
 }
 
 function addWallet() {
-    const input = document.getElementById('new-private-key');
-    const key = input.value.trim();
+    const keyInput = document.getElementById('new-private-key');
+    const funderInput = document.getElementById('new-funder');
+    const key = keyInput.value.trim();
+    const funder = funderInput.value.trim();
     if (!key) { alert('请输入私钥'); return; }
+    if (!funder) { alert('请输入 Deposit Wallet 地址（在 polymarket.com/settings 查看）'); return; }
     fetch('/api/wallets', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({private_key: key}),
+        body: JSON.stringify({private_key: key, funder: funder}),
     }).then(r => r.json()).then(data => {
         if (data.error) { alert(data.error); return; }
-        input.value = '';
+        keyInput.value = '';
+        funderInput.value = '';
         loadWallets();
     });
 }

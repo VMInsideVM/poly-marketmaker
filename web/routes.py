@@ -49,7 +49,7 @@ def set_encryption_key(key: bytes):
     encryption_key = key
 
 
-def _get_cached_api(address: str, encrypted_key: str):
+def _get_cached_api(address: str, encrypted_key: str, funder: str = ""):
     """Get or create a cached PolymarketAPI instance for balance queries."""
     if address in _api_cache:
         return _api_cache[address]
@@ -57,7 +57,7 @@ def _get_cached_api(address: str, encrypted_key: str):
     from api.polymarket_api import PolymarketAPI
 
     pk = decrypt(encrypted_key, encryption_key)
-    api = PolymarketAPI(pk)
+    api = PolymarketAPI(pk, funder=funder)
     _api_cache[address] = api
     return api
 
@@ -200,7 +200,9 @@ def api_list_wallets():
                     pass
             elif encrypted_key and encryption_key:
                 try:
-                    api = _get_cached_api(w["address"], encrypted_key)
+                    api = _get_cached_api(
+                        w["address"], encrypted_key, w.get("funder", "")
+                    )
                     w["balance"] = api.get_balance()
                 except Exception:
                     pass
@@ -234,21 +236,32 @@ def api_add_wallet():
         )
     private_key = "0x" + private_key
 
+    funder = data.get("funder", "").strip()
+    if not funder:
+        return (
+            jsonify(
+                {
+                    "error": "请输入 Deposit Wallet 地址（在 polymarket.com/settings 查看）"
+                }
+            ),
+            400,
+        )
+
     from api.polymarket_api import PolymarketAPI
 
     try:
-        api = PolymarketAPI(private_key)
+        api = PolymarketAPI(private_key, funder=funder)
         address = api.get_address()
     except Exception as e:
         return jsonify({"error": f"私钥无效: {e}"}), 400
 
     encrypted = encrypt(private_key, encryption_key)
     try:
-        db.add_wallet(address, encrypted)
+        db.add_wallet(address, encrypted, funder=funder)
     except Exception:
         return jsonify({"error": "该钱包已存在"}), 400
 
-    return jsonify({"ok": True, "address": address})
+    return jsonify({"ok": True, "address": address, "funder": funder})
 
 
 @app.route("/api/wallets/<address>", methods=["DELETE"])
@@ -499,7 +512,9 @@ def api_dashboard():
                     pass
             elif not running and encryption_key:
                 try:
-                    api = _get_cached_api(w["address"], w["encrypted_key"])
+                    api = _get_cached_api(
+                        w["address"], w["encrypted_key"], w.get("funder", "")
+                    )
                     balance = api.get_balance()
                 except Exception:
                     pass

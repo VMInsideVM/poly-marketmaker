@@ -272,7 +272,9 @@ class EngineManager:
                     logger.error("No wallets available for scanning")
                     return
                 pk = decrypt(enabled[0]["encrypted_key"], self.encryption_key)
-                self._scanner_api = PolymarketAPI(pk)
+                self._scanner_api = PolymarketAPI(
+                    pk, funder=enabled[0].get("funder", "")
+                )
                 logger.info("Created scanner API from wallet %s", enabled[0]["address"])
 
         import time as _time
@@ -331,19 +333,20 @@ class EngineManager:
             len(self.engines),
         )
 
-    def start_wallet(self, address: str, encrypted_key: str = None):
+    def start_wallet(self, address: str, encrypted_key: str = None, funder: str = None):
         if address in self.engines and self.engines[address].running:
             return
 
-        if encrypted_key is None:
+        if encrypted_key is None or funder is None:
             wallets = self.db.list_wallets()
             wallet = next((w for w in wallets if w["address"] == address), None)
             if not wallet:
                 return
-            encrypted_key = wallet["encrypted_key"]
+            encrypted_key = encrypted_key or wallet["encrypted_key"]
+            funder = funder or wallet.get("funder", "")
 
         private_key = decrypt(encrypted_key, self.encryption_key)
-        api = PolymarketAPI(private_key)
+        api = PolymarketAPI(private_key, funder=funder)
         settings = self.db.get_settings()
         worker = WalletWorker(api, self.db, address, settings)
         self.engines[address] = worker
@@ -403,7 +406,7 @@ class EngineManager:
         for w in wallets:
             try:
                 private_key = decrypt(w["encrypted_key"], self.encryption_key)
-                api = PolymarketAPI(private_key)
+                api = PolymarketAPI(private_key, funder=w.get("funder", ""))
 
                 # Cancel all remaining buy orders
                 open_orders = api.get_open_orders()

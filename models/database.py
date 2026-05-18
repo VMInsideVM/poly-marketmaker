@@ -36,6 +36,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS wallets (
                 address TEXT PRIMARY KEY,
                 encrypted_key TEXT NOT NULL,
+                funder TEXT NOT NULL DEFAULT '',
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
@@ -144,11 +145,11 @@ class Database:
 
     # --- Wallets ---
 
-    def add_wallet(self, address: str, encrypted_key: str):
+    def add_wallet(self, address: str, encrypted_key: str, funder: str = ""):
         c = self.conn.cursor()
         c.execute(
-            "INSERT INTO wallets (address, encrypted_key) VALUES (?, ?)",
-            (address, encrypted_key),
+            "INSERT INTO wallets (address, encrypted_key, funder) VALUES (?, ?, ?)",
+            (address, encrypted_key, funder),
         )
         self.conn.commit()
 
@@ -167,7 +168,9 @@ class Database:
 
     def list_wallets(self) -> list[dict]:
         c = self.conn.cursor()
-        c.execute("SELECT address, encrypted_key, enabled, created_at FROM wallets")
+        c.execute(
+            "SELECT address, encrypted_key, funder, enabled, created_at FROM wallets"
+        )
         return [dict(row) for row in c.fetchall()]
 
     # --- Orders ---
