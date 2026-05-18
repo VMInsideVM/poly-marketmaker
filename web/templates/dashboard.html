@@ -3,9 +3,11 @@
 <div class="page-header">
     <h1>仪表盘</h1>
     <div class="controls">
-        <button class="btn btn-success" onclick="engineAction('start-all')">全部启动</button>
-        <button class="btn btn-danger" onclick="engineAction('stop-all', '止损监控将停止，确定要停止所有引擎吗？')">全部停止</button>
-        <button class="btn btn-warning" onclick="engineAction('restart', '将重启所有引擎以加载新参数，确定吗？')">重启引擎</button>
+        <button class="btn btn-success" onclick="engineAction('start-all')">启动监控</button>
+        <button class="btn btn-danger" onclick="engineAction('stop-all', '止损监控将停止，确定要停止吗？')">停止监控</button>
+        <button class="btn btn-primary" onclick="scanMarkets()">扫描市场</button>
+        <button class="btn btn-success" onclick="placeOrders()">分发挂单</button>
+        <button class="btn btn-danger" onclick="cancelAllOrders()">全部撤单</button>
     </div>
 </div>
 
@@ -78,6 +80,27 @@ function engineAction(action, confirmMsg) {
     if (confirmMsg && !confirm(confirmMsg)) return;
     fetch(`/api/engine/${action}`, {method: 'POST'}).then(r => r.json()).then(data => {
         if (data.message) alert(data.message);
+        refreshDashboard();
+    });
+}
+
+function scanMarkets() {
+    document.getElementById('scan-time').textContent = '正在扫描...';
+    fetch('/api/engine/scan', {method: 'POST'}).then(r => r.json()).then(data => {
+        refreshEligible();
+    });
+}
+
+function placeOrders() {
+    if (!confirm('确定将 eligible 列表分发到所有钱包挂单？')) return;
+    fetch('/api/engine/place-orders', {method: 'POST'}).then(r => r.json()).then(data => {
+        refreshDashboard();
+    });
+}
+
+function cancelAllOrders() {
+    if (!confirm('确定撤销所有钱包的全部买单？')) return;
+    fetch('/api/engine/cancel-all', {method: 'POST'}).then(r => r.json()).then(data => {
         refreshDashboard();
     });
 }

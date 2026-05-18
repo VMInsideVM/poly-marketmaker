@@ -288,11 +288,29 @@ def api_stop_all():
     return jsonify({"ok": True, "message": "止损监控已停止，请注意现有持仓风险"})
 
 
-@app.route("/api/engine/restart", methods=["POST"])
+@app.route("/api/engine/scan", methods=["POST"])
 @login_required
-def api_restart():
+def api_scan_markets():
     if manager:
-        manager.restart_all()
+        manager.scan_markets()
+    return jsonify(
+        {"ok": True, "count": len(manager.eligible_markets) if manager else 0}
+    )
+
+
+@app.route("/api/engine/place-orders", methods=["POST"])
+@login_required
+def api_place_orders():
+    if manager:
+        manager.place_all_orders()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/engine/cancel-all", methods=["POST"])
+@login_required
+def api_cancel_all_buy():
+    if manager:
+        manager.cancel_all_buy_orders()
     return jsonify({"ok": True})
 
 

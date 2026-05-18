@@ -193,38 +193,78 @@ class EngineManager:
         self.last_scan_time: float = 0
 
     def start_all(self):
-        """Start all wallet workers + shared scanner.
+        """Start all wallet workers + monitor threads.
 
         Runs startup_recovery first to clean up stale state.
+        Does NOT start scanning or placing orders — use scan_markets() and place_all_orders().
         """
-        # Recovery: cancel stale buy orders, handle offline fills
         self.startup_recovery()
 
         wallets = self.db.list_wallets()
         for w in wallets:
             if w["enabled"]:
                 self.start_wallet(w["address"], w["encrypted_key"])
-
-        # Start shared scanner thread
-        self._stop_event.clear()
-        self._scanner_thread = threading.Thread(target=self._scanner_loop, daemon=True)
-        self._scanner_thread.start()
-        logger.info("Engine manager started with %d wallets", len(self.engines))
+        logger.info("Started %d wallet workers", len(self.engines))
 
     def stop_all(self):
-        """Stop scanner + all wallet workers."""
+        """Stop scanner + all wallet workers, cancel all buy orders."""
         self._stop_event.set()
         if self._scanner_thread:
             self._scanner_thread.join(timeout=30)
+            self._scanner_thread = None
 
         for address in list(self.engines.keys()):
             self.stop_wallet(address)
         logger.info("Engine manager stopped")
 
-    def restart_all(self):
-        """Restart with fresh settings."""
-        self.stop_all()
-        self.start_all()
+    def cancel_all_buy_orders(self):
+        """Cancel all buy orders across all wallets."""
+        for address, worker in self.engines.items():
+            if worker.running:
+                try:
+                    worker._cancel_buy_orders()
+                except Exception as e:
+                    logger.error("Error cancelling orders for %s: %s", address, e)
+        logger.info("Cancelled all buy orders across all wallets")
+
+    def scan_markets(self):
+        """Run a single scan to produce the eligible markets list.
+
+        Called manually by user, not on a timer.
+        """
+        if not self._scanner_api:
+            # Use first available wallet API for scanning
+            if self.engines:
+                self._scanner_api = next(iter(self.engines.values())).api
+            else:
+                logger.error("No wallets available for scanning")
+                return
+
+        import time as _time
+
+        scanner = MarketScanner(self._scanner_api, self.db, "")
+        eligible = scanner.scan()
+        self.eligible_markets = eligible
+        self.last_scan_time = _time.time()
+        logger.info("Scanner found %d eligible markets", len(eligible))
+
+    def place_all_orders(self):
+        """Distribute eligible markets to all wallets for order placement."""
+        if not self.eligible_markets:
+            logger.warning("No eligible markets to place orders on")
+            return
+
+        for address, worker in self.engines.items():
+            if worker.running:
+                try:
+                    worker.place_orders(self.eligible_markets)
+                except Exception as e:
+                    logger.error("Error placing orders for %s: %s", address, e)
+        logger.info(
+            "Distributed %d eligible markets to %d wallets",
+            len(self.eligible_markets),
+            len(self.engines),
+        )
 
     def start_wallet(self, address: str, encrypted_key: str = None):
         if address in self.engines and self.engines[address].running:
