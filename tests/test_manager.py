@@ -48,13 +48,14 @@ class TestEngineLifecycle:
             with patch("engine.manager.PolymarketAPI", return_value=mock_api):
                 manager.start_all()
                 # Reset after startup_recovery calls
-                mock_api.cancel_order.reset_mock()
+                mock_api.cancel_orders.reset_mock()
                 manager.stop_all()
-                # Should only cancel buy orders (called once per wallet, 2 wallets)
+                # Batched cancel: cancel_orders called once per wallet (2 wallets),
+                # each call with only the BUY order ids
+                assert mock_api.cancel_orders.call_count == 2
                 assert all(
-                    c.args == ("o1",) for c in mock_api.cancel_order.call_args_list
+                    c.args == (["o1"],) for c in mock_api.cancel_orders.call_args_list
                 )
-                assert mock_api.cancel_order.call_count == 2
 
     def test_get_status(self):
         manager, db = _make_manager()
