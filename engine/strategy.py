@@ -46,7 +46,7 @@ def _strategy_cumulative(
     """0.1-cent tick strategy: find cumulative > threshold, return next position."""
     cumulative = 0
     for i, bid in enumerate(bids):
-        cumulative += int(bid["size"])
+        cumulative += int(float(bid["size"]))
         if cumulative > threshold:
             # Place at the next position (one level deeper)
             if i + 1 < len(bids):
@@ -70,7 +70,7 @@ def _strategy_spread2_coarse(
     if not bids:
         return None
 
-    bid1_size = int(bids[0]["size"])
+    bid1_size = int(float(bids[0]["size"]))
     if bid1_size > 2000:
         if len(bids) < 2:
             return None
@@ -94,7 +94,7 @@ def _strategy_spread_ge3_coarse(
 
     for i, bid in enumerate(bids):
         bid_price = float(bid["price"])
-        bid_size = int(bid["size"])
+        bid_size = int(float(bid["size"]))
 
         if bid_price < min_price:
             break  # Exceeded max_spread, stop

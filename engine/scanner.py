@@ -196,13 +196,19 @@ class MarketScanner:
                 reward_range_min = midpoint - max_spread_reward * tick_size
                 reward_range_max = midpoint + max_spread_reward * tick_size
 
-                order_price = determine_order_price(
-                    bids=bids,
-                    max_spread=max_spread_reward,
-                    tick_size=tick_size,
-                    reward_range_min=reward_range_min,
-                    reward_range_max=reward_range_max,
-                )
+                try:
+                    order_price = determine_order_price(
+                        bids=bids,
+                        max_spread=max_spread_reward,
+                        tick_size=tick_size,
+                        reward_range_min=reward_range_min,
+                        reward_range_max=reward_range_max,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Strategy error for %s [%s]: %s", question, outcome, e
+                    )
+                    continue
                 if order_price is None:
                     continue
 
