@@ -210,6 +210,32 @@ def main():
             except Exception as e:
                 print(f"\n  orderID: {o['order_id']} — 查询失败: {e}")
 
+        # 批量撤单测试
+        order_ids = [o["order_id"] for o in placed_orders if o["order_id"] != "unknown"]
+        print(f"\n{'═' * 80}")
+        print(f"批量撤单测试: 一次性撤销 {len(order_ids)} 笔订单")
+        print(f"{'═' * 80}")
+        print(f"  order_ids: {order_ids}")
+        try:
+            resp = api.cancel_orders(order_ids)
+            print(f"  ✓ 批量撤单请求成功")
+            print(f"    完整响应: {resp}")
+        except Exception as e:
+            print(f"  ✗ 批量撤单失败: {e}")
+
+        print(f"\n等待 5 秒后确认订单已撤销...")
+        time.sleep(5)
+        for o in placed_orders:
+            try:
+                status = api.get_order(o["order_id"])
+                print(
+                    f"\n  orderID: {o['order_id']}"
+                    f"\n  status:  {status.get('status', '?')}"
+                    f"  (期望 CANCELED)"
+                )
+            except Exception as e:
+                print(f"\n  orderID: {o['order_id']} — 查询失败: {e}")
+
     db.close()
     print("\n测试完成。")
 

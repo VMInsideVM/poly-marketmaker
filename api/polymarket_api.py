@@ -184,6 +184,10 @@ class PolymarketAPI:
         """Cancel a single order by ID."""
         return self.client.cancel_order(OrderPayload(orderID=order_id))
 
+    def cancel_orders(self, order_ids: list) -> dict:
+        """Batch-cancel multiple orders by ID in a single request."""
+        return self.client.cancel_orders(order_ids)
+
     def cancel_all_orders(self) -> dict:
         """Cancel all open orders for this wallet."""
         return self.client.cancel_all()
