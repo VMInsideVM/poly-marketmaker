@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+market_maker.db
+market_maker.log
+.pytest_cache/
+dist/
+build/
+*.spec
