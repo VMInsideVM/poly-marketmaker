@@ -14,8 +14,8 @@
 
 ## File Structure
 
-- `api/polymarket_api.py` — add `are_orders_scoring`, retype `get_trades` to accept `TradeParams`, add `get_user_positions` (Data API), add `extract_maker_order_id` helper.
-- `engine/fills.py` (NEW) — pure functions: `select_new_trades`, `is_buy_side_trade`. No IO.
+- `api/polymarket_api.py` — add `are_orders_scoring`, retype `get_trades` to accept `TradeParams`, add `get_user_positions` (Data API). No `extract_maker_order_id` (trade→fill flattening lives in `engine/fills.py`).
+- `engine/fills.py` (NEW) — pure function: `select_new_buy_fills` (flatten maker_orders by funder, dedup by (trade_id,order_id)). No IO.
 - `engine/strategy_check.py` (NEW) — pure functions: `needs_replace`, `recompute_price`. No IO.
 - `engine/risk.py` (NEW) — pure function: `stop_loss_triggered`. No IO.
 - `engine/monitor.py` — rewrite `OrderMonitor` to call the pure functions + IO; remove `_last_matched`, `positions`/`orders` table usage.
@@ -103,91 +103,164 @@ git add scripts/spike_api_shapes.py
 git commit -m "chore: spike script capturing live API JSON shapes"
 ```
 
-> **All later tasks that say `<TRADE_ORDER_ID_FIELD>`, `<TRADE_SIZE_FIELD>`, `<TRADE_TS_FIELD>`, `<POS_USER>`, `<POS_AVG_FIELD>`, `<POS_SIZE_FIELD>`, `<POS_CUR_FIELD>`, `<POS_ASSET_FIELD>` MUST be replaced with the exact strings recorded here before that task is implemented.** If the spike shows a shape materially different from the spec assumptions, stop and report before continuing.
+> **RESOLVED (spike run 2026-05-19 + user-provided documented schema).** The spike showed the original fill model was wrong; spec + Task 1/4/5/8 have been rewritten with the real structures. Confirmed values now hard-coded in the tasks below — no `<...>` placeholders remain:
+> - **Trade:** fills are in `trade["maker_orders"]` (list), filter by `maker_address == funder` (case-insensitive). Per-fill: `order_id`, `side` ("BUY" for our filled resting buy), `matched_amount`, `price`, `asset_id`. Trade top-level: `id`, `market` (condition id), `match_time` (epoch-sec string). Dedup key `(trade_id, order_id)`.
+> - **Data API positions** (`GET /positions?user=<funder>`): `asset` (=asset_id), `size`, `avgPrice`, `curPrice`, `conditionId` (=market), `outcome`, `title`.
+> - **`user` for both get_trades maker_address and Data API:** the wallet's `funder` (proxy) = `api.client.funder`.
+> - **`are_orders_scoring` return:** assumed `dict[order_id]->bool` (SDK convention); only un-field-verified item — use defensive `.get(order_id)`; if shape differs at first live run, scoring cell shows `?` and nothing breaks.
 
 ---
 
 ## Phase 1 — Pure logic (TDD, no network)
 
-### Task 1: `select_new_trades` — fill detection & dedup
+### Task 1: `select_new_buy_fills` — fill detection & dedup (CORRECTED per spike)
+
+> **Spike correction (authoritative):** `get_trades` top-level `side/size/price/asset_id` is the taker/aggregate view, NOT our order. Our fills are in `trade["maker_orders"]` — a list whose entries may include OTHER traders' orders and/or MULTIPLE of ours. Filter by `maker_address == funder` (case-insensitive). Our resting BUY filled ⇒ that entry has `side == "BUY"` (while top-level `side` is "SELL"). Per-fill fields come from the maker_order entry: `order_id`, `matched_amount`, `price`, `asset_id`, `outcome`. Market (condition_id) is the trade's top-level `market`. Timestamp is the trade's top-level `match_time` (epoch-seconds string). Dedup key is **`(trade_id, order_id)`** (a trade may contain several of our orders; an order may be partially filled across several trades).
+
+If during implementation the real shape differs from the above, STOP and report.
 
 **Files:**
 - Create: `engine/fills.py`
 - Test: `tests/test_fills.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test — `tests/test_fills.py` (verbatim):**
 
 ```python
 # tests/test_fills.py
-from engine.fills import select_new_trades
+from engine.fills import select_new_buy_fills
+
+FUNDER = "0x98d67a03a5AFf272Dc02016c06EF9c18aec4ae75"
+
+# Mirrors the real spike trade: top-level side=SELL (taker view); maker_orders
+# mixes one of OURS (SELL) and one OTHER trader (BUY). No buy fill of ours here.
+TRADE_SELL_MIX = {
+    "id": "trade-1", "side": "SELL", "size": "223.88", "price": "0.7",
+    "asset_id": "TOP_LEVEL_ASSET", "market": "COND_A", "match_time": "1779035234",
+    "trader_side": "MAKER",
+    "maker_orders": [
+        {"order_id": "ord-ours-sell", "maker_address": FUNDER, "side": "SELL",
+         "matched_amount": "190.31", "price": "0.3", "asset_id": "ASSET_YES",
+         "outcome": "Yes"},
+        {"order_id": "ord-other", "maker_address": "0x49c40bD313D8599F54B62fff13324a790c4fBf77",
+         "side": "BUY", "matched_amount": "33.57", "price": "0.7",
+         "asset_id": "ASSET_NO", "outcome": "No"},
+    ],
+}
+
+# A trade where TWO of our BUY orders are filled in the same trade.
+TRADE_TWO_OURS_BUY = {
+    "id": "trade-2", "side": "SELL", "size": "50", "price": "0.9",
+    "asset_id": "TOP", "market": "COND_B", "match_time": "1779030000",
+    "trader_side": "MAKER",
+    "maker_orders": [
+        {"order_id": "ord-b1", "maker_address": FUNDER.lower(), "side": "BUY",
+         "matched_amount": "20", "price": "0.4", "asset_id": "ASSET_B1",
+         "outcome": "Yes"},
+        {"order_id": "ord-b2", "maker_address": FUNDER, "side": "BUY",
+         "matched_amount": "30", "price": "0.41", "asset_id": "ASSET_B2",
+         "outcome": "Yes"},
+    ],
+}
 
 
-def _t(tid, side="BUY", size="10", ts=100):
-    return {"id": tid, "side": side, "size": size, "trader_side": "MAKER",
-            "price": "0.5", "asset_id": "A", "market": "M",
-            "match_time": ts}
+def test_only_our_buy_maker_orders_emitted():
+    fills = select_new_buy_fills([TRADE_SELL_MIX], FUNDER, set())
+    # our SELL entry skipped, other trader's BUY skipped, top-level ignored
+    assert fills == []
 
 
-def test_returns_unseen_buy_trades_only():
-    trades = [_t("t1"), _t("t2"), _t("t3", side="SELL")]
-    seen = {"t1"}
-    new = select_new_trades(trades, seen, ts_field="match_time")
-    assert [t["id"] for t in new] == ["t2"]
+def test_emits_one_event_per_our_buy_with_maker_fields():
+    fills = select_new_buy_fills([TRADE_TWO_OURS_BUY], FUNDER, set())
+    assert [f["order_id"] for f in fills] == ["ord-b1", "ord-b2"]
+    f = fills[0]
+    assert f["trade_id"] == "trade-2"
+    assert f["asset_id"] == "ASSET_B1"        # from maker_order, not top-level
+    assert f["price"] == 0.4                   # from maker_order, not 0.9
+    assert f["size"] == 20.0                   # matched_amount, not top-level 50
+    assert f["market"] == "COND_B"             # trade top-level (condition id)
+    assert f["ts"] == 1779030000.0
 
 
-def test_empty_when_all_seen():
-    trades = [_t("t1"), _t("t2")]
-    assert select_new_trades(trades, {"t1", "t2"}, ts_field="match_time") == []
+def test_dedup_by_trade_id_and_order_id():
+    seen = {("trade-2", "ord-b1")}
+    fills = select_new_buy_fills([TRADE_TWO_OURS_BUY], FUNDER, seen)
+    assert [f["order_id"] for f in fills] == ["ord-b2"]
 
 
-def test_sorted_by_timestamp_ascending():
-    trades = [_t("t2", ts=200), _t("t1", ts=100)]
-    new = select_new_trades(trades, set(), ts_field="match_time")
-    assert [t["id"] for t in new] == ["t1", "t2"]
+def test_sorted_by_ts_ascending_across_trades():
+    fills = select_new_buy_fills([TRADE_TWO_OURS_BUY, TRADE_SELL_MIX], FUNDER, set())
+    # only TRADE_TWO_OURS_BUY yields events; both share ts, order_id order kept
+    assert [f["order_id"] for f in fills] == ["ord-b1", "ord-b2"]
+
+
+def test_funder_match_is_case_insensitive():
+    fills = select_new_buy_fills([TRADE_TWO_OURS_BUY], FUNDER.lower(), set())
+    assert len(fills) == 2
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/test_fills.py -v`
+Run: `python -m pytest tests/test_fills.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.fills'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Write minimal implementation — `engine/fills.py` (verbatim):**
 
 ```python
 # engine/fills.py
-"""Pure fill-detection logic (no network/IO)."""
+"""Pure fill-detection logic (no network/IO).
+
+Polymarket get_trades: top-level fields are the taker/aggregate view. OUR
+fills are in trade["maker_orders"], filtered by maker_address == our funder.
+A resting BUY of ours that got filled appears as a maker_orders entry with
+side == "BUY". Dedup is per (trade_id, order_id).
+"""
 
 
-def is_buy_side_trade(trade: dict) -> bool:
-    """True if this trade represents a fill of one of our maker BUY orders.
+def select_new_buy_fills(trades: list[dict], funder: str, seen_keys: set) -> list[dict]:
+    """Flatten get_trades into our unseen BUY fill events, oldest-first.
 
-    `side` reflects the trade's taker side per Polymarket; for our resting
-    maker BUY the relevant fills are BUY-side. Field names verified in Task 0;
-    keep this the single place that encodes the rule.
+    Each event: {trade_id, order_id, asset_id, price, size, market, ts}
+    where price/size/asset_id come from the matching maker_orders entry and
+    market/ts come from the trade's top-level fields. seen_keys holds
+    (trade_id, order_id) tuples already processed.
     """
-    return str(trade.get("side", "")).upper() == "BUY"
-
-
-def select_new_trades(trades: list[dict], seen_ids: set, ts_field: str) -> list[dict]:
-    """Return unseen buy-side trades, sorted oldest-first by ts_field."""
-    new = [
-        t for t in trades
-        if t.get("id") not in seen_ids and is_buy_side_trade(t)
-    ]
-    new.sort(key=lambda t: float(t.get(ts_field, 0) or 0))
-    return new
+    f = (funder or "").lower()
+    events = []
+    for tr in trades:
+        trade_id = tr.get("id")
+        market = tr.get("market", "")
+        ts = float(tr.get("match_time", 0) or 0)
+        for mo in tr.get("maker_orders", []) or []:
+            if str(mo.get("maker_address", "")).lower() != f:
+                continue
+            if str(mo.get("side", "")).upper() != "BUY":
+                continue
+            order_id = mo.get("order_id")
+            if (trade_id, order_id) in seen_keys:
+                continue
+            events.append({
+                "trade_id": trade_id,
+                "order_id": order_id,
+                "asset_id": mo.get("asset_id", ""),
+                "price": float(mo.get("price", 0) or 0),
+                "size": float(mo.get("matched_amount", 0) or 0),
+                "market": market,
+                "ts": ts,
+            })
+    events.sort(key=lambda e: e["ts"])
+    return events
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/test_fills.py -v`
-Expected: PASS (3 passed)
+Run: `python -m pytest tests/test_fills.py -v`
+Expected: PASS (5 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add engine/fills.py tests/test_fills.py
-git commit -m "feat: pure fill-detection (select_new_trades) with unit tests"
+git commit -m "feat: pure buy-fill detection (select_new_buy_fills, maker_orders flatten) with tests"
 ```
 
 ### Task 2: `needs_replace` — strict tick mismatch decision
@@ -335,7 +408,7 @@ git commit -m "feat: pure stop-loss decision (stop_loss_triggered) with tests"
 
 ## Phase 2 — API wrapper layer
 
-### Task 4: Add `are_orders_scoring`, `TradeParams` get_trades, `get_user_positions`, `extract_maker_order_id`
+### Task 4: Add `are_orders_scoring`, `TradeParams` get_trades, `get_user_positions`
 
 **Files:**
 - Modify: `api/polymarket_api.py` (imports near line 7-15; methods near `get_trades` line ~211 and `get_open_orders`)
@@ -389,8 +462,9 @@ Replace the existing `get_trades` method:
     def get_user_positions(self, user_address: str) -> list:
         """Polymarket Data API: current positions for a user.
 
-        Returns list of dicts. Field names confirmed in Task 0 spike;
-        callers use the <POS_*> fields recorded there.
+        Returns a list of position dicts. Confirmed fields (documented
+        sample): asset (=asset_id), size, avgPrice, curPrice, conditionId
+        (=market), outcome, title. user_address is the proxy/funder.
         """
         resp = requests.get(
             f"{DATA_API_HOST}/positions",
@@ -400,22 +474,11 @@ Replace the existing `get_trades` method:
         resp.raise_for_status()
         data = resp.json()
         return data if isinstance(data, list) else []
-
-    @staticmethod
-    def extract_maker_order_id(trade: dict) -> str | None:
-        """Resolve the resting maker BUY order id from a trade object.
-
-        Field path confirmed in Task 0. Replace the body below with the
-        exact structure recorded (example assumes maker_orders list):
-        """
-        makers = trade.get("<TRADE_ORDER_ID_FIELD>") or []
-        if isinstance(makers, list) and makers:
-            first = makers[0]
-            return first.get("order_id") if isinstance(first, dict) else first
-        if isinstance(makers, str):
-            return makers
-        return None
 ```
+
+> No `extract_maker_order_id` — the trade→fill flattening is the pure
+> function `engine.fills.select_new_buy_fills` (Task 1). The API layer
+> only passes `TradeParams` through.
 
 - [ ] **Step 4: Smoke-check import**
 
@@ -445,21 +508,12 @@ git commit -m "feat: API wrapper for scoring, TradeParams trades, Data-API posit
 
 import logging
 from py_clob_client_v2.clob_types import TradeParams
-from engine.fills import select_new_trades
+from engine.fills import select_new_buy_fills
 from engine.strategy_check import needs_replace
 from engine.risk import stop_loss_triggered
 from engine.strategy import determine_order_price
 
 logger = logging.getLogger(__name__)
-
-# Field names confirmed by Task 0 spike — set these to the recorded strings:
-TRADE_TS_FIELD = "<TRADE_TS_FIELD>"
-TRADE_SIZE_FIELD = "<TRADE_SIZE_FIELD>"
-POS_USER_IS_FUNDER = True  # set per Task 0 (which `user` returned data)
-POS_AVG_FIELD = "<POS_AVG_FIELD>"
-POS_SIZE_FIELD = "<POS_SIZE_FIELD>"
-POS_CUR_FIELD = "<POS_CUR_FIELD>"
-POS_ASSET_FIELD = "<POS_ASSET_FIELD>"
 
 
 class OrderMonitor:
@@ -467,47 +521,57 @@ class OrderMonitor:
         self.api = api
         self.db = db
         self.wallet_address = wallet_address
-        self._seen_trade_ids: set[str] = set()
-        # Watermark: only act on trades at/after this epoch ts.
+        # Dedup processed buy fills by (trade_id, order_id).
+        self._seen_fill_keys: set = set()
+        # Watermark: lower bound for get_trades(after=) — bounds fetch size;
+        # real idempotency is _seen_fill_keys.
         self._after_ts: float = 0.0
 
     def init_watermark(self):
-        """Set watermark to latest recorded trade ts for this wallet (offline catch-up)."""
+        """Seed watermark from latest recorded trade ts for this wallet.
+
+        DB created_at is local record time; trade match_time is exchange
+        time. Both ~unix seconds; this is only a conservative lower bound,
+        (trade_id, order_id) dedup guarantees no double-processing.
+        """
         rows = self.db.get_trade_history(self.wallet_address)
         self._after_ts = max((r.get("created_at", 0) or 0) for r in rows) if rows else 0.0
 
     def _funder(self) -> str:
-        return self.api.client.funder if POS_USER_IS_FUNDER else self.api.get_address()
+        """Proxy/funder address — used for get_trades maker filter and Data API."""
+        return self.api.client.funder
 
-    # --- Step 1: fills via get_trades ---
+    # --- Step 1: fills via get_trades (flatten maker_orders) ---
     def check_buy_orders(self):
+        funder = self._funder()
         try:
-            params = TradeParams(maker_address=self._funder(),
+            params = TradeParams(maker_address=funder,
                                   after=str(int(self._after_ts)) or None)
             trades = self.api.get_trades(params)
         except Exception as e:
             logger.error("get_trades failed for %s: %s", self.wallet_address, e)
             return
-        new_trades = select_new_trades(trades, self._seen_trade_ids, TRADE_TS_FIELD)
-        cancelled_orders: set[str] = set()
-        for tr in new_trades:
+        fills = select_new_buy_fills(trades, funder, self._seen_fill_keys)
+        cancelled_orders: set = set()
+        for ev in fills:
             try:
-                self._handle_fill(tr, cancelled_orders)
+                self._handle_fill(ev, cancelled_orders)
             except Exception as e:
-                logger.error("Error handling trade %s: %s", tr.get("id"), e)
+                logger.error("Error handling fill %s/%s: %s",
+                             ev.get("trade_id"), ev.get("order_id"), e)
             finally:
-                self._seen_trade_ids.add(tr.get("id"))
-                ts = float(tr.get(TRADE_TS_FIELD, 0) or 0)
-                self._after_ts = max(self._after_ts, ts)
+                self._seen_fill_keys.add((ev.get("trade_id"), ev.get("order_id")))
+                self._after_ts = max(self._after_ts, float(ev.get("ts", 0) or 0))
 
-    def _handle_fill(self, tr: dict, cancelled_orders: set):
-        size = int(float(tr.get(TRADE_SIZE_FIELD, 0) or 0))
-        price = float(tr.get("price", 0) or 0)
-        asset_id = tr.get("asset_id", "")
-        market_id = tr.get("market", "")
+    def _handle_fill(self, ev: dict, cancelled_orders: set):
+        size = float(ev.get("size", 0) or 0)   # real data is fractional
+        price = float(ev.get("price", 0) or 0)
+        asset_id = ev.get("asset_id", "")
+        market_id = ev.get("market", "")
+        order_id = ev.get("order_id")
         if size <= 0:
             return
-        # Take-profit sell at fill price (maker limit buy fills at its own price)
+        # Take-profit sell at the fill price (our resting maker buy filled here)
         self.api.place_limit_sell(asset_id, price, size)
         self.db.record_trade(
             wallet=self.wallet_address, market_id=market_id,
@@ -516,16 +580,12 @@ class OrderMonitor:
         self.db.set_cooldown(
             self.wallet_address, market_id, self.db.get_settings()["cooldown_minutes"]
         )
-        order_id = self.api.extract_maker_order_id(tr)
         if order_id and order_id not in cancelled_orders:
             try:
                 self.api.cancel_orders([order_id])
                 cancelled_orders.add(order_id)
             except Exception as e:
                 logger.warning("Cancel remainder of %s failed: %s", order_id, e)
-        elif not order_id:
-            logger.warning("No maker order id on trade %s; skip remainder cancel",
-                           tr.get("id"))
 
     # --- Step 2: stop-loss via Data API positions ---
     def check_stop_loss(self):
@@ -545,14 +605,15 @@ class OrderMonitor:
             try:
                 self._check_pos_sl(pos, open_orders, settings)
             except Exception as e:
-                logger.error("Stop-loss error on %s: %s",
-                             pos.get(POS_ASSET_FIELD), e)
+                logger.error("Stop-loss error on %s: %s", pos.get("asset"), e)
 
     def _check_pos_sl(self, pos: dict, open_orders: list, settings: dict):
-        asset_id = pos.get(POS_ASSET_FIELD, "")
-        size = int(float(pos.get(POS_SIZE_FIELD, 0) or 0))
-        avg = float(pos.get(POS_AVG_FIELD, 0) or 0)
-        cur = float(pos.get(POS_CUR_FIELD, 0) or 0)
+        # Confirmed Data API position fields: asset / size / avgPrice /
+        # curPrice / conditionId.
+        asset_id = pos.get("asset", "")
+        size = float(pos.get("size", 0) or 0)
+        avg = float(pos.get("avgPrice", 0) or 0)
+        cur = float(pos.get("curPrice", 0) or 0)
         if size <= 0:
             return
         if not stop_loss_triggered(cur, avg, settings["stop_loss_pct"]):
@@ -566,11 +627,11 @@ class OrderMonitor:
                 logger.warning("Cancel sell orders for %s failed: %s", asset_id, e)
         self.api.place_market_sell(asset_id, size)
         self.db.record_trade(
-            wallet=self.wallet_address, market_id=pos.get("market", ""),
+            wallet=self.wallet_address, market_id=pos.get("conditionId", ""),
             market_name="", side="stop_loss", price=cur, size=size,
             pnl=(cur - avg) * size,
         )
-        logger.warning("Stop-loss executed: asset=%s size=%d cur=%.4f avg=%.4f",
+        logger.warning("Stop-loss executed: asset=%s size=%s cur=%.4f avg=%.4f",
                        asset_id, size, cur, avg)
 
     # --- Step 3: strategy compliance on resting buy orders ---
@@ -961,15 +1022,13 @@ def api_get_positions():
     out = []
     for addr, api in _wallet_apis(wallet).items():
         try:
-            for p in api.get_user_positions(
-                api.client.funder if True else addr
-            ):
-                avg = float(p.get("<POS_AVG_FIELD>", 0) or 0)
-                cur = float(p.get("<POS_CUR_FIELD>", 0) or 0)
-                size = float(p.get("<POS_SIZE_FIELD>", 0) or 0)
+            for p in api.get_user_positions(api.client.funder):
+                avg = float(p.get("avgPrice", 0) or 0)
+                cur = float(p.get("curPrice", 0) or 0)
+                size = float(p.get("size", 0) or 0)
                 out.append({
                     "wallet": addr,
-                    "market_name": p.get("title", p.get("market", "")),
+                    "market_name": p.get("title", p.get("conditionId", "")),
                     "buy_price": avg,
                     "current_price": cur,
                     "stop_price": avg * (1 - sl),
@@ -980,7 +1039,8 @@ def api_get_positions():
     return jsonify(out)
 ```
 
-> Replace `<POS_*>` and the `funder` choice with Task 0 findings. `if True` mirrors `POS_USER_IS_FUNDER` from Task 5 — use the same decision.
+> Confirmed Data API position fields: `avgPrice` / `curPrice` / `size` /
+> `title` / `conditionId`; `user` = `api.client.funder` (proxy).
 
 - [ ] **Step 2: Replace DB counts in `api_dashboard`**
 
@@ -1237,7 +1297,7 @@ git commit -m "docs: sync CLAUDE.md to API-driven orders/monitor; drop spike scr
 - Error handling (spec §6): get_trades fail skip-no-advance (T5), Data positions fail skip stop-loss (T5), sell-fail still mark seen (T5 `finally`), per-item try/except (T5/T7). Covered.
 - Testing (spec §7): pure-function suites T1-T3; IO via manual/`test_real_order.py` (T8 step2). Covered.
 
-**Placeholder scan:** The `<TRADE_*>`/`<POS_*>` tokens are intentional, gated by Task 0 with an explicit "must replace before implementing" instruction and a stop-if-different rule — not silent placeholders. No "TBD/handle edge cases/similar to" patterns. All code steps contain full code.
+**Placeholder scan:** All `<TRADE_*>`/`<POS_*>` placeholders were RESOLVED after the 2026-05-19 spike + user-provided documented schema; tasks now contain concrete field names. No `<...>` tokens, no "TBD/handle edge cases/similar to" patterns remain. The only un-field-verified item is `are_orders_scoring`'s return shape (SDK convention dict[order_id]->bool, defensively handled).
 
-**Type consistency:** `select_new_trades(trades, seen_ids, ts_field)`, `needs_replace(current_price, want_price, tick)→{"keep","replace","cancel"}`, `stop_loss_triggered(cur_price, avg_price, stop_loss_pct)→bool`, `are_orders_scoring(order_ids)→dict`, `get_user_positions(user)→list`, `extract_maker_order_id(trade)→str|None`, cancel routes consume `{orders:[{order_id,wallet}]}` — names consistent across T1-T9.
+**Type consistency:** `select_new_buy_fills(trades, funder, seen_keys)→list[{trade_id,order_id,asset_id,price,size,market,ts}]`, `needs_replace(current_price, want_price, tick)→{"keep","replace","cancel"}`, `stop_loss_triggered(cur_price, avg_price, stop_loss_pct)→bool`, `are_orders_scoring(order_ids)→dict`, `get_user_positions(user)→list`, monitor dedup set holds `(trade_id, order_id)` tuples, cancel routes consume `{orders:[{order_id,wallet}]}` — names consistent across T1-T9. No `extract_maker_order_id` (flattening is `select_new_buy_fills`).
 
