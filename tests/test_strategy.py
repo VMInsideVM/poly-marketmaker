@@ -23,7 +23,7 @@ class TestMaxSpread2_TickSize1Cent:
         )
         assert result == 0.29
 
-    def test_bid1_le_2000_place_at_bid1(self):
+    def test_bid1_le_2000_skip(self):
         bids = _make_bids([(0.30, 1500), (0.29, 500)])
         result = determine_order_price(
             bids=bids,
@@ -32,7 +32,7 @@ class TestMaxSpread2_TickSize1Cent:
             reward_range_min=0.28,
             reward_range_max=0.32,
         )
-        assert result == 0.30
+        assert result is None
 
     def test_result_outside_reward_range_returns_none(self):
         bids = _make_bids([(0.30, 3000), (0.29, 500)])

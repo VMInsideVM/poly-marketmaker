@@ -66,7 +66,7 @@ def _strategy_spread2_coarse(
     reward_range_min: float,
     reward_range_max: float,
 ) -> float | None:
-    """max_spread=2, 1-cent tick: bid1 > 2000 -> bid2, else bid1."""
+    """max_spread=2, 1-cent tick: bid1 > 2000 -> bid2, else skip."""
     if not bids:
         return None
 
@@ -75,11 +75,9 @@ def _strategy_spread2_coarse(
         if len(bids) < 2:
             return None
         target = float(bids[1]["price"])
-    else:
-        target = float(bids[0]["price"])
-
-    if reward_range_min <= target <= reward_range_max:
-        return target
+        if reward_range_min <= target <= reward_range_max:
+            return target
+    # bid1 ≤ 2000: don't place order
     return None
 
 
