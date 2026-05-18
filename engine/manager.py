@@ -69,8 +69,6 @@ class WalletWorker:
 
     def place_orders(self, eligible_markets: list[dict]):
         """Place orders on eligible markets (called by the shared scanner)."""
-        balance = self.api.get_balance()
-
         for market in eligible_markets:
             # Check cooldown
             if self.db.is_in_cooldown(self.wallet_address, market["market_id"]):
@@ -86,9 +84,16 @@ class WalletWorker:
             if already_ordered:
                 continue
 
-            # Balance check
+            # Balance check (fresh read each time, in case fills happened)
+            balance = self.api.get_balance()
             required = market["order_size"] * market["order_price"]
             if required > balance:
+                logger.info(
+                    "Insufficient balance %.2f < %.2f for %s",
+                    balance,
+                    required,
+                    market["market_name"],
+                )
                 continue
 
             # Place order
