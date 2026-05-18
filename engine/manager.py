@@ -260,8 +260,15 @@ class EngineManager:
             if self.engines:
                 self._scanner_api = next(iter(self.engines.values())).api
             else:
-                logger.error("No wallets available for scanning")
-                return
+                # No workers running, create API from first enabled wallet
+                wallets = self.db.list_wallets()
+                enabled = [w for w in wallets if w["enabled"]]
+                if not enabled:
+                    logger.error("No wallets available for scanning")
+                    return
+                pk = decrypt(enabled[0]["encrypted_key"], self.encryption_key)
+                self._scanner_api = PolymarketAPI(pk)
+                logger.info("Created scanner API from wallet %s", enabled[0]["address"])
 
         import time as _time
 
