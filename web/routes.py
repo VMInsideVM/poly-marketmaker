@@ -117,7 +117,6 @@ def login():
             global manager
             if manager is None:
                 mgr = EngineManager(db, key)
-                mgr.startup_recovery()
                 init_manager(mgr)
             session["logged_in"] = True
             return redirect(url_for("dashboard"))

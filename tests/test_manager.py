@@ -47,6 +47,8 @@ class TestEngineLifecycle:
         with patch("engine.manager.decrypt", return_value="0x_fake_key"):
             with patch("engine.manager.PolymarketAPI", return_value=mock_api):
                 manager.start_all()
+                # Reset after startup_recovery calls
+                mock_api.cancel_order.reset_mock()
                 manager.stop_all()
                 # Should only cancel buy orders (called once per wallet, 2 wallets)
                 assert all(

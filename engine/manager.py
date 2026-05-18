@@ -193,7 +193,13 @@ class EngineManager:
         self.last_scan_time: float = 0
 
     def start_all(self):
-        """Start all wallet workers + shared scanner."""
+        """Start all wallet workers + shared scanner.
+
+        Runs startup_recovery first to clean up stale state.
+        """
+        # Recovery: cancel stale buy orders, handle offline fills
+        self.startup_recovery()
+
         wallets = self.db.list_wallets()
         for w in wallets:
             if w["enabled"]:
