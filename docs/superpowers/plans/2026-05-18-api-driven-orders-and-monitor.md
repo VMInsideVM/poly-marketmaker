@@ -106,7 +106,7 @@ git commit -m "chore: spike script capturing live API JSON shapes"
 > **RESOLVED (spike run 2026-05-19 + user-provided documented schema).** The spike showed the original fill model was wrong; spec + Task 1/4/5/8 have been rewritten with the real structures. Confirmed values now hard-coded in the tasks below — no `<...>` placeholders remain:
 > - **Trade:** fills are in `trade["maker_orders"]` (list), filter by `maker_address == funder` (case-insensitive). Per-fill: `order_id`, `side` ("BUY" for our filled resting buy), `matched_amount`, `price`, `asset_id`. Trade top-level: `id`, `market` (condition id), `match_time` (epoch-sec string). Dedup key `(trade_id, order_id)`.
 > - **Data API positions** (`GET /positions?user=<funder>`): `asset` (=asset_id), `size`, `avgPrice`, `curPrice`, `conditionId` (=market), `outcome`, `title`.
-> - **`user` for both get_trades maker_address and Data API:** the wallet's `funder` (proxy) = `api.client.funder`.
+> - **`user` for both get_trades maker_address and Data API:** the wallet's `funder` (proxy) via `api.get_funder()` (ClobClient stores funder on `client.builder`, NOT `client.funder`).
 > - **`are_orders_scoring` return:** assumed `dict[order_id]->bool` (SDK convention); only un-field-verified item — use defensive `.get(order_id)`; if shape differs at first live run, scoring cell shows `?` and nothing breaks.
 
 ---
@@ -539,7 +539,7 @@ class OrderMonitor:
 
     def _funder(self) -> str:
         """Proxy/funder address — used for get_trades maker filter and Data API."""
-        return self.api.client.funder
+        return self.api.get_funder()
 
     # --- Step 1: fills via get_trades (flatten maker_orders) ---
     def check_buy_orders(self):
@@ -1022,7 +1022,7 @@ def api_get_positions():
     out = []
     for addr, api in _wallet_apis(wallet).items():
         try:
-            for p in api.get_user_positions(api.client.funder):
+            for p in api.get_user_positions(api.get_funder()):
                 avg = float(p.get("avgPrice", 0) or 0)
                 cur = float(p.get("curPrice", 0) or 0)
                 size = float(p.get("size", 0) or 0)
@@ -1040,7 +1040,7 @@ def api_get_positions():
 ```
 
 > Confirmed Data API position fields: `avgPrice` / `curPrice` / `size` /
-> `title` / `conditionId`; `user` = `api.client.funder` (proxy).
+> `title` / `conditionId`; `user` = `api.get_funder()` (proxy; wrapper of `client.builder.funder`).
 
 - [ ] **Step 2: Replace DB counts in `api_dashboard`**
 
@@ -1070,7 +1070,7 @@ and in the per-wallet loop replace `w_orders`/`w_positions` with:
             except Exception:
                 pass
             try:
-                w_pos_count = len(api.get_user_positions(api.client.funder))
+                w_pos_count = len(api.get_user_positions(api.get_funder()))
                 total_positions += w_pos_count
             except Exception:
                 pass
