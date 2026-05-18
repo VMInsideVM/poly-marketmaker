@@ -26,12 +26,14 @@
 | 止损成本价来源 | 挂卖单/止损前调 Polymarket Data API「Get current positions for a user」取 `avgPrice` |
 | 一键撤单范围 | 只撤买单（用 `cancel_orders(buy_ids)`），保留止盈卖单；作用于页面当前钱包筛选范围（无筛选=全部启用钱包） |
 | 多选撤单 | `cancel_orders(selected_ids)`，按钱包分组各一次请求 |
-| 成交后处理 | `new_fill > 0` 时除挂止盈卖单外，撤掉**该笔买单本身**的未成交剩余部分 |
+| 成交检测机制 | 用 CLOB `get_trades(TradeParams(maker_address=<钱包>, after=<水位>))` 拉用户最近成交判断是否有新成交，按 trade `id` 去重；不再用 `get_open_orders()` 的 `size_matched` 增量 |
+| 成交后处理 | 每条新 trade：挂该笔成交量的止盈卖单 + 撤掉该 trade 对应**买单本身**的未成交剩余 |
 | 分发挂单对齐 | 下单前重拉订单簿 + 重跑 `determine_order_price`，不再用扫描缓存价 |
 
 ## 3. SDK / API 能力确认（py_clob_client_v2 1.0.1）
 
 - `get_open_orders(params=None)`：自动翻页，返回扁平订单对象列表，字段含 `id, status, side, market, asset_id, original_size, size_matched, price, outcome, created_at` 等（与用户提供的样例 JSON 一致）。
+- `get_trades(TradeParams(maker_address=, market=, asset_id=, after=, before=, id=))`：自动翻页，返回用户成交列表；每条 trade 有自己的 `id`、`side`、`size`、`price`、`market`、`asset_id`、时间戳，以及关联的 maker 订单引用（用于回溯被成交的买单 id）。`after`/`before` 为时间戳过滤。
 - `are_orders_scoring(OrdersScoringParams(orderIds=[...]))`：批量查订单是否在奖励区间（scoring）。`is_order_scoring(OrderScoringParams(orderId))`：单查。
 - `cancel_orders(order_hashes: list)`：一次请求批量撤多笔。`cancel_all()`：撤该钱包全部。`cancel_order(payload)`：单撤。
 - Polymarket Data API（非 CLOB SDK，需独立 HTTP）：`GET https://data-api.polymarket.com/positions?user=<address>` 返回持仓，含 `asset_id, size, avgPrice, curPrice` 等。`user` 参数为钱包的 proxy / funder 地址（与现有 `funder` 一致，实现时需验证）。
@@ -45,7 +47,7 @@
 | 钱包当前挂单 | CLOB `get_open_orders()`（每钱包，自动翻页） | `db.get_open_orders()` 读 `orders` 表 |
 | 买单是否在奖励区间 | CLOB `are_orders_scoring(buy_ids)` 批量 | 无（新增） |
 | 持仓与成本价 | Data API `GET /positions?user=<proxy>`：`avgPrice`/`size`/`curPrice` | `positions` 表 |
-| 成交检测 | `get_open_orders()` 中买单 `size_matched` 增量（内存快照对比） | DB `orders` 表 + `_last_matched` |
+| 成交检测 | CLOB `get_trades()` 拉用户最近成交，按 trade `id` 去重 | DB `orders` 表 + `_last_matched` 增量 |
 | 成交/止盈/止损历史 | 仍写 DB `trades` 表 | 不变 |
 | 冷却 | 仍用 DB `cooldown` | 不变 |
 
@@ -55,11 +57,11 @@
 
 ### 4.3 重启自愈
 
-`startup_recovery` 重写为「从 API 对账」：拉每钱包 `get_open_orders()` + Data API positions，把内存 `_last_matched[order_id]` 用当前 `size_matched` 初始化（避免把重启前已成交量误判为新成交）。不再依赖 DB 里的陈旧挂单/持仓。
+`startup_recovery` 重写为「从 API + 历史水位对账」：每钱包的成交去重水位 `after` 初始化为 DB `trades` 表中该钱包最新一条记录的时间戳（无则取 0）。启动后 `get_trades(after=水位)` 会捞出离线期间发生的成交并据 trade `id` 去重补挂止盈，既不漏离线成交也不重复处理。`_seen_trade_ids` 内存集合在进程内防止同一 trade 跨轮重复处理。不再依赖 DB 里的陈旧挂单/持仓。
 
 ### 4.4 已知代价
 
-monitor 每轮、订单页每次刷新都要多次调 API（每钱包：`get_open_orders` + `are_orders_scoring` + Data positions）。单用户本地、钱包数少，可接受。订单页轮询从 5s 放宽到 10s，并加手动刷新按钮。
+monitor 每轮每钱包要调 `get_trades`（成交检测）+ `get_open_orders`（Step 2/3）+ Data positions（止损）+ 每个待校验买单的订单簿；订单页每次刷新每钱包 `get_open_orders` + `are_orders_scoring`。单用户本地、钱包数少，可接受。订单页轮询从 5s 放宽到 10s，并加手动刷新按钮。`get_trades` 用 `after=水位` 限制返回量。
 
 ## 5. 组件设计
 
@@ -87,15 +89,16 @@ monitor 每轮、订单页每次刷新都要多次调 API（每钱包：`get_ope
 
 每轮（`fill_check_interval_sec`）对每个钱包按序跑三步，全部基于 API。逻辑与 IO 分离：核心判定抽成纯函数（输入为 API 返回数据），薄 IO 层负责调用与副作用。
 
-**Step 1 — 成交检测 + 挂止盈 + 撤剩余（A）**
-1. `get_open_orders()` 取 `side=BUY` 的单。
-2. `new_fill = 当前 size_matched - _last_matched.get(order_id, 0)`。
-3. `new_fill > 0`：
-   - `place_limit_sell(asset_id, 该买单 price, new_fill)` 挂止盈（卖价=买单挂单价，与现状一致）。
+**Step 1 — 成交检测（基于 get_trades）+ 挂止盈 + 撤剩余（A）**
+1. `get_trades(TradeParams(maker_address=<钱包>, after=<该钱包成交水位>))` 拉用户最近成交。
+2. 过滤出**新成交**：trade `id` 不在内存 `_seen_trade_ids` 且属本钱包做市买单（side 为买入侧）的 trade。
+3. 对每条新 trade（成交量 `trade.size`、成交价 `trade.price`、`trade.asset_id`、回溯出的买单 `order_id`）：
+   - `place_limit_sell(asset_id, trade.price, trade.size)` 挂止盈（maker 限价买的成交价即挂单价，与现状语义一致）。
    - 写 DB `trades`（side=buy）；设该市场 `cooldown`。
-   - `cancel_orders([order_id])` 撤掉该买单未成交剩余部分。
-   - 从 `_last_matched` 移除该 order_id（该单已结束）。
-4. 不再读写 `orders`/`positions` 表。
+   - `cancel_orders([order_id])` 撤掉该买单未成交剩余部分（已结束/已撤则幂等无害）。
+   - 把 trade `id` 加入 `_seen_trade_ids`；推进该钱包成交水位 `after`。
+4. 同一买单本轮可能有多条新 trade（多次部分成交）：逐条挂对应止盈卖单，撤单按 order_id 去重只发一次。
+5. 不再读写 `orders`/`positions` 表，不再维护 `_last_matched`。
 
 **Step 2 — 止损（A）**
 1. Data API `GET /positions?user=<proxy>` 取该钱包持仓（`asset_id/size/avgPrice/curPrice`）。
@@ -120,7 +123,8 @@ monitor 每轮、订单页每次刷新都要多次调 API（每钱包：`get_ope
 
 ### 5.3 API 包装层（`api/polymarket_api.py`）
 
-- 复用已有 `get_open_orders()`、`cancel_orders()`、`cancel_all()`、`place_limit_*`。
+- 复用已有 `get_open_orders()`、`get_trades()`、`cancel_orders()`、`cancel_all()`、`place_limit_*`。
+- `get_trades()` 包装改为接受 `TradeParams`（`maker_address`/`after` 等），透传给 `client.get_trades`；并提供从 trade 对象回溯关联 maker 买单 `order_id` 的工具函数（实现时按 SDK 实际 trade 结构确定字段，如 `maker_orders[*].order_id`）。
 - 新增 `are_orders_scoring(order_ids: list) -> dict`：包 `client.are_orders_scoring(OrdersScoringParams(orderIds=order_ids))`。
 - 新增 `get_user_positions() -> list`：HTTP GET Data API `positions?user=<funder/proxy>`，返回 `[{asset_id, size, avgPrice, curPrice, ...}]`。需确认 `user` 用钱包的哪个地址（与 `funder` 一致性校验）。
 
@@ -129,11 +133,12 @@ monitor 每轮、订单页每次刷新都要多次调 API（每钱包：`get_ope
 - 每钱包、每订单的 API 调用独立 try/except；单点失败只跳过该项并记日志，不中断整轮 monitor / 整页订单。
 - Data API positions 失败 → 该钱包本轮跳过止损，下轮重试。
 - `cancel_orders` / `place_limit_buy` 失败 → 记日志，`_last_matched` 不变，下轮幂等重试。
-- `place_limit_sell` 挂止盈失败 → 记 error 但仍更新 `_last_matched`（避免同一成交被重复计为 new_fill 反复挂卖），靠下轮 Step 2 止损兜底。
+- `place_limit_sell` 挂止盈失败 → 记 error，但**仍把 trade `id` 加入 `_seen_trade_ids`、推进水位**（避免同一成交被反复挂卖造成重复卖出），靠下轮 Step 2 止损兜底（与原 size_matched 方案的容错哲学一致：宁可漏挂止盈让止损兜底，也不重复卖）。
+- `get_trades` 拉取失败 → 本轮跳过该钱包成交检测，水位不前移，下轮重试。
 
 ## 7. 测试策略
 
-- 纯逻辑单测进 `tests/`（无网络）：`determine_order_price` 已有覆盖不动；新增对「成交增量计算」「档位是否相同的重挂判定」「止损触发条件」的纯函数单测（API 返回作为入参传入）。
+- 纯逻辑单测进 `tests/`（无网络）：`determine_order_price` 已有覆盖不动；新增对「新成交识别与去重（给定 trades 列表 + seen 集合，输出待处理 trade）」「档位是否相同的重挂判定」「止损触发条件」的纯函数单测（API 返回作为入参传入）。
 - monitor 三步拆为可独立测试的纯函数 + 薄 IO 层。
 - API 包装层（`get_open_orders`/`are_orders_scoring`/Data positions/`cancel_orders`）不进 pytest，沿用手动脚本与 `test_real_order.py` 真实环境验证。
 
@@ -142,12 +147,13 @@ monitor 每轮、订单页每次刷新都要多次调 API（每钱包：`get_ope
 1. **`orders`/`positions` 表停用**：依赖这两表的 `/api/positions`、dashboard 统计、`startup_recovery` 需一并改造，否则读空。`/api/positions` 改读 Data API。
 2. **Data API 依赖**：新引入 `data-api.polymarket.com/positions`，需确认 `user` 参数地址与现有 `funder` 一致；不可用时止损降级（跳过本轮）。
 3. **churn**：严格档位比对、无容差，行情剧烈时同一买单可能每轮撤重挂；由轮询间隔限频，接受。
-4. **CLAUDE.md 文档同步**：「Balance re-read before every order」「startup_recovery」「stop=stop monitor」「Pipeline scan→strategy→place→monitor」等描述需随实现改写；实现计划阶段列出要同步修改的具体段落。
+4. **trade→买单回溯**：从 trade 对象拿到被成交的 maker 买单 `order_id` 依赖 SDK 实际 trade 结构（`maker_orders` 等字段名实现时确认）；若拿不到 order_id 则该 trade 仍挂止盈，但「撤该买单剩余」降级为跳过（记 warning），靠 Step 3 后续把不合规买单撤掉兜底。
+5. **CLAUDE.md 文档同步**：「Balance re-read before every order」「startup_recovery」「stop=stop monitor」「Pipeline scan→strategy→place→monitor」等描述需随实现改写；实现计划阶段列出要同步修改的具体段落。
 
 ## 9. 验收标准
 
 - 订单管理页展示的挂单与交易所 `get_open_orders()` 一致（含测试脚本挂的单）；买单显示是否在奖励区间。
 - 「一键撤买单」只撤买单、保留卖单；「撤选中」按钱包分组批量撤成功。
-- monitor：买单成交后自动挂止盈卖单并撤掉该单剩余；持仓按 Data API `avgPrice` 触发止损；未成交买单档位偏离即撤了重挂，无法合规则撤单。
+- monitor：`get_trades` 检测到买单新成交后自动挂止盈卖单并撤掉该单剩余（同一 trade 不重复处理，离线期间成交重启后能补处理）；持仓按 Data API `avgPrice` 触发止损；未成交买单档位偏离即撤了重挂，无法合规则撤单。
 - DB 不再写 `orders`/`positions`；`trades` 历史与 `cooldown` 仍正常。
 - 纯逻辑单测通过 `pytest`。
