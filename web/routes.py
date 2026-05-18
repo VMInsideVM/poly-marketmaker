@@ -493,20 +493,27 @@ def api_cancel_all_buys():
 @login_required
 def api_get_positions():
     wallet = request.args.get("wallet")
-    positions = db.get_positions(wallet)
-    if manager:
-        for pos in positions:
-            eng = manager.engines.get(pos["wallet"])
-            if eng and eng.running:
-                try:
-                    pos["current_price"] = eng.api.get_last_trade_price(pos["token_id"])
-                    pos["pnl"] = (pos["current_price"] - pos["buy_price"]) * pos["size"]
-                    pos["stop_price"] = pos["buy_price"] * (
-                        1 - db.get_settings()["stop_loss_pct"] / 100
-                    )
-                except Exception:
-                    pos["current_price"] = None
-    return jsonify(positions)
+    sl = db.get_settings()["stop_loss_pct"] / 100.0
+    out = []
+    for addr, api in _wallet_apis(wallet).items():
+        try:
+            for p in api.get_user_positions(api.client.funder):
+                avg = float(p.get("avgPrice", 0) or 0)
+                cur = float(p.get("curPrice", 0) or 0)
+                size = float(p.get("size", 0) or 0)
+                out.append(
+                    {
+                        "wallet": addr,
+                        "market_name": p.get("title", p.get("conditionId", "")),
+                        "buy_price": avg,
+                        "current_price": cur,
+                        "stop_price": avg * (1 - sl),
+                        "pnl": (cur - avg) * size,
+                    }
+                )
+        except Exception as e:
+            app.logger.warning("positions failed for %s: %s", addr, e)
+    return jsonify(out)
 
 
 # --- API: History ---
@@ -568,17 +575,30 @@ def api_eligible_markets():
 @login_required
 def api_dashboard():
     wallets = db.list_wallets()
-    total_orders = len(db.get_open_orders())
-    total_positions = len(db.get_positions())
+    apis = _wallet_apis()
+    total_orders = 0
+    total_positions = 0
     trades = db.get_trade_history()
     total_pnl = sum(t.get("pnl", 0) for t in trades)
 
     wallet_summaries = []
     for w in wallets:
-        w_orders = db.get_open_orders(w["address"])
-        w_positions = db.get_positions(w["address"])
         balance = None
         running = False
+        api = apis.get(w["address"])
+        w_order_count = w_pos_count = None
+        if api:
+            try:
+                oo = api.get_open_orders()
+                w_order_count = len(oo)
+                total_orders += w_order_count
+            except Exception:
+                pass
+            try:
+                w_pos_count = len(api.get_user_positions(api.client.funder))
+                total_positions += w_pos_count
+            except Exception:
+                pass
         if manager:
             eng = manager.engines.get(w["address"])
             if eng and eng.running:
@@ -589,10 +609,9 @@ def api_dashboard():
                     pass
             elif not running and encryption_key:
                 try:
-                    api = _get_cached_api(
+                    balance = _get_cached_api(
                         w["address"], w["encrypted_key"], w.get("funder", "")
-                    )
-                    balance = api.get_balance()
+                    ).get_balance()
                 except Exception:
                     pass
         wallet_summaries.append(
@@ -601,8 +620,8 @@ def api_dashboard():
                 "enabled": w["enabled"],
                 "running": running,
                 "balance": balance,
-                "open_orders": len(w_orders),
-                "positions": len(w_positions),
+                "open_orders": w_order_count,
+                "positions": w_pos_count,
             }
         )
 
