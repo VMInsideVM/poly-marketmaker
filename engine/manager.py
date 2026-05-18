@@ -73,20 +73,19 @@ class WalletWorker:
         """Place orders on eligible markets; price recomputed at placement time."""
         from engine.strategy import determine_order_price
 
+        try:
+            open_orders = self.api.get_open_orders()
+        except Exception as e:
+            logger.error("get_open_orders failed for %s: %s", self.wallet_address, e)
+            return
+        open_buy_assets = {
+            o.get("asset_id") for o in open_orders if o.get("side") == "BUY"
+        }
+
         for market in eligible_markets:
             if self.db.is_in_cooldown(self.wallet_address, market["market_id"]):
                 continue
-            try:
-                open_orders = self.api.get_open_orders()
-            except Exception as e:
-                logger.error(
-                    "get_open_orders failed for %s: %s", self.wallet_address, e
-                )
-                continue
-            if any(
-                o.get("asset_id") == market["token_id"] and o.get("side") == "BUY"
-                for o in open_orders
-            ):
+            if market["token_id"] in open_buy_assets:
                 continue
 
             try:
