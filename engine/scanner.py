@@ -70,40 +70,44 @@ class MarketScanner:
         logger.info("Fetched %d markets, filtering...", len(markets))
 
         eligible = []
-        checked = 0
 
-        for i, market in enumerate(markets):
+        # Pre-filter: reward + settlement date + cooldown
+        candidates = []
+        for market in markets:
             tokens = market.get("tokens", [])
             if not tokens:
                 continue
-
-            condition_id = market.get("condition_id", "")
             rewards_config = market.get("rewards_config", [])
             total_rate = sum(rc.get("rate_per_day", 0) for rc in rewards_config)
-
-            # Step 2: Coarse reward filter
             if total_rate < min_reward:
                 continue
-
-            # Step 3: Settlement date (only exclude 0~min_days, negative = pass)
             end_date_str = market.get("end_date", "")
             end_ts = _parse_end_date(end_date_str)
             days_left = (end_ts - time.time()) / 86400 if end_ts else -1
             if 0 <= days_left < min_days:
                 continue
-
-            # Cooldown check
+            condition_id = market.get("condition_id", "")
             if self.db.is_in_cooldown(self.wallet_address, condition_id):
                 continue
+            candidates.append(market)
 
+        logger.info("Pre-filter: %d -> %d candidates", len(markets), len(candidates))
+        checked = 0
+
+        for market in candidates:
+            condition_id = market.get("condition_id", "")
+            tokens = market.get("tokens", [])
+            rewards_config = market.get("rewards_config", [])
+            total_rate = sum(rc.get("rate_per_day", 0) for rc in rewards_config)
+            end_date_str = market.get("end_date", "")
             question = market.get("question", "")
             checked += 1
             if on_progress:
-                on_progress(checked, len(markets), f"Checking: {question}")
+                on_progress(checked, len(candidates), f"Checking: {question}")
             logger.info(
                 "[%d/%d] Checking: %s (rate=$%.0f/day)",
                 checked,
-                len(markets),
+                len(candidates),
                 question,
                 total_rate,
             )
