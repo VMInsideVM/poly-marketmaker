@@ -5,7 +5,7 @@
 def stop_loss_triggered(
     cur_price: float, avg_price: float, stop_loss_pct: float
 ) -> bool:
-    """True when current price has fallen to/below the stop threshold.
+    """True when current price has fallen strictly below the stop threshold.
 
     cur_price==0 (no quote) or avg_price==0 (no cost basis) never triggers —
     we do not market-sell on missing data.
