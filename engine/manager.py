@@ -288,6 +288,10 @@ class EngineManager:
         self.scan_progress = f"Done: {len(eligible)} eligible"
         logger.info("Scanner found %d eligible markets", len(eligible))
 
+        # Persist to database (replace old data)
+        self.db.save_eligible_markets(eligible)
+        logger.info("Saved %d eligible markets to database", len(eligible))
+
     def place_all_orders(self):
         """Distribute eligible markets to all wallets for order placement."""
         if not self.eligible_markets:

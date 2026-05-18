@@ -81,6 +81,26 @@ class Database:
                 expires_at REAL NOT NULL,
                 PRIMARY KEY (wallet, market_id)
             );
+            CREATE TABLE IF NOT EXISTS eligible_markets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                market_name TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                market_competitiveness REAL DEFAULT 0,
+                daily_reward REAL NOT NULL,
+                rewards_max_spread INTEGER DEFAULT 0,
+                rewards_min_size INTEGER DEFAULT 0,
+                tick_size REAL DEFAULT 0.01,
+                tick_size_str TEXT DEFAULT '0.01',
+                neg_risk INTEGER DEFAULT 0,
+                reward_range_min REAL DEFAULT 0,
+                reward_range_max REAL DEFAULT 1,
+                order_price REAL NOT NULL,
+                order_size INTEGER NOT NULL,
+                end_date TEXT DEFAULT '',
+                scanned_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+            );
         """
         )
         self.conn.commit()
@@ -310,3 +330,47 @@ class Database:
         if row is None:
             return False
         return time.time() < row["expires_at"]
+
+    # --- Eligible Markets ---
+
+    def save_eligible_markets(self, markets: list[dict]):
+        """Replace all eligible markets with new scan results."""
+        c = self.conn.cursor()
+        c.execute("DELETE FROM eligible_markets")
+        now = time.time()
+        for m in markets:
+            c.execute(
+                """INSERT INTO eligible_markets
+                (market_id, token_id, market_name, outcome, market_competitiveness,
+                 daily_reward, rewards_max_spread, rewards_min_size,
+                 tick_size, tick_size_str, neg_risk,
+                 reward_range_min, reward_range_max,
+                 order_price, order_size, end_date, scanned_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    m.get("market_id", ""),
+                    m.get("token_id", ""),
+                    m.get("market_name", ""),
+                    m.get("outcome", ""),
+                    m.get("market_competitiveness", 0),
+                    m.get("daily_reward", 0),
+                    m.get("rewards_max_spread", 0),
+                    m.get("rewards_min_size", 0),
+                    m.get("tick_size", 0.01),
+                    m.get("tick_size_str", "0.01"),
+                    1 if m.get("neg_risk", False) else 0,
+                    m.get("reward_range_min", 0),
+                    m.get("reward_range_max", 1),
+                    m.get("order_price", 0),
+                    m.get("order_size", 0),
+                    m.get("end_date", ""),
+                    now,
+                ),
+            )
+        self.conn.commit()
+
+    def get_eligible_markets(self) -> list[dict]:
+        """Get all eligible markets from last scan."""
+        c = self.conn.cursor()
+        c.execute("SELECT * FROM eligible_markets ORDER BY market_competitiveness DESC")
+        return [dict(row) for row in c.fetchall()]

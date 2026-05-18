@@ -438,12 +438,30 @@ def api_get_history():
 @app.route("/api/eligible", methods=["GET"])
 @login_required
 def api_eligible_markets():
-    """Get the latest list of eligible markets + scan status."""
+    """Get the latest list of eligible markets + scan status.
+
+    During scanning: returns real-time data from memory.
+    When idle: returns persisted data from database.
+    """
     if not manager:
-        return jsonify({"markets": [], "last_scan_time": 0, "scan_status": "idle"})
+        # No manager yet, try loading from database
+        markets = db.get_eligible_markets()
+        return jsonify({"markets": markets, "last_scan_time": 0, "scan_status": "idle"})
+
+    # During scanning, use memory (real-time updates)
+    if manager.scan_status == "scanning":
+        markets = manager.eligible_markets
+    else:
+        # Idle or done: prefer memory if available, else database
+        markets = (
+            manager.eligible_markets
+            if manager.eligible_markets
+            else db.get_eligible_markets()
+        )
+
     return jsonify(
         {
-            "markets": manager.eligible_markets,
+            "markets": markets,
             "last_scan_time": manager.last_scan_time,
             "scan_status": manager.scan_status,
             "scan_progress": manager.scan_progress,
