@@ -314,10 +314,10 @@ def api_start_monitors():
 @login_required
 def api_scan_markets():
     if manager:
-        manager.scan_markets()
-    return jsonify(
-        {"ok": True, "count": len(manager.eligible_markets) if manager else 0}
-    )
+        import threading
+
+        threading.Thread(target=manager.scan_markets, daemon=True).start()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/engine/place-orders", methods=["POST"])
@@ -438,13 +438,17 @@ def api_get_history():
 @app.route("/api/eligible", methods=["GET"])
 @login_required
 def api_eligible_markets():
-    """Get the latest list of eligible markets from the shared scanner."""
+    """Get the latest list of eligible markets + scan status."""
     if not manager:
-        return jsonify({"markets": [], "last_scan_time": 0})
+        return jsonify({"markets": [], "last_scan_time": 0, "scan_status": "idle"})
     return jsonify(
         {
             "markets": manager.eligible_markets,
             "last_scan_time": manager.last_scan_time,
+            "scan_status": manager.scan_status,
+            "scan_progress": manager.scan_progress,
+            "scan_checked": manager.scan_checked,
+            "scan_total": manager.scan_total,
         }
     )
 

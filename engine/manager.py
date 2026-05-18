@@ -191,6 +191,10 @@ class EngineManager:
         self._scanner_api: PolymarketAPI | None = None  # Shared API for scanning
         self.eligible_markets: list[dict] = []  # Latest scan results
         self.last_scan_time: float = 0
+        self.scan_status: str = "idle"  # idle, scanning, done
+        self.scan_progress: str = ""  # e.g. "Checking 5/120..."
+        self.scan_total: int = 0
+        self.scan_checked: int = 0
 
     # === Auto mode: full engine lifecycle ===
 
@@ -250,10 +254,9 @@ class EngineManager:
     def scan_markets(self):
         """Run a single scan to produce the eligible markets list.
 
-        Called manually by user, not on a timer.
+        Updates scan_status/scan_progress in real-time for frontend polling.
         """
         if not self._scanner_api:
-            # Use first available wallet API for scanning
             if self.engines:
                 self._scanner_api = next(iter(self.engines.values())).api
             else:
@@ -262,10 +265,27 @@ class EngineManager:
 
         import time as _time
 
+        self.scan_status = "scanning"
+        self.scan_progress = "Starting..."
+        self.scan_checked = 0
+        self.scan_total = 0
+        self.eligible_markets = []
+
+        def on_progress(checked, total, message):
+            self.scan_checked = checked
+            self.scan_total = total
+            self.scan_progress = message
+
+        def on_found(entry):
+            self.eligible_markets.append(entry)
+            self.last_scan_time = _time.time()
+
         scanner = MarketScanner(self._scanner_api, self.db, "")
-        eligible = scanner.scan()
+        eligible = scanner.scan(on_progress=on_progress, on_found=on_found)
         self.eligible_markets = eligible
         self.last_scan_time = _time.time()
+        self.scan_status = "done"
+        self.scan_progress = f"Done: {len(eligible)} eligible"
         logger.info("Scanner found %d eligible markets", len(eligible))
 
     def place_all_orders(self):

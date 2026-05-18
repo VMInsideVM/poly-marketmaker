@@ -44,8 +44,12 @@ class MarketScanner:
         self.db = db
         self.wallet_address = wallet_address
 
-    def scan(self) -> list[dict]:
+    def scan(self, on_progress=None, on_found=None) -> list[dict]:
         """Scan reward markets and return eligible ones with order prices.
+
+        Args:
+            on_progress: callback(checked, total, message) called during scan
+            on_found: callback(market_dict) called when a new eligible market is found
 
         Returns list of dicts, each representing one token to place an order on.
         """
@@ -58,14 +62,17 @@ class MarketScanner:
         min_days = settings["min_settlement_days"]
 
         # Step 1: Fetch markets (server-side filter: price 0.10~0.90, sorted by rate)
+        logger.info("Fetching rewards markets...")
         markets = self.api.get_rewards_markets(
             min_price=0.10,
             max_price=0.90,
         )
+        logger.info("Fetched %d markets, filtering...", len(markets))
 
         eligible = []
+        checked = 0
 
-        for market in markets:
+        for i, market in enumerate(markets):
             tokens = market.get("tokens", [])
             if not tokens:
                 continue
@@ -89,6 +96,18 @@ class MarketScanner:
             if self.db.is_in_cooldown(self.wallet_address, condition_id):
                 continue
 
+            question = market.get("question", "")
+            checked += 1
+            if on_progress:
+                on_progress(checked, len(markets), f"Checking: {question}")
+            logger.info(
+                "[%d/%d] Checking: %s (rate=$%.0f/day)",
+                checked,
+                len(markets),
+                question,
+                total_rate,
+            )
+
             # Step 4: Get precise reward via /rewards/markets/{condition_id}
             raw_rewards = self.api.get_rewards_for_market(condition_id)
             market_reward = 0
@@ -98,6 +117,9 @@ class MarketScanner:
             if not raw_rewards:
                 market_reward = total_rate
             if market_reward < min_reward:
+                logger.info(
+                    "  Skipped: reward $%.0f < $%.0f", market_reward, min_reward
+                )
                 continue
 
             # Step 5: Find tokens with price in range
@@ -107,6 +129,11 @@ class MarketScanner:
                 if min_price_cents <= float(t.get("price", 0)) * 100 <= max_price_cents
             ]
             if not valid_tokens:
+                logger.info(
+                    "  Skipped: no tokens in price range [%.0f, %.0f] cents",
+                    min_price_cents,
+                    max_price_cents,
+                )
                 continue
 
             # Step 6 & 7: Check each valid token
@@ -117,12 +144,20 @@ class MarketScanner:
             for token in valid_tokens:
                 token_id = token.get("token_id", "")
                 token_price = float(token.get("price", 0))
+                outcome = token.get("outcome", "?")
 
                 # Step 6: Fast spread check
                 spread_val = self.api.get_spread(token_id)
                 if spread_val < 0:
+                    logger.info("  %s: no orderbook", outcome)
                     continue
                 if spread_val * 100 >= max_spread_cents:
+                    logger.info(
+                        "  %s: spread %.2f cents >= %.0f cents",
+                        outcome,
+                        spread_val * 100,
+                        max_spread_cents,
+                    )
                     continue
 
                 # Step 7: Full orderbook
@@ -171,27 +206,33 @@ class MarketScanner:
                 if order_price is None:
                     continue
 
-                eligible.append(
-                    {
-                        "market_id": condition_id,
-                        "token_id": token_id,
-                        "market_name": market.get("question", ""),
-                        "outcome": token.get("outcome", ""),
-                        "market_competitiveness": market.get(
-                            "market_competitiveness", 0
-                        ),
-                        "end_date": end_date_str,
-                        "daily_reward": market_reward,
-                        "rewards_max_spread": max_spread_reward,
-                        "rewards_min_size": min_size,
-                        "tick_size": tick_size,
-                        "tick_size_str": tick_size_str,
-                        "neg_risk": neg_risk,
-                        "reward_range_min": reward_range_min,
-                        "reward_range_max": reward_range_max,
-                        "order_price": order_price,
-                        "order_size": min_size,
-                    }
+                entry = {
+                    "market_id": condition_id,
+                    "token_id": token_id,
+                    "market_name": market.get("question", ""),
+                    "outcome": token.get("outcome", ""),
+                    "market_competitiveness": market.get("market_competitiveness", 0),
+                    "end_date": end_date_str,
+                    "daily_reward": market_reward,
+                    "rewards_max_spread": max_spread_reward,
+                    "rewards_min_size": min_size,
+                    "tick_size": tick_size,
+                    "tick_size_str": tick_size_str,
+                    "neg_risk": neg_risk,
+                    "reward_range_min": reward_range_min,
+                    "reward_range_max": reward_range_max,
+                    "order_price": order_price,
+                    "order_size": min_size,
+                }
+                eligible.append(entry)
+                if on_found:
+                    on_found(entry)
+                logger.info(
+                    "  ELIGIBLE: %s [%s] @ %.4f x %d",
+                    question,
+                    outcome,
+                    order_price,
+                    min_size,
                 )
                 # Both tokens can be eligible independently
 

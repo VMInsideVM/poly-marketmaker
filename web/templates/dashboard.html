@@ -92,10 +92,46 @@ function engineAction(action, confirmMsg) {
     });
 }
 
+let scanPollTimer = null;
+
 function scanMarkets() {
     document.getElementById('scan-time').textContent = '正在扫描...';
-    fetch('/api/engine/scan', {method: 'POST'}).then(r => r.json()).then(data => {
-        refreshEligible();
+    fetch('/api/engine/scan', {method: 'POST'});
+    // Start polling for progress while scan runs in background
+    if (scanPollTimer) clearInterval(scanPollTimer);
+    scanPollTimer = setInterval(pollScanProgress, 2000);
+}
+
+function pollScanProgress() {
+    fetch('/api/eligible').then(r => r.json()).then(data => {
+        const status = data.scan_status || 'idle';
+        const progress = data.scan_progress || '';
+        const checked = data.scan_checked || 0;
+        const total = data.scan_total || 0;
+        const markets = data.markets || [];
+
+        if (status === 'scanning') {
+            document.getElementById('scan-time').textContent =
+                `扫描中 [${checked}/${total}] ${progress} (已找到 ${markets.length} 个)`;
+        } else if (status === 'done') {
+            document.getElementById('scan-time').textContent =
+                `扫描完成: ${new Date(data.last_scan_time * 1000).toLocaleString('zh-CN')} (共 ${markets.length} 个)`;
+            if (scanPollTimer) { clearInterval(scanPollTimer); scanPollTimer = null; }
+        }
+
+        // Update table in real-time
+        const tbody = document.getElementById('eligible-body');
+        tbody.innerHTML = markets.map((m, i) => `
+            <tr>
+                <td>${i + 1}</td>
+                <td title="${m.market_id}">${m.market_name}</td>
+                <td>${m.outcome}</td>
+                <td>$${m.daily_reward.toFixed(2)}/天</td>
+                <td>${m.order_price.toFixed(4)}</td>
+                <td>${m.order_size}</td>
+                <td>${m.market_competitiveness || '-'}</td>
+            </tr>
+        `).join('');
     });
 }
 
