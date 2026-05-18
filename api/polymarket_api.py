@@ -122,8 +122,14 @@ class PolymarketAPI:
             asset_type=AssetType.COLLATERAL,
             signature_type=SIG_POLY_1271,
         )
-        bal = self.client.update_balance_allowance(params)
-        raw = float(bal.get("balance", 0))
+        # update_balance_allowance forces an on-chain sync but may return an
+        # empty body; the actual balance is then read via get_balance_allowance.
+        try:
+            self.client.update_balance_allowance(params)
+        except Exception as e:
+            logger.warning("update_balance_allowance failed: %s", e)
+        bal = self.client.get_balance_allowance(params)
+        raw = float(bal.get("balance", 0)) if isinstance(bal, dict) else 0.0
         return raw / 1e6  # pUSD has 6 decimals
 
     # --- Order Placement ---
