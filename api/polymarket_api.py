@@ -68,6 +68,10 @@ class PolymarketAPI:
         """Return wallet address derived from private key."""
         return self.client.get_address()
 
+    def get_funder(self) -> str:
+        """Proxy/funder address (where funds live) used for orders/data API."""
+        return self.client.builder.funder
+
     # --- Market Data ---
 
     def get_orderbook(self, token_id: str) -> dict:

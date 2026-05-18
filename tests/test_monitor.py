@@ -15,8 +15,8 @@ def _make_monitor(settings=None):
     if settings:
         default_settings.update(settings)
     db.get_settings.return_value = default_settings
-    # funder address via api.client.funder
-    api.client.funder = "0xFUNDER"
+    # funder address via api.get_funder()
+    api.get_funder.return_value = "0xFUNDER"
     monitor = OrderMonitor(api, db, "0xABC")
     return monitor, api, db
 

@@ -35,7 +35,7 @@ class OrderMonitor:
 
     def _funder(self) -> str:
         """Proxy/funder address — used for get_trades maker filter and Data API."""
-        return self.api.client.funder
+        return self.api.get_funder()
 
     # --- Step 1: fills via get_trades (flatten maker_orders) ---
     def check_buy_orders(self):

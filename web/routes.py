@@ -497,7 +497,7 @@ def api_get_positions():
     out = []
     for addr, api in _wallet_apis(wallet).items():
         try:
-            for p in api.get_user_positions(api.client.funder):
+            for p in api.get_user_positions(api.get_funder()):
                 avg = float(p.get("avgPrice", 0) or 0)
                 cur = float(p.get("curPrice", 0) or 0)
                 size = float(p.get("size", 0) or 0)
@@ -595,7 +595,7 @@ def api_dashboard():
             except Exception:
                 pass
             try:
-                w_pos_count = len(api.get_user_positions(api.client.funder))
+                w_pos_count = len(api.get_user_positions(api.get_funder()))
                 total_positions += w_pos_count
             except Exception:
                 pass
