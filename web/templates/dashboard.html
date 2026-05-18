@@ -45,13 +45,13 @@
 <table class="data-table" id="eligible-table">
     <thead>
         <tr>
-            <th>#</th>
-            <th>市场名称</th>
-            <th>方向</th>
-            <th>每日奖励</th>
-            <th>挂单价格</th>
-            <th>挂单数量</th>
-            <th>Competitiveness</th>
+            <th onclick="sortEligible('#')" style="cursor:pointer"># ⇅</th>
+            <th onclick="sortEligible('market_name')" style="cursor:pointer">市场名称 ⇅</th>
+            <th onclick="sortEligible('outcome')" style="cursor:pointer">方向 ⇅</th>
+            <th onclick="sortEligible('daily_reward')" style="cursor:pointer">每日奖励 ⇅</th>
+            <th onclick="sortEligible('order_price')" style="cursor:pointer">挂单价格 ⇅</th>
+            <th onclick="sortEligible('order_size')" style="cursor:pointer">挂单数量 ⇅</th>
+            <th onclick="sortEligible('market_competitiveness')" style="cursor:pointer">Competitiveness ⇅</th>
         </tr>
     </thead>
     <tbody id="eligible-body"></tbody>
@@ -93,6 +93,52 @@ function engineAction(action, confirmMsg) {
 }
 
 let scanPollTimer = null;
+let eligibleData = [];
+let eligibleSortKey = 'market_competitiveness';
+let eligibleSortAsc = false;
+
+function sortEligible(key) {
+    if (key === '#') {
+        // Reset to default order
+        eligibleSortKey = null;
+        renderEligibleTable();
+        return;
+    }
+    if (eligibleSortKey === key) {
+        eligibleSortAsc = !eligibleSortAsc;
+    } else {
+        eligibleSortKey = key;
+        eligibleSortAsc = false;
+    }
+    renderEligibleTable();
+}
+
+function renderEligibleTable() {
+    let sorted = [...eligibleData];
+    if (eligibleSortKey) {
+        sorted.sort((a, b) => {
+            let va = a[eligibleSortKey] ?? '';
+            let vb = b[eligibleSortKey] ?? '';
+            if (typeof va === 'string') va = va.toLowerCase();
+            if (typeof vb === 'string') vb = vb.toLowerCase();
+            if (va < vb) return eligibleSortAsc ? -1 : 1;
+            if (va > vb) return eligibleSortAsc ? 1 : -1;
+            return 0;
+        });
+    }
+    const tbody = document.getElementById('eligible-body');
+    tbody.innerHTML = sorted.map((m, i) => `
+        <tr>
+            <td>${i + 1}</td>
+            <td title="${m.market_id}">${m.market_name}</td>
+            <td>${m.outcome}</td>
+            <td>$${m.daily_reward.toFixed(2)}/天</td>
+            <td>${m.order_price.toFixed(4)}</td>
+            <td>${m.order_size}</td>
+            <td>${m.market_competitiveness || '-'}</td>
+        </tr>
+    `).join('');
+}
 
 function scanMarkets() {
     document.getElementById('scan-time').textContent = '正在扫描...';
@@ -119,19 +165,8 @@ function pollScanProgress() {
             if (scanPollTimer) { clearInterval(scanPollTimer); scanPollTimer = null; }
         }
 
-        // Update table in real-time
-        const tbody = document.getElementById('eligible-body');
-        tbody.innerHTML = markets.map((m, i) => `
-            <tr>
-                <td>${i + 1}</td>
-                <td title="${m.market_id}">${m.market_name}</td>
-                <td>${m.outcome}</td>
-                <td>$${m.daily_reward.toFixed(2)}/天</td>
-                <td>${m.order_price.toFixed(4)}</td>
-                <td>${m.order_size}</td>
-                <td>${m.market_competitiveness || '-'}</td>
-            </tr>
-        `).join('');
+        eligibleData = markets;
+        renderEligibleTable();
     });
 }
 
@@ -167,18 +202,8 @@ function refreshEligible() {
         } else {
             document.getElementById('scan-time').textContent = '尚未扫描';
         }
-        const tbody = document.getElementById('eligible-body');
-        tbody.innerHTML = markets.map((m, i) => `
-            <tr>
-                <td>${i + 1}</td>
-                <td title="${m.market_id}">${m.market_name}</td>
-                <td>${m.outcome}</td>
-                <td>$${m.daily_reward.toFixed(2)}/天</td>
-                <td>${m.order_price.toFixed(4)}</td>
-                <td>${m.order_size}</td>
-                <td>${m.market_competitiveness || '-'}</td>
-            </tr>
-        `).join('');
+        eligibleData = markets;
+        renderEligibleTable();
     });
 }
 
