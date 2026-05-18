@@ -12,6 +12,8 @@ from py_clob_client_v2.clob_types import (
     OrderPayload,
     MarketOrderArgsV2,
     PartialCreateOrderOptions,
+    TradeParams,
+    OrdersScoringParams,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,7 @@ SIG_GNOSIS_SAFE = 2  # Browser-wallet proxy signature type
 
 # Rewards API is part of the CLOB API
 REWARDS_API = POLYMARKET_HOST
+DATA_API_HOST = "https://data-api.polymarket.com"
 
 
 class PolymarketAPI:
@@ -208,9 +211,34 @@ class PolymarketAPI:
         """
         return self.client.get_open_orders()
 
-    def get_trades(self) -> list:
-        """Get trade history for this wallet."""
-        return self.client.get_trades()
+    def get_trades(self, params: TradeParams = None) -> list:
+        """Get trade history for this wallet (auto-paginated)."""
+        return self.client.get_trades(params)
+
+    def are_orders_scoring(self, order_ids: list) -> dict:
+        """Batch-query whether orders are scoring (in reward band).
+
+        Returns dict keyed by order id -> bool. Empty dict for empty input.
+        """
+        if not order_ids:
+            return {}
+        return self.client.are_orders_scoring(OrdersScoringParams(orderIds=order_ids))
+
+    def get_user_positions(self, user_address: str) -> list:
+        """Polymarket Data API: current positions for a user.
+
+        Returns a list of position dicts. Confirmed fields (documented
+        sample): asset (=asset_id), size, avgPrice, curPrice, conditionId
+        (=market), outcome, title. user_address is the proxy/funder.
+        """
+        resp = requests.get(
+            f"{DATA_API_HOST}/positions",
+            params={"user": user_address},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
 
     # --- Rewards (CLOB API - public endpoints) ---
 
