@@ -17,47 +17,65 @@ from py_clob_client_v2.clob_types import (
 logger = logging.getLogger(__name__)
 
 POLYMARKET_HOST = "https://clob.polymarket.com"
+RELAYER_URL = "https://relayer-v2.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
+SIG_POLY_1271 = 3  # Deposit wallet signature type (ERC-1271)
 
 # Rewards API is part of the CLOB API
 REWARDS_API = POLYMARKET_HOST
 
 
-class PolymarketAPI:
-    """Wrapper for one wallet's Polymarket connection."""
+def _derive_deposit_wallet(private_key: str) -> str:
+    """Derive the deterministic deposit wallet address from the EOA private key.
 
-    def __init__(self, private_key: str, funder: str = None, signature_type: int = 3):
-        """Initialize with private key + deposit wallet funder.
+    Uses the relayer client's offline derivation (no network call).
+    """
+    from py_builder_relayer_client.client import RelayClient
+
+    rc = RelayClient(RELAYER_URL, CHAIN_ID, private_key)
+    return rc.get_expected_safe()
+
+
+class PolymarketAPI:
+    """Wrapper for one wallet's Polymarket connection.
+
+    Orders are placed from the user's deposit wallet (signature_type=3, POLY_1271).
+    """
+
+    def __init__(
+        self, private_key: str, signature_type: int = SIG_POLY_1271, funder: str = None
+    ):
+        """Initialize with private key.
 
         Args:
-            private_key: Hex private key string (derives EOA, used for API key + signing).
-            funder: Deposit wallet address (holds the trading funds). Required for
-                    signature_type=3 (POLY_1271 deposit wallet flow).
-            signature_type: 3=POLY_1271 deposit wallet (default), 0=EOA,
-                            1=POLY_PROXY (Magic Link), 2=GNOSIS_SAFE.
+            private_key: Hex private key string (the deposit wallet owner / EOA).
+            signature_type: 3=POLY_1271 deposit wallet (default).
+            funder: Deposit wallet address. If None, derived from private key.
         """
         self.private_key = private_key
-        # Step 1: Derive API creds via L1 (uses private key's own address, not funder)
+        # Derive the deterministic deposit wallet address
+        self.deposit_wallet = funder or _derive_deposit_wallet(private_key)
+        # Step 1: Create temp client to derive API creds
         temp_client = ClobClient(
             host=POLYMARKET_HOST,
             key=private_key,
             chain_id=CHAIN_ID,
         )
         api_creds = temp_client.derive_api_key()
-        self.eoa_address = temp_client.get_address()
-        # Step 2: Full client with L2 auth + funder for order signing
+        # Step 2: Create full client with L2 auth, funded by the deposit wallet
         self.client = ClobClient(
             host=POLYMARKET_HOST,
             key=private_key,
             chain_id=CHAIN_ID,
             creds=api_creds,
             signature_type=signature_type,
-            funder=funder or self.eoa_address,
+            funder=self.deposit_wallet,
         )
+        logger.info("Deposit wallet: %s", self.deposit_wallet)
 
     def get_address(self) -> str:
-        """Return the EOA address derived from the private key."""
-        return self.eoa_address
+        """Return wallet address derived from private key."""
+        return self.client.get_address()
 
     # --- Market Data ---
 
@@ -93,8 +111,11 @@ class PolymarketAPI:
     # --- Balance ---
 
     def get_balance(self) -> float:
-        """Get pUSD (collateral) balance for this wallet, in human-readable units."""
-        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        """Get pUSD (collateral) balance of the deposit wallet, in human-readable units."""
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=SIG_POLY_1271,
+        )
         bal = self.client.get_balance_allowance(params)
         raw = float(bal.get("balance", 0))
         return raw / 1e6  # pUSD has 6 decimals
