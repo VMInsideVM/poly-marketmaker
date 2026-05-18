@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.polymarket.com)",
+      "Read(//c/Users/Hank/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/subagent-driven-development/**)",
+      "Read(//c/Users/Hank/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0/skills/requesting-code-review/**)",
+      "Bash(python -m pytest tests/test_crypto.py -v)",
+      "Bash(python -m pytest tests/test_database.py -v)",
+      "Bash(python -m pytest tests/test_strategy.py -v)",
+      "Bash(python -m pytest tests/test_scanner.py -v)",
+      "Bash(python -m pytest tests/test_monitor.py -v)",
+      "Bash(python -m pytest tests/test_manager.py -v)",
+      "Bash(pip show:*)",
+      "Bash(python -c \"import py_clob_client\")",
+      "Bash(pip list:*)"
+    ]
+  }
+}

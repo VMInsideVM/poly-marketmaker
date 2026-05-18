@@ -5,10 +5,11 @@
 <section class="config-section">
     <h2>钱包管理</h2>
     <div class="form-inline">
-        <input type="password" id="new-private-key" placeholder="输入钱包私钥">
-        <input type="text" id="new-funder" placeholder="Deposit Wallet 地址 (polymarket.com/settings)">
+        <input type="password" id="new-private-key" placeholder="钱包私钥（64位十六进制）">
+        <input type="text" id="new-funder" placeholder="存款钱包地址（0x开头，42位）">
         <button class="btn btn-primary" onclick="addWallet()">添加钱包</button>
     </div>
+    <p style="color:#888;font-size:12px;margin-top:4px;">存款地址 = 在 polymarket.com/settings 看到的、持有资金的地址</p>
     <table class="data-table" id="wallet-config-table">
         <thead>
             <tr><th>地址</th><th>状态</th><th>操作</th></tr>
@@ -106,19 +107,19 @@ function loadWallets() {
 }
 
 function addWallet() {
-    const keyInput = document.getElementById('new-private-key');
+    const input = document.getElementById('new-private-key');
     const funderInput = document.getElementById('new-funder');
-    const key = keyInput.value.trim();
+    const key = input.value.trim();
     const funder = funderInput.value.trim();
     if (!key) { alert('请输入私钥'); return; }
-    if (!funder) { alert('请输入 Deposit Wallet 地址（在 polymarket.com/settings 查看）'); return; }
+    if (!funder) { alert('请输入存款钱包地址'); return; }
     fetch('/api/wallets', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({private_key: key, funder: funder}),
     }).then(r => r.json()).then(data => {
         if (data.error) { alert(data.error); return; }
-        keyInput.value = '';
+        input.value = '';
         funderInput.value = '';
         loadWallets();
     });

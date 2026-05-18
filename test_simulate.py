@@ -47,11 +47,9 @@ def main():
     from api.polymarket_api import PolymarketAPI
     from engine.strategy import determine_order_price
 
-    funder = w.get("funder", "")
-    api = PolymarketAPI(private_key, funder=funder)
+    api = PolymarketAPI(private_key, funder=w.get("funder") or None)
     balance = safe_call(api.get_balance, 0)
     print(f"\n钱包: {api.get_address()}")
-    print(f"Deposit Wallet: {funder}")
     print(f"余额: {balance:.2f} pUSD")
 
     eligible = db.get_eligible_markets()

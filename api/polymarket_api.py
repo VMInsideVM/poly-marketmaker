@@ -26,35 +26,38 @@ REWARDS_API = POLYMARKET_HOST
 class PolymarketAPI:
     """Wrapper for one wallet's Polymarket connection."""
 
-    def __init__(self, private_key: str, signature_type: int = 3, funder: str = None):
-        """Initialize with private key.
+    def __init__(self, private_key: str, funder: str = None, signature_type: int = 3):
+        """Initialize with private key + deposit wallet funder.
 
         Args:
-            private_key: Hex private key string.
-            signature_type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE, 3=POLY_1271 (default, deposit wallet).
-            funder: Deposit/proxy wallet address (from polymarket.com/settings).
+            private_key: Hex private key string (derives EOA, used for API key + signing).
+            funder: Deposit wallet address (holds the trading funds). Required for
+                    signature_type=3 (POLY_1271 deposit wallet flow).
+            signature_type: 3=POLY_1271 deposit wallet (default), 0=EOA,
+                            1=POLY_PROXY (Magic Link), 2=GNOSIS_SAFE.
         """
         self.private_key = private_key
-        # Step 1: Create temp client to derive API creds
+        # Step 1: Derive API creds via L1 (uses private key's own address, not funder)
         temp_client = ClobClient(
             host=POLYMARKET_HOST,
             key=private_key,
             chain_id=CHAIN_ID,
         )
         api_creds = temp_client.derive_api_key()
-        # Step 2: Create full client with L2 auth
+        self.eoa_address = temp_client.get_address()
+        # Step 2: Full client with L2 auth + funder for order signing
         self.client = ClobClient(
             host=POLYMARKET_HOST,
             key=private_key,
             chain_id=CHAIN_ID,
             creds=api_creds,
             signature_type=signature_type,
-            funder=funder,
+            funder=funder or self.eoa_address,
         )
 
     def get_address(self) -> str:
-        """Return wallet address derived from private key."""
-        return self.client.get_address()
+        """Return the EOA address derived from the private key."""
+        return self.eoa_address
 
     # --- Market Data ---
 

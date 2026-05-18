@@ -105,6 +105,16 @@ class Database:
         """
         )
         self.conn.commit()
+        self._migrate()
+
+    def _migrate(self):
+        """Apply schema migrations for existing databases."""
+        c = self.conn.cursor()
+        c.execute("PRAGMA table_info(wallets)")
+        cols = {row[1] for row in c.fetchall()}
+        if "funder" not in cols:
+            c.execute("ALTER TABLE wallets ADD COLUMN funder TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
 
     # --- Settings ---
 

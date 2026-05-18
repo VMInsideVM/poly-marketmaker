@@ -57,7 +57,7 @@ def _get_cached_api(address: str, encrypted_key: str, funder: str = ""):
     from api.polymarket_api import PolymarketAPI
 
     pk = decrypt(encrypted_key, encryption_key)
-    api = PolymarketAPI(pk, funder=funder)
+    api = PolymarketAPI(pk, funder=funder or None)
     _api_cache[address] = api
     return api
 
@@ -236,16 +236,13 @@ def api_add_wallet():
         )
     private_key = "0x" + private_key
 
+    # Deposit wallet address (funder)
     funder = data.get("funder", "").strip()
-    if not funder:
-        return (
-            jsonify(
-                {
-                    "error": "请输入 Deposit Wallet 地址（在 polymarket.com/settings 查看）"
-                }
-            ),
-            400,
-        )
+    funder = re.sub(r"[^0-9a-fA-Fx]", "", funder)
+    if funder and not funder.startswith("0x"):
+        funder = "0x" + funder
+    if not funder or len(funder) != 42:
+        return jsonify({"error": "请输入有效的存款钱包地址（42位，0x开头）"}), 400
 
     from api.polymarket_api import PolymarketAPI
 
@@ -257,7 +254,7 @@ def api_add_wallet():
 
     encrypted = encrypt(private_key, encryption_key)
     try:
-        db.add_wallet(address, encrypted, funder=funder)
+        db.add_wallet(address, encrypted, funder)
     except Exception:
         return jsonify({"error": "该钱包已存在"}), 400
 
