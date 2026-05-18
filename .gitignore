@@ -6,3 +6,5 @@ market_maker.log
 dist/
 build/
 *.spec
+
+.worktrees/
