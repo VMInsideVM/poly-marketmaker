@@ -111,9 +111,18 @@ class PolymarketAPI:
     # --- Balance ---
 
     def get_balance(self) -> float:
-        """Get pUSD (collateral) balance for this wallet, in human-readable units."""
-        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-        bal = self.client.get_balance_allowance(params)
+        """Get pUSD (collateral) balance of the deposit wallet, in human-readable units.
+
+        Uses update_balance_allowance which forces a fresh on-chain sync of the
+        deposit wallet's balance into the CLOB cache and returns the latest value.
+        Per Polymarket docs, the cached get endpoint can be stale for deposit
+        wallets after funding/approving.
+        """
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=SIG_POLY_1271,
+        )
+        bal = self.client.update_balance_allowance(params)
         raw = float(bal.get("balance", 0))
         return raw / 1e6  # pUSD has 6 decimals
 
