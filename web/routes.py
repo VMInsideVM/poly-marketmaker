@@ -16,7 +16,7 @@ from flask import (
 )
 from models.database import Database
 from engine.manager import EngineManager
-from utils.crypto import derive_key, encrypt
+from utils.crypto import derive_key, encrypt, decrypt
 from config import DB_PATH, HOST, PORT
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,29 @@ def _get_cached_api(address: str, encrypted_key: str, funder: str = ""):
     api = PolymarketAPI(pk, funder=funder or None)
     _api_cache[address] = api
     return api
+
+
+def _wallet_apis(only: str = None) -> dict:
+    """Return {address: PolymarketAPI} for enabled wallets (optionally one)."""
+    out = {}
+    wallets = db.list_wallets()
+    for w in wallets:
+        if not w.get("enabled"):
+            continue
+        addr = w["address"]
+        if only and addr != only:
+            continue
+        if manager and manager.engines.get(addr) and manager.engines[addr].running:
+            out[addr] = manager.engines[addr].api
+        else:
+            try:
+                from api.polymarket_api import PolymarketAPI
+
+                pk = decrypt(w["encrypted_key"], encryption_key)
+                out[addr] = PolymarketAPI(pk, funder=w.get("funder") or None)
+            except Exception as e:
+                app.logger.error("API build failed for %s: %s", addr, e)
+    return out
 
 
 def login_required(f):
@@ -369,40 +392,92 @@ def api_stop_wallet(address):
 @login_required
 def api_get_orders():
     wallet = request.args.get("wallet")
-    orders = db.get_open_orders(wallet)
-    return jsonify(orders)
-
-
-@app.route("/api/orders/<order_id>/cancel", methods=["POST"])
-@login_required
-def api_cancel_order(order_id):
-    orders = db.get_open_orders()
-    order = next((o for o in orders if o["order_id"] == order_id), None)
-    if not order:
-        return jsonify({"error": "订单不存在"}), 404
-
-    if manager:
-        eng = manager.engines.get(order["wallet"])
-        if eng and eng.running:
-            eng.api.cancel_order(order_id)
-
-    db.update_order_status(order_id, "cancelled")
-    return jsonify({"ok": True})
+    result, errors = [], []
+    for addr, api in _wallet_apis(wallet).items():
+        try:
+            orders = api.get_open_orders()
+        except Exception as e:
+            errors.append({"wallet": addr, "msg": str(e)})
+            continue
+        buy_ids = [o["id"] for o in orders if o.get("side") == "BUY"]
+        scoring = {}
+        try:
+            scoring = api.are_orders_scoring(buy_ids)
+        except Exception as e:
+            app.logger.warning("scoring failed for %s: %s", addr, e)
+        for o in orders:
+            result.append(
+                {
+                    "wallet": addr,
+                    "order_id": o.get("id"),
+                    "market": o.get("market"),
+                    "asset_id": o.get("asset_id"),
+                    "side": o.get("side"),
+                    "outcome": o.get("outcome"),
+                    "price": float(o.get("price", 0) or 0),
+                    "original_size": float(o.get("original_size", 0) or 0),
+                    "size_matched": float(o.get("size_matched", 0) or 0),
+                    "created_at": o.get("created_at"),
+                    "scoring": (
+                        scoring.get(o.get("id")) if o.get("side") == "BUY" else None
+                    ),
+                }
+            )
+    return jsonify({"orders": result, "errors": errors})
 
 
 @app.route("/api/orders/cancel-batch", methods=["POST"])
 @login_required
 def api_cancel_batch():
-    data = request.get_json()
-    order_ids = data.get("order_ids", [])
-    for oid in order_ids:
-        orders = db.get_open_orders()
-        order = next((o for o in orders if o["order_id"] == oid), None)
-        if order and manager:
-            eng = manager.engines.get(order["wallet"])
-            if eng and eng.running:
-                eng.api.cancel_order(oid)
-            db.update_order_status(oid, "cancelled")
+    data = request.get_json() or {}
+    items = data.get("orders", [])  # [{order_id, wallet}, ...]
+    by_wallet = {}
+    for it in items:
+        by_wallet.setdefault(it["wallet"], []).append(it["order_id"])
+    apis = _wallet_apis()
+    for addr, ids in by_wallet.items():
+        api = apis.get(addr)
+        if api and ids:
+            try:
+                api.cancel_orders(ids)
+            except Exception as e:
+                app.logger.error("cancel-batch failed for %s: %s", addr, e)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/orders/<order_id>/cancel", methods=["POST"])
+@login_required
+def api_cancel_order(order_id):
+    wallet = request.args.get("wallet")
+    api = _wallet_apis(wallet).get(wallet) if wallet else None
+    if not api:
+        # fall back: try every enabled wallet
+        for a in _wallet_apis().values():
+            try:
+                a.cancel_orders([order_id])
+            except Exception:
+                pass
+        return jsonify({"ok": True})
+    try:
+        api.cancel_orders([order_id])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/orders/cancel-all-buys", methods=["POST"])
+@login_required
+def api_cancel_all_buys():
+    data = request.get_json(silent=True) or {}
+    wallet = data.get("wallet")
+    for addr, api in _wallet_apis(wallet).items():
+        try:
+            orders = api.get_open_orders()
+            buy_ids = [o["id"] for o in orders if o.get("side") == "BUY"]
+            if buy_ids:
+                api.cancel_orders(buy_ids)
+        except Exception as e:
+            app.logger.error("cancel-all-buys failed for %s: %s", addr, e)
     return jsonify({"ok": True})
 
 
