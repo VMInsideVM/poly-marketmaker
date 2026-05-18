@@ -3,108 +3,138 @@
 <h1>订单管理</h1>
 
 <div class="filter-bar">
-    <label>钱包筛选：</label>
-    <select id="wallet-filter" onchange="refreshOrders()">
-        <option value="">全部</option>
-    </select>
+  <label>钱包筛选：</label>
+  <select id="wallet-filter" onchange="refreshOrders()">
+    <option value="">全部</option>
+  </select>
+  <label>方向：</label>
+  <select id="side-filter" onchange="renderOrders()">
+    <option value="">全部</option><option value="BUY">买</option><option value="SELL">卖</option>
+  </select>
+  <label>奖励区间：</label>
+  <select id="scoring-filter" onchange="renderOrders()">
+    <option value="">全部</option><option value="1">在区间</option><option value="0">不在区间</option>
+  </select>
+  <button class="btn btn-sm" onclick="refreshOrders()">立即刷新</button>
 </div>
+
+<div id="orders-error" class="loss" style="display:none;"></div>
 
 <h2>当前挂单</h2>
 <div class="batch-controls">
-    <button class="btn btn-sm btn-danger" onclick="cancelSelected()">批量撤单</button>
+  <button class="btn btn-sm btn-danger" onclick="cancelSelected()">撤选中</button>
+  <button class="btn btn-sm btn-danger" onclick="cancelAllBuys()">一键撤买单</button>
 </div>
 <table class="data-table">
-    <thead>
-        <tr>
-            <th><input type="checkbox" id="select-all" onchange="toggleAll(this)"></th>
-            <th>钱包</th><th>市场</th><th>价格</th><th>数量</th><th>时间</th><th>操作</th>
-        </tr>
-    </thead>
-    <tbody id="orders-body"></tbody>
+  <thead><tr>
+    <th><input type="checkbox" id="select-all" onchange="toggleAll(this)"></th>
+    <th>钱包</th><th>市场</th><th>方向</th><th>Outcome</th>
+    <th onclick="sortBy('price')">价格</th>
+    <th onclick="sortBy('original_size')">原始数量</th>
+    <th>已成交</th>
+    <th onclick="sortBy('scoring')">奖励区间</th>
+    <th onclick="sortBy('created_at')">时间</th><th>操作</th>
+  </tr></thead>
+  <tbody id="orders-body"></tbody>
 </table>
 
 <h2>当前持仓</h2>
 <table class="data-table">
-    <thead>
-        <tr>
-            <th>钱包</th><th>市场</th><th>买入价</th><th>当前价</th>
-            <th>卖单价</th><th>止损价</th><th>盈亏</th>
-        </tr>
-    </thead>
-    <tbody id="positions-body"></tbody>
+  <thead><tr><th>钱包</th><th>市场</th><th>买入价</th><th>当前价</th>
+  <th>止损价</th><th>盈亏</th></tr></thead>
+  <tbody id="positions-body"></tbody>
 </table>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function getFilter() {
-    return document.getElementById('wallet-filter').value;
+let _orders = [], _sortKey = 'created_at', _sortDir = -1;
+function getFilter(){return document.getElementById('wallet-filter').value;}
+
+function refreshOrders(){
+  const w = getFilter(); const qs = w ? `?wallet=${w}` : '';
+  fetch(`/api/orders${qs}`).then(r=>r.json()).then(d=>{
+    _orders = d.orders || [];
+    const eb = document.getElementById('orders-error');
+    if (d.errors && d.errors.length){
+      eb.style.display='block';
+      eb.textContent = '部分钱包拉取失败: ' + d.errors.map(e=>`${e.wallet.slice(0,8)}(${e.msg})`).join('; ');
+    } else { eb.style.display='none'; }
+    renderOrders();
+  });
+  fetch(`/api/positions${qs}`).then(r=>r.json()).then(ps=>{
+    document.getElementById('positions-body').innerHTML = ps.map(p=>`
+      <tr><td title="${p.wallet}">${p.wallet.slice(0,6)}...${p.wallet.slice(-4)}</td>
+      <td>${p.market_name}</td><td>${(p.buy_price||0).toFixed(4)}</td>
+      <td>${p.current_price!=null?p.current_price.toFixed(4):'-'}</td>
+      <td>${p.stop_price!=null?p.stop_price.toFixed(4):'-'}</td>
+      <td class="${(p.pnl||0)>=0?'profit':'loss'}">${(p.pnl||0).toFixed(2)}</td></tr>`).join('');
+  });
 }
 
-function refreshOrders() {
-    const wallet = getFilter();
-    const qs = wallet ? `?wallet=${wallet}` : '';
+function sortBy(k){ _sortDir = (_sortKey===k)? -_sortDir : 1; _sortKey=k; renderOrders(); }
 
-    fetch(`/api/orders${qs}`).then(r => r.json()).then(orders => {
-        document.getElementById('orders-body').innerHTML = orders.map(o => `
-            <tr>
-                <td><input type="checkbox" class="order-check" value="${o.order_id}"></td>
-                <td title="${o.wallet}">${o.wallet.slice(0,6)}...${o.wallet.slice(-4)}</td>
-                <td>${o.market_name}</td>
-                <td>${o.price.toFixed(4)}</td>
-                <td>${o.size}</td>
-                <td>${new Date(o.created_at * 1000).toLocaleString('zh-CN')}</td>
-                <td><button class="btn btn-sm btn-danger" onclick="cancelOrder('${o.order_id}')">撤单</button></td>
-            </tr>
-        `).join('');
-    });
-
-    fetch(`/api/positions${qs}`).then(r => r.json()).then(positions => {
-        document.getElementById('positions-body').innerHTML = positions.map(p => `
-            <tr>
-                <td title="${p.wallet}">${p.wallet.slice(0,6)}...${p.wallet.slice(-4)}</td>
-                <td>${p.market_name}</td>
-                <td>${p.buy_price.toFixed(4)}</td>
-                <td>${p.current_price != null ? p.current_price.toFixed(4) : '-'}</td>
-                <td>${p.buy_price.toFixed(4)}</td>
-                <td>${p.stop_price != null ? p.stop_price.toFixed(4) : '-'}</td>
-                <td class="${(p.pnl || 0) >= 0 ? 'profit' : 'loss'}">${(p.pnl || 0).toFixed(2)}</td>
-            </tr>
-        `).join('');
-    });
+function renderOrders(){
+  const sf = document.getElementById('side-filter').value;
+  const cf = document.getElementById('scoring-filter').value;
+  let rows = _orders.filter(o=>{
+    if (sf && o.side!==sf) return false;
+    if (cf==='1' && o.scoring!==true) return false;
+    if (cf==='0' && o.scoring!==false) return false;
+    return true;
+  });
+  rows.sort((a,b)=>{
+    const x=a[_sortKey], y=b[_sortKey];
+    return ((x>y)-(x<y))*_sortDir;
+  });
+  document.getElementById('orders-body').innerHTML = rows.map(o=>`
+    <tr><td><input type="checkbox" class="order-check"
+        data-id="${o.order_id}" data-wallet="${o.wallet}"></td>
+    <td title="${o.wallet}">${o.wallet.slice(0,6)}...${o.wallet.slice(-4)}</td>
+    <td>${o.market||''}</td><td>${o.side}</td><td>${o.outcome||''}</td>
+    <td>${(o.price||0).toFixed(4)}</td><td>${o.original_size}</td>
+    <td>${o.size_matched}</td>
+    <td>${o.side==='BUY' ? (o.scoring===true?'✓':(o.scoring===false?'✗':'?')) : '—'}</td>
+    <td>${o.created_at? new Date(o.created_at*1000).toLocaleString('zh-CN'):'-'}</td>
+    <td><button class="btn btn-sm btn-danger"
+        onclick="cancelOne('${o.order_id}','${o.wallet}')">撤单</button></td></tr>`).join('');
 }
 
-function cancelOrder(orderId) {
-    if (!confirm('确定撤销该订单？')) return;
-    fetch(`/api/orders/${orderId}/cancel`, {method: 'POST'}).then(() => refreshOrders());
+function toggleAll(c){document.querySelectorAll('.order-check').forEach(x=>x.checked=c.checked);}
+
+function _selected(){
+  return [...document.querySelectorAll('.order-check:checked')]
+    .map(c=>({order_id:c.dataset.id, wallet:c.dataset.wallet}));
+}
+function cancelSelected(){
+  const items=_selected();
+  if(!items.length){alert('请先勾选要撤销的订单');return;}
+  if(!confirm(`确定撤销 ${items.length} 笔订单？`))return;
+  fetch('/api/orders/cancel-batch',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({orders:items})}).then(()=>refreshOrders());
+}
+function cancelOne(id,wallet){
+  if(!confirm('确定撤销该订单？'))return;
+  fetch('/api/orders/cancel-batch',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({orders:[{order_id:id,wallet:wallet}]})}).then(()=>refreshOrders());
+}
+function cancelAllBuys(){
+  const w=getFilter();
+  if(!confirm('确定撤销'+(w?'该钱包':'全部钱包')+'所有买单？（保留止盈卖单）'))return;
+  fetch('/api/orders/cancel-all-buys',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({wallet:w||null})}).then(()=>refreshOrders());
 }
 
-function toggleAll(checkbox) {
-    document.querySelectorAll('.order-check').forEach(c => c.checked = checkbox.checked);
-}
-
-function cancelSelected() {
-    const ids = [...document.querySelectorAll('.order-check:checked')].map(c => c.value);
-    if (!ids.length) { alert('请先勾选要撤销的订单'); return; }
-    if (!confirm(`确定撤销 ${ids.length} 笔订单？`)) return;
-    fetch('/api/orders/cancel-batch', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({order_ids: ids}),
-    }).then(() => refreshOrders());
-}
-
-fetch('/api/wallets').then(r => r.json()).then(wallets => {
-    const select = document.getElementById('wallet-filter');
-    wallets.forEach(w => {
-        const opt = document.createElement('option');
-        opt.value = w.address;
-        opt.textContent = `${w.address.slice(0,6)}...${w.address.slice(-4)}`;
-        select.appendChild(opt);
-    });
+fetch('/api/wallets').then(r=>r.json()).then(ws=>{
+  const s=document.getElementById('wallet-filter');
+  ws.forEach(w=>{const o=document.createElement('option');
+    o.value=w.address;o.textContent=`${w.address.slice(0,6)}...${w.address.slice(-4)}`;
+    s.appendChild(o);});
 });
-
 refreshOrders();
-setInterval(refreshOrders, 5000);
+setInterval(refreshOrders, 10000);
 </script>
 {% endblock %}
