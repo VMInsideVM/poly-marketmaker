@@ -335,7 +335,11 @@ class EngineManager:
         if worker is None:
             return {"ok": False, "message": "请先启动监控"}
 
-        worker.place_orders(sorted_markets, limit=3)
+        try:
+            worker.place_orders(sorted_markets, limit=3)
+        except Exception as e:
+            logger.error("Error placing test orders: %s", e)
+            return {"ok": False, "message": f"测试挂单失败：{e}"}
         return {
             "ok": True,
             "message": "已对符合策略的市场提交最多 3 个测试买单，请到订单管理查看",

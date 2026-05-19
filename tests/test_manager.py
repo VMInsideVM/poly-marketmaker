@@ -97,6 +97,17 @@ class TestTestPlaceOrders:
         assert [m["name"] for m in passed_markets] == ["low", "high"]
         assert kwargs.get("limit") == 3
 
+    def test_place_orders_exception_returns_error_dict(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = [{"market_competitiveness": 0.5}]
+        worker = MagicMock()
+        worker.running = True
+        worker.place_orders.side_effect = RuntimeError("boom")
+        manager.engines = {"0xABC": worker}
+        result = manager.test_place_orders()
+        assert result["ok"] is False
+        assert "boom" in result["message"]
+
     def test_skips_disabled_or_not_running_picks_first_valid(self):
         manager, db = _make_manager()
         db.list_wallets.return_value = [
