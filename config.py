@@ -17,3 +17,4 @@ DB_PATH = "market_maker.db"
 HOST = "127.0.0.1"
 PORT = 5000
 SECRET_KEY = None  # Set at runtime from user password
+LOG_BUFFER_SIZE = 1000  # max in-memory log entries for the 运行日志 page
