@@ -17,7 +17,7 @@ from flask import (
 from models.database import Database
 from engine.manager import EngineManager
 from utils.crypto import derive_key, encrypt, decrypt
-from utils.log_buffer import get_logs, clear_logs
+from engine.monitor_status import get_snapshot
 from config import DB_PATH, HOST, PORT
 
 logger = logging.getLogger(__name__)
@@ -186,17 +186,10 @@ def logs_page():
     return render_template("logs.html")
 
 
-@app.route("/api/logs", methods=["GET"])
+@app.route("/api/monitor-status", methods=["GET"])
 @login_required
-def api_get_logs():
-    return jsonify(get_logs())
-
-
-@app.route("/api/logs/clear", methods=["POST"])
-@login_required
-def api_clear_logs():
-    clear_logs()
-    return jsonify({"ok": True})
+def api_monitor_status():
+    return jsonify(get_snapshot())
 
 
 # --- API: Settings ---

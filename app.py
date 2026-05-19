@@ -9,7 +9,6 @@ from models.database import Database
 from engine.manager import EngineManager
 from web.routes import app, init_app, init_manager, set_encryption_key
 from config import DB_PATH, HOST, PORT
-from utils.log_buffer import BufferLogHandler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,7 +16,6 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler("market_maker.log", encoding="utf-8"),
-        BufferLogHandler(),
     ],
 )
 logger = logging.getLogger(__name__)
