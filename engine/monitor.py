@@ -238,9 +238,10 @@ class OrderMonitor:
             logger.warning("determine_order_price failed for %s: %s", o.get("id"), e)
             return
         action = needs_replace(float(o.get("price", 0)), want, tick)
+        want_str = "无" if want is None else f"{want:.4f}"
         action_zh = {
             "keep": "keep → 保持不动",
-            "replace": f"replace → 撤单并重挂 {want}",
+            "replace": f"replace → 撤单并重挂 {want_str}",
             "cancel": "cancel → 撤单不重挂",
         }.get(action, action)
         logger.info(

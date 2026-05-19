@@ -491,6 +491,7 @@ class TestCheckSellOrders:
         assert "o1" in text and "cid1" in text
         assert "max_spread=3" in text
         assert "replace" in text
+        assert "撤单并重挂" in text
 
     def test_log_keep_has_detail(self, caplog):
         monitor, api, db = _make_monitor()
@@ -535,6 +536,7 @@ class TestCheckSellOrders:
             monitor.check_sell_orders()
         assert "[Step3]" in caplog.text
         assert "cancel" in caplog.text
+        assert "无" in caplog.text
 
     def test_log_skip_when_max_spread_unknown(self, caplog):
         monitor, api, db = _make_monitor()
