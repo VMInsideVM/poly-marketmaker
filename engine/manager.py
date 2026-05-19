@@ -386,6 +386,7 @@ class EngineManager:
         last_scan_time (a failed round did not complete), then re-raises."""
         import time as _time
 
+        prev_eligible = self.eligible_markets
         self.scan_status = "scanning"
         self.scan_progress = "Starting..."
         self.scan_checked = 0
@@ -404,6 +405,7 @@ class EngineManager:
             scanner = MarketScanner(self._scanner_api, self.db, "")
             eligible = scanner.scan(on_progress=on_progress, on_found=on_found)
         except Exception:
+            self.eligible_markets = prev_eligible  # don't blank on failure
             self.scan_status = "done"  # not 'scanning': progress bar won't stick
             raise
         self.eligible_markets = eligible

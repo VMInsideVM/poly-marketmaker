@@ -225,11 +225,13 @@ class TestSharedScanWithStatus:
         assert manager.scan_status == "done"
         assert manager.last_scan_time > 0
         worker.place_orders.assert_called_once_with([{"market_id": "m9"}])
+        db.save_eligible_markets.assert_not_called()
 
     def test_scan_failure_resets_status_and_keeps_last_scan_time(self):
         manager, db = _make_manager()
         manager._scanner_api = MagicMock()
         manager.last_scan_time = 12345.0
+        manager.eligible_markets = [{"market_id": "prev"}]
 
         class BoomScanner:
             def __init__(self, api, db, addr):
@@ -244,3 +246,4 @@ class TestSharedScanWithStatus:
 
         assert manager.scan_status == "done"
         assert manager.last_scan_time == 12345.0
+        assert manager.eligible_markets == [{"market_id": "prev"}]
