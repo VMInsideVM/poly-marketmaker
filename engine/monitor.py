@@ -160,7 +160,7 @@ class OrderMonitor:
                     action_type="cancel_remainder",
                     side="-",
                     price=-1,
-                    size=size,
+                    size=size,  # fill size; remaining unfilled qty not known here
                     reason="该买单已成交，撤销同一买单剩余未成交量，避免超买",
                     price_basis=f"撤 order_id={order_id}；撤单操作无价格",
                 )

@@ -771,3 +771,4 @@ class TestStep1ActionLog:
             ]
             monitor.check_buy_orders()  # must not raise
         api.place_limit_sell.assert_called_once()
+        assert db.record_trade.call_count == 2
