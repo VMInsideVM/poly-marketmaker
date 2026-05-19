@@ -274,7 +274,6 @@ class EngineManager:
 
         def on_found(entry):
             self.eligible_markets.append(entry)
-            self.last_scan_time = _time.time()
 
         scanner = MarketScanner(self._scanner_api, self.db, "")
         eligible = scanner.scan(on_progress=on_progress, on_found=on_found)

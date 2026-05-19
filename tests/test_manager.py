@@ -146,3 +146,31 @@ class TestTestPlaceOrders:
         assert result["ok"] is True
         good.place_orders.assert_called_once()
         stopped.place_orders.assert_not_called()
+
+
+class TestScanMarketsLastScanTime:
+    def test_last_scan_time_only_updates_at_round_completion(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()  # skip API-construction branch
+
+        observed = []
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def scan(self, on_progress=None, on_found=None):
+                on_found({"market_id": "m1"})
+                observed.append(manager.last_scan_time)
+                on_found({"market_id": "m2"})
+                observed.append(manager.last_scan_time)
+                return [{"market_id": "m1"}, {"market_id": "m2"}]
+
+        assert manager.last_scan_time == 0
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager.scan_markets()
+
+        assert observed == [0, 0]
+        assert manager.last_scan_time > 0
+        assert manager.scan_status == "done"
+        assert manager.eligible_markets == [{"market_id": "m1"}, {"market_id": "m2"}]
