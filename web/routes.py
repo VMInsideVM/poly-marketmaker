@@ -550,6 +550,17 @@ def api_get_history():
     return jsonify(trades)
 
 
+@app.route("/api/actions", methods=["GET"])
+@login_required
+def api_get_actions():
+    wallet = request.args.get("wallet")
+    start = request.args.get("start", type=float)
+    end = request.args.get("end", type=float)
+    types = request.args.get("types")
+    action_types = types.split(",") if types else None
+    return jsonify(db.get_actions(wallet, start, end, action_types))
+
+
 # --- API: Eligible Markets ---
 
 
