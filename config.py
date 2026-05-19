@@ -10,6 +10,7 @@ DEFAULTS = {
     "scan_interval_sec": 30,
     "fill_check_interval_sec": 5,
     "cooldown_minutes": 20,
+    "rewards_cache_ttl_sec": 600,
 }
 
 DB_PATH = "market_maker.db"
