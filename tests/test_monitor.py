@@ -684,6 +684,8 @@ class TestMonitorStatusSnapshot:
         rows = get_snapshot()["rows"]
         r = next(x for x in rows if x["stage"] == "Step1")
         assert "成交" in r["action"]
+        assert r["market"] == "cid1"
+        assert r["wallet"] == "0xABC"
 
     def test_begin_tick_clears_previous_rows(self):
         monitor, api, db = _make_monitor()
@@ -706,3 +708,4 @@ class TestMonitorStatusSnapshot:
         monitor.check_sell_orders()
         monitor.publish_status()
         assert len(get_snapshot()["rows"]) == first
+        assert len(get_snapshot()["rows"]) == 1
