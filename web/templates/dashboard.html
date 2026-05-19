@@ -21,6 +21,7 @@
 </div>
 
 <div class="summary-cards" id="summary">
+    <div class="card"><h3>引擎状态</h3><p id="engine-status">-</p></div>
     <div class="card"><h3>总挂单</h3><p id="total-orders">-</p></div>
     <div class="card"><h3>总持仓</h3><p id="total-positions">-</p></div>
     <div class="card"><h3>总盈亏</h3><p id="total-pnl">-</p></div>
@@ -61,11 +62,32 @@
 
 {% block scripts %}
 <script>
+let lastScanTime = 0;
+let lastScanCount = 0;
+
+function relTime(sec) {
+    if (!sec) return '';
+    const d = Math.floor(Date.now() / 1000 - sec);
+    if (d < 60) return '刚刚';
+    if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+    return Math.floor(d / 3600) + ' 小时前';
+}
+
+function renderScanLine() {
+    const el = document.getElementById('scan-time');
+    if (!lastScanTime) { el.textContent = '尚未扫描'; return; }
+    const abs = new Date(lastScanTime * 1000).toLocaleString('zh-CN');
+    el.textContent = `上次扫描：${abs}（${relTime(lastScanTime)}，共 ${lastScanCount} 个）`;
+}
+
 function refreshDashboard() {
     fetch('/api/dashboard').then(r => r.json()).then(data => {
         document.getElementById('total-orders').textContent = data.total_orders;
         document.getElementById('total-positions').textContent = data.total_positions;
         document.getElementById('total-pnl').textContent = (data.total_pnl || 0).toFixed(2) + ' pUSD';
+        const engineRunning = (data.wallets || []).some(w => w.running);
+        document.getElementById('engine-status').innerHTML =
+            `<span class="status ${engineRunning ? 'running' : 'stopped'}">${engineRunning ? '运行中' : '已停止'}</span>`;
         const tbody = document.getElementById('wallet-body');
         tbody.innerHTML = data.wallets.map(w => `
             <tr>
@@ -206,11 +228,12 @@ function refreshEligible() {
         const markets = data.markets || [];
         const scanTime = data.last_scan_time;
         if (scanTime) {
-            document.getElementById('scan-time').textContent =
-                `上次扫描: ${new Date(scanTime * 1000).toLocaleString('zh-CN')} (共 ${markets.length} 个)`;
+            lastScanTime = scanTime;
+            lastScanCount = markets.length;
         } else {
-            document.getElementById('scan-time').textContent = '尚未扫描';
+            lastScanTime = 0;
         }
+        renderScanLine();
         eligibleData = markets;
         renderEligibleTable();
     });
@@ -219,6 +242,7 @@ function refreshEligible() {
 refreshDashboard();
 refreshEligible();
 setInterval(refreshDashboard, 5000);
+setInterval(renderScanLine, 5000);
 
 // eligible 列表跟随后端扫描节奏：检测 last_scan_time 变化才刷新
 let lastKnownScanTime = 0;
