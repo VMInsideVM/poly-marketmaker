@@ -44,6 +44,7 @@
 
 <h2>符合条件的市场 (Eligible Markets)</h2>
 <p id="scan-time" style="color:#888; font-size:13px;"></p>
+<div id="scan-progress" style="display:none; color:#888; font-size:13px; margin-bottom:8px;"></div>
 <table class="data-table" id="eligible-table">
     <thead>
         <tr>
@@ -74,7 +75,6 @@ function relTime(sec) {
 }
 
 function renderScanLine() {
-    if (scanPollTimer) return;  // scan in progress: let pollScanProgress own #scan-time
     const el = document.getElementById('scan-time');
     if (!lastScanTime) { el.textContent = '尚未扫描'; return; }
     const abs = new Date(lastScanTime * 1000).toLocaleString('zh-CN');
@@ -164,29 +164,40 @@ function renderEligibleTable() {
     `).join('');
 }
 
-function scanMarkets() {
-    document.getElementById('scan-time').textContent = '正在扫描...';
-    fetch('/api/engine/scan', {method: 'POST'});
-    // Start polling for progress while scan runs in background
-    if (scanPollTimer) clearInterval(scanPollTimer);
+function ensureScanPolling() {
+    if (scanPollTimer) return;
     scanPollTimer = setInterval(pollScanProgress, 2000);
+    pollScanProgress();
+}
+
+function scanMarkets() {
+    fetch('/api/engine/scan', {method: 'POST'});
+    ensureScanPolling();
 }
 
 function pollScanProgress() {
     fetch('/api/eligible').then(r => r.json()).then(data => {
         const status = data.scan_status || 'idle';
-        const progress = data.scan_progress || '';
         const checked = data.scan_checked || 0;
         const total = data.scan_total || 0;
         const markets = data.markets || [];
+        const box = document.getElementById('scan-progress');
 
         if (status === 'scanning') {
-            document.getElementById('scan-time').textContent =
-                `扫描中 [${checked}/${total}] ${progress} (已找到 ${markets.length} 个)`;
-        } else if (status === 'done') {
-            document.getElementById('scan-time').textContent =
-                `扫描完成: ${new Date(data.last_scan_time * 1000).toLocaleString('zh-CN')} (共 ${markets.length} 个)`;
-            if (scanPollTimer) { clearInterval(scanPollTimer); scanPollTimer = null; }
+            const bar = total > 0
+                ? `<progress value="${checked}" max="${total}"></progress>`
+                : `<progress></progress>`;
+            box.innerHTML = total > 0
+                ? `扫描中 ${bar} ${checked}/${total}，已找到 ${markets.length} 个`
+                : `正在初筛… ${bar} 已找到 ${markets.length} 个`;
+            box.style.display = 'block';
+        } else {
+            box.style.display = 'none';
+            box.innerHTML = '';
+            if (status === 'done' && scanPollTimer) {
+                clearInterval(scanPollTimer);
+                scanPollTimer = null;
+            }
         }
 
         eligibleData = markets;
@@ -236,6 +247,7 @@ function refreshEligible() {
             lastScanCount = 0;
         }
         renderScanLine();
+        if (data.scan_status === 'scanning') ensureScanPolling();
         eligibleData = markets;
         renderEligibleTable();
     });
