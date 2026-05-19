@@ -15,6 +15,7 @@
         <button class="btn btn-sm btn-primary" onclick="engineAction('start-monitors')">启动监控</button>
         <button class="btn btn-sm btn-primary" onclick="scanMarkets()">扫描市场</button>
         <button class="btn btn-sm btn-success" onclick="placeOrders()">分发挂单</button>
+        <button class="btn btn-sm btn-warning" onclick="testPlaceOrders()">测试挂单</button>
         <button class="btn btn-sm btn-danger" onclick="cancelAllOrders()">全部撤单</button>
     </div>
 </div>
@@ -173,6 +174,14 @@ function pollScanProgress() {
 function placeOrders() {
     if (!confirm('确定将 eligible 列表分发到所有钱包挂单？')) return;
     fetch('/api/engine/place-orders', {method: 'POST'}).then(r => r.json()).then(data => {
+        refreshDashboard();
+    });
+}
+
+function testPlaceOrders() {
+    if (!confirm('将用第一个启用钱包的真实资金，最多挂出 3 个测试买单，确认？')) return;
+    fetch('/api/engine/test-place-orders', {method: 'POST'}).then(r => r.json()).then(data => {
+        if (data.message) alert(data.message);
         refreshDashboard();
     });
 }

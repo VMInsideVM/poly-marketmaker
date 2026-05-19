@@ -368,6 +368,14 @@ def api_cancel_all_buy():
     return jsonify({"ok": True})
 
 
+@app.route("/api/engine/test-place-orders", methods=["POST"])
+@login_required
+def api_test_place_orders():
+    if not manager:
+        return jsonify({"ok": False, "message": "引擎未启动"})
+    return jsonify(manager.test_place_orders())
+
+
 @app.route("/api/engine/<address>/start", methods=["POST"])
 @login_required
 def api_start_wallet(address):
