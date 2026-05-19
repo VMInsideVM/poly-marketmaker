@@ -74,6 +74,7 @@ function relTime(sec) {
 }
 
 function renderScanLine() {
+    if (scanPollTimer) return;  // scan in progress: let pollScanProgress own #scan-time
     const el = document.getElementById('scan-time');
     if (!lastScanTime) { el.textContent = '尚未扫描'; return; }
     const abs = new Date(lastScanTime * 1000).toLocaleString('zh-CN');
@@ -232,6 +233,7 @@ function refreshEligible() {
             lastScanCount = markets.length;
         } else {
             lastScanTime = 0;
+            lastScanCount = 0;
         }
         renderScanLine();
         eligibleData = markets;
