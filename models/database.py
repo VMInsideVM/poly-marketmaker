@@ -83,7 +83,7 @@ class Database:
                 action_type TEXT NOT NULL,
                 side TEXT NOT NULL,
                 price REAL NOT NULL DEFAULT -1,
-                size REAL NOT NULL DEFAULT 0,
+                size REAL NOT NULL DEFAULT 0,   -- REAL: fractional fill sizes (trades.size is INTEGER by legacy design)
                 reason TEXT NOT NULL DEFAULT '',
                 price_basis TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
@@ -371,7 +371,7 @@ class Database:
         wallet: str = None,
         start: float = None,
         end: float = None,
-        action_types: list = None,
+        action_types: list[str] = None,
     ) -> list[dict]:
         c = self.conn.cursor()
         query = "SELECT * FROM actions WHERE 1=1"
