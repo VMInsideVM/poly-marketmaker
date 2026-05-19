@@ -876,6 +876,10 @@ class TestStep3ActionLog:
             monitor.check_sell_orders()
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
         assert ats == ["step3_cancel_nocompliant"]
+        call = db.record_action.call_args_list[0]
+        assert call.kwargs["side"] == "-"
+        assert call.kwargs["price"] == -1
+        assert "无合规价" in call.kwargs["reason"]
         api.place_limit_buy.assert_not_called()
 
     def test_keep_records_no_action(self):
@@ -919,3 +923,16 @@ class TestStep3ActionLog:
         ]
         monitor.check_sell_orders()
         db.record_action.assert_not_called()
+
+    def test_replace_place_fails_records_only_cancel_old(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        api.place_limit_buy.side_effect = RuntimeError("network")
+        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
+            "engine.monitor.determine_order_price", return_value=0.48
+        ):
+            monitor.check_sell_orders()  # must not raise
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["step3_cancel_old"]
