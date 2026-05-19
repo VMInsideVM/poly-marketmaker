@@ -69,10 +69,15 @@ class WalletWorker:
             self.monitor.check_sell_orders()
             self._stop_event.wait(timeout=check_interval)
 
-    def place_orders(self, eligible_markets: list[dict]):
-        """Place orders on eligible markets; price recomputed at placement time."""
+    def place_orders(self, eligible_markets: list[dict], limit: int | None = None):
+        """Place orders on eligible markets; price recomputed at placement time.
+
+        If ``limit`` is set, stop after that many *successful* placements
+        (a placement counts only when ``place_limit_buy`` succeeds).
+        """
         from engine.strategy import determine_order_price
 
+        placed = 0
         try:
             open_orders = self.api.get_open_orders()
         except Exception as e:
@@ -146,6 +151,9 @@ class WalletWorker:
                     order_price,
                     market["order_size"],
                 )
+                placed += 1
+                if limit is not None and placed >= limit:
+                    break
             except Exception as e:
                 logger.error("Error placing order for %s: %s", market["market_name"], e)
 
