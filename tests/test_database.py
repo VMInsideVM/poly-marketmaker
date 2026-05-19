@@ -116,3 +116,60 @@ class TestOrders:
     def test_cooldown(self, db):
         db.set_cooldown("0xABC", "mkt1", minutes=20)
         assert db.is_in_cooldown("0xABC", "mkt1") is True
+
+
+class TestActions:
+    def test_record_and_get_action(self, db):
+        db.record_action(
+            wallet="0xABC",
+            market_id="mkt1",
+            action_type="take_profit_sell",
+            side="卖出",
+            price=0.33,
+            size=120.0,
+            reason="买单成交，按成交价挂等价止盈卖单",
+            price_basis="卖价=买入成交价 0.3300；来源：CLOB get_trades",
+        )
+        rows = db.get_actions()
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["wallet"] == "0xABC"
+        assert r["action_type"] == "take_profit_sell"
+        assert r["side"] == "卖出"
+        assert r["price"] == 0.33
+        assert r["size"] == 120.0
+        assert "止盈" in r["reason"]
+        assert "成交价" in r["price_basis"]
+        assert r["created_at"] > 0
+
+    def test_get_actions_filters_by_wallet(self, db):
+        db.record_action("0xA", "m", "cancel_remainder", "-", -1, 0, "r", "b")
+        db.record_action("0xB", "m", "cancel_remainder", "-", -1, 0, "r", "b")
+        assert len(db.get_actions(wallet="0xA")) == 1
+        assert db.get_actions(wallet="0xA")[0]["wallet"] == "0xA"
+
+    def test_get_actions_filters_by_action_types(self, db):
+        db.record_action("0xA", "m", "take_profit_sell", "卖出", 0.3, 1, "r", "b")
+        db.record_action("0xA", "m", "step3_replace_new", "买入", 0.4, 1, "r", "b")
+        db.record_action("0xA", "m", "stoploss_market_sell", "卖出", 0.2, 1, "r", "b")
+        rows = db.get_actions(action_types=["take_profit_sell", "stoploss_market_sell"])
+        assert len(rows) == 2
+        assert {r["action_type"] for r in rows} == {
+            "take_profit_sell",
+            "stoploss_market_sell",
+        }
+
+    def test_get_actions_filters_by_time_range(self, db):
+        import time
+
+        db.record_action("0xA", "m", "take_profit_sell", "卖出", 0.3, 1, "r", "b")
+        now = time.time()
+        assert len(db.get_actions(start=now - 3600, end=now + 3600)) == 1
+        assert len(db.get_actions(start=now + 3600)) == 0
+
+    def test_get_actions_orders_desc_by_created_at(self, db):
+        db.record_action("0xA", "m", "take_profit_sell", "卖出", 0.1, 1, "first", "b")
+        db.record_action("0xA", "m", "take_profit_sell", "卖出", 0.2, 1, "second", "b")
+        rows = db.get_actions()
+        assert rows[0]["reason"] == "second"
+        assert rows[1]["reason"] == "first"

@@ -76,6 +76,18 @@ class Database:
                 pnl REAL NOT NULL DEFAULT 0.0,
                 created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
+            CREATE TABLE IF NOT EXISTS actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet TEXT NOT NULL,
+                market_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price REAL NOT NULL DEFAULT -1,
+                size REAL NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT '',
+                price_basis TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+            );
             CREATE TABLE IF NOT EXISTS cooldowns (
                 wallet TEXT NOT NULL,
                 market_id TEXT NOT NULL,
@@ -318,6 +330,65 @@ class Database:
         if end:
             query += " AND created_at <= ?"
             params.append(end)
+        query += " ORDER BY created_at DESC"
+        c.execute(query, params)
+        return [dict(row) for row in c.fetchall()]
+
+    # --- Actions (monitor order-mutating actions log) ---
+
+    def record_action(
+        self,
+        wallet: str,
+        market_id: str,
+        action_type: str,
+        side: str,
+        price: float,
+        size: float,
+        reason: str,
+        price_basis: str,
+    ):
+        c = self.conn.cursor()
+        c.execute(
+            """INSERT INTO actions
+            (wallet, market_id, action_type, side, price, size,
+             reason, price_basis)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                wallet,
+                market_id,
+                action_type,
+                side,
+                price,
+                size,
+                reason,
+                price_basis,
+            ),
+        )
+        self.conn.commit()
+
+    def get_actions(
+        self,
+        wallet: str = None,
+        start: float = None,
+        end: float = None,
+        action_types: list = None,
+    ) -> list[dict]:
+        c = self.conn.cursor()
+        query = "SELECT * FROM actions WHERE 1=1"
+        params = []
+        if wallet:
+            query += " AND wallet = ?"
+            params.append(wallet)
+        if start:
+            query += " AND created_at >= ?"
+            params.append(start)
+        if end:
+            query += " AND created_at <= ?"
+            params.append(end)
+        if action_types:
+            placeholders = ",".join("?" * len(action_types))
+            query += f" AND action_type IN ({placeholders})"
+            params.extend(action_types)
         query += " ORDER BY created_at DESC"
         c.execute(query, params)
         return [dict(row) for row in c.fetchall()]
