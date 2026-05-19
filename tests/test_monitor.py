@@ -772,3 +772,56 @@ class TestStep1ActionLog:
             monitor.check_buy_orders()  # must not raise
         api.place_limit_sell.assert_called_once()
         assert db.record_trade.call_count == 2
+
+
+class TestStep2ActionLog:
+    def _pos(self):
+        return [
+            {
+                "asset": "tok1",
+                "size": 1000.0,
+                "avgPrice": 0.30,
+                "curPrice": 0.24,
+                "conditionId": "mkt1",
+            }
+        ]
+
+    def test_stop_loss_records_cancel_and_market_sell(self):
+        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
+        api.get_user_positions.return_value = self._pos()
+        api.get_open_orders.return_value = [
+            {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
+        ]
+        with patch("engine.monitor.stop_loss_triggered", return_value=True):
+            monitor.check_stop_loss()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert "stoploss_cancel_sell" in ats
+        assert "stoploss_market_sell" in ats
+        ms = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "stoploss_market_sell"
+        )
+        assert ms.kwargs["side"] == "卖出"
+        assert ms.kwargs["price"] == 0.24
+        assert "avgPrice=0.3000" in ms.kwargs["price_basis"]
+        assert "Data API" in ms.kwargs["price_basis"]
+        assert "止损阈值" in ms.kwargs["reason"]
+
+    def test_no_cancel_action_when_no_sell_orders(self):
+        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
+        api.get_user_positions.return_value = self._pos()
+        api.get_open_orders.return_value = []
+        with patch("engine.monitor.stop_loss_triggered", return_value=True):
+            monitor.check_stop_loss()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert "stoploss_cancel_sell" not in ats
+        assert "stoploss_market_sell" in ats
+
+    def test_no_action_when_not_triggered(self):
+        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
+        api.get_user_positions.return_value = self._pos()
+        api.get_open_orders.return_value = []
+        with patch("engine.monitor.stop_loss_triggered", return_value=False):
+            monitor.check_stop_loss()
+        db.record_action.assert_not_called()

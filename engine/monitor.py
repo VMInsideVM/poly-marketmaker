@@ -216,20 +216,39 @@ class OrderMonitor:
             for o in open_orders
             if o.get("asset_id") == asset_id and o.get("side") == "SELL"
         ]
+        cid = pos.get("conditionId", "")
         if sell_ids:
             try:
                 self.api.cancel_orders(sell_ids)
+                self._record_action(
+                    market_id=cid,
+                    action_type="stoploss_cancel_sell",
+                    side="-",
+                    price=-1,
+                    size=size,
+                    reason="触发止损，先撤该持仓全部止盈卖单以便市价平仓",
+                    price_basis=f"撤 {len(sell_ids)} 笔 SELL；来源：CLOB get_open_orders（asset={asset_id} 的 SELL）",
+                )
             except Exception as e:
                 logger.warning("Cancel sell orders for %s failed: %s", asset_id, e)
         self.api.place_market_sell(asset_id, size)
         self.db.record_trade(
             wallet=self.wallet_address,
-            market_id=pos.get("conditionId", ""),
+            market_id=cid,
             market_name="",
             side="stop_loss",
             price=cur,
             size=size,
             pnl=(cur - avg) * size,
+        )
+        self._record_action(
+            market_id=cid,
+            action_type="stoploss_market_sell",
+            side="卖出",
+            price=cur,
+            size=size,
+            reason=f"现价 {cur:.4f} 跌破成本价 {avg:.4f} 的止损阈值 avg×(1-止损比例{settings['stop_loss_pct']}%)，市价平仓止损",
+            price_basis=f"成本价 avgPrice={avg:.4f}、现价 curPrice={cur:.4f}；来源：Polymarket Data API /positions",
         )
         logger.warning(
             "Stop-loss executed: asset=%s size=%s cur=%.4f avg=%.4f",
