@@ -262,6 +262,7 @@ setInterval(renderScanLine, 5000);
 let lastKnownScanTime = 0;
 setInterval(() => {
     fetch('/api/eligible').then(r => r.json()).then(data => {
+        if (data.scan_status === 'scanning') ensureScanPolling();
         if (data.last_scan_time && data.last_scan_time !== lastKnownScanTime) {
             lastKnownScanTime = data.last_scan_time;
             refreshEligible();

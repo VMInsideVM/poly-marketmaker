@@ -174,3 +174,73 @@ class TestScanMarketsLastScanTime:
         assert manager.last_scan_time > 0
         assert manager.scan_status == "done"
         assert manager.eligible_markets == [{"market_id": "m1"}, {"market_id": "m2"}]
+
+
+class TestSharedScanWithStatus:
+    def test_manual_scan_sets_scanning_then_done(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        seen = []
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def scan(self, on_progress=None, on_found=None):
+                on_progress(1, 2, "checking")
+                seen.append(manager.scan_status)
+                on_found({"market_id": "m1"})
+                return [{"market_id": "m1"}]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager.scan_markets()
+
+        assert seen == ["scanning"]
+        assert manager.scan_status == "done"
+        assert manager.last_scan_time > 0
+        assert manager.eligible_markets == [{"market_id": "m1"}]
+        db.save_eligible_markets.assert_called_once_with([{"market_id": "m1"}])
+
+    def test_auto_do_scan_reports_status_and_distributes(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xABC": worker}
+        seen = []
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def scan(self, on_progress=None, on_found=None):
+                on_progress(3, 3, "done-ish")
+                seen.append(manager.scan_status)
+                return [{"market_id": "m9"}]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._do_scan()
+
+        assert seen == ["scanning"]
+        assert manager.scan_status == "done"
+        assert manager.last_scan_time > 0
+        worker.place_orders.assert_called_once_with([{"market_id": "m9"}])
+
+    def test_scan_failure_resets_status_and_keeps_last_scan_time(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        manager.last_scan_time = 12345.0
+
+        class BoomScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def scan(self, on_progress=None, on_found=None):
+                raise RuntimeError("scanner blew up")
+
+        with patch("engine.manager.MarketScanner", BoomScanner):
+            with pytest.raises(RuntimeError):
+                manager._scan_with_status()
+
+        assert manager.scan_status == "done"
+        assert manager.last_scan_time == 12345.0

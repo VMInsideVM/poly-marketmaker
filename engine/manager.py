@@ -259,29 +259,7 @@ class EngineManager:
                 )
                 logger.info("Created scanner API from wallet %s", enabled[0]["address"])
 
-        import time as _time
-
-        self.scan_status = "scanning"
-        self.scan_progress = "Starting..."
-        self.scan_checked = 0
-        self.scan_total = 0
-        self.eligible_markets = []
-
-        def on_progress(checked, total, message):
-            self.scan_checked = checked
-            self.scan_total = total
-            self.scan_progress = message
-
-        def on_found(entry):
-            self.eligible_markets.append(entry)
-
-        scanner = MarketScanner(self._scanner_api, self.db, "")
-        eligible = scanner.scan(on_progress=on_progress, on_found=on_found)
-        self.eligible_markets = eligible
-        self.last_scan_time = _time.time()
-        self.scan_status = "done"
-        self.scan_progress = f"Done: {len(eligible)} eligible"
-        logger.info("Scanner found %d eligible markets", len(eligible))
+        eligible = self._scan_with_status()
 
         # Persist to database (replace old data)
         self.db.save_eligible_markets(eligible)
@@ -400,16 +378,44 @@ class EngineManager:
 
             self._stop_event.wait(timeout=scan_interval)
 
-    def _do_scan(self):
-        """Run one scan cycle: find eligible markets, distribute to wallets."""
+    def _scan_with_status(self) -> list:
+        """Run one scan, reporting scan_status/progress; shared by manual and
+        auto paths. On success sets eligible_markets/last_scan_time and
+        scan_status='done' and returns the eligible list. On failure resets
+        scan_status to 'done' (never left 'scanning') WITHOUT touching
+        last_scan_time (a failed round did not complete), then re-raises."""
         import time as _time
 
-        # Use shared API for market scanning (no wallet-specific data needed)
-        scanner = MarketScanner(self._scanner_api, self.db, "")
-        eligible = scanner.scan()
+        self.scan_status = "scanning"
+        self.scan_progress = "Starting..."
+        self.scan_checked = 0
+        self.scan_total = 0
+        self.eligible_markets = []
+
+        def on_progress(checked, total, message):
+            self.scan_checked = checked
+            self.scan_total = total
+            self.scan_progress = message
+
+        def on_found(entry):
+            self.eligible_markets.append(entry)
+
+        try:
+            scanner = MarketScanner(self._scanner_api, self.db, "")
+            eligible = scanner.scan(on_progress=on_progress, on_found=on_found)
+        except Exception:
+            self.scan_status = "done"  # not 'scanning': progress bar won't stick
+            raise
         self.eligible_markets = eligible
         self.last_scan_time = _time.time()
+        self.scan_status = "done"
+        self.scan_progress = f"Done: {len(eligible)} eligible"
         logger.info("Scanner found %d eligible markets", len(eligible))
+        return eligible
+
+    def _do_scan(self):
+        """Run one scan cycle: find eligible markets, distribute to wallets."""
+        eligible = self._scan_with_status()
 
         # Distribute to each running wallet
         for address, worker in self.engines.items():
