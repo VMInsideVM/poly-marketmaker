@@ -1,62 +1,74 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>运行日志</h1>
+<h1>监控状态</h1>
 
 <div class="filter-bar">
-    <label>级别：</label>
-    <select id="level-filter" onchange="renderLogs()">
-        <option value="">全部</option>
-        <option value="INFO">INFO</option>
-        <option value="WARNING">WARNING</option>
-        <option value="ERROR">ERROR</option>
-    </select>
-    <button class="btn btn-sm btn-danger" onclick="clearLogs()">清空</button>
-    <label><input type="checkbox" id="autoscroll" checked> 自动滚动到底部</label>
+    <span id="updated">最后更新：-</span>
+    <button class="btn btn-sm" onclick="refreshStatus()">刷新</button>
 </div>
 
-<pre id="log-area" class="log-area"></pre>
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>时间</th><th>钱包</th><th>市场</th><th>方向</th>
+            <th>价格</th><th>数量</th><th>已成交</th>
+            <th>阶段</th><th>判定/动作</th><th>详情/原因</th>
+        </tr>
+    </thead>
+    <tbody id="status-body"></tbody>
+</table>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let logEntries = [];
-
-function renderLogs() {
-    const level = document.getElementById('level-filter').value;
-    const area = document.getElementById('log-area');
-    const rows = logEntries
-        .filter(e => !level || e.level === level)
-        .map(e => {
-            const t = new Date(e.ts * 1000).toLocaleString('zh-CN');
-            return `<span class="log-${e.level}">[${t}] [${e.level}] ${e.logger}: ${escapeHtml(e.message)}</span>`;
-        });
-    area.innerHTML = rows.join('\n');
-    if (document.getElementById('autoscroll').checked) {
-        area.scrollTop = area.scrollHeight;
-    }
-}
-
 function escapeHtml(s) {
-    return String(s)
+    return String(s == null ? '' : s)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function refreshLogs() {
-    fetch('/api/logs').then(r => r.json()).then(data => {
-        logEntries = data || [];
-        renderLogs();
+function shortWallet(w) {
+    return w && w.length > 12 ? w.slice(0, 6) + '..' + w.slice(-4) : (w || '');
+}
+
+function actionClass(a) {
+    a = a || '';
+    if (/replace|cancel|止损|跳过/.test(a)) return 'loss';
+    if (/成交/.test(a)) return 'profit';
+    return '';
+}
+
+function refreshStatus() {
+    fetch('/api/monitor-status').then(r => r.json()).then(data => {
+        const upd = data.updated
+            ? new Date(data.updated * 1000).toLocaleString('zh-CN') : '-';
+        document.getElementById('updated').textContent = '最后更新：' + upd;
+        const rows = data.rows || [];
+        const body = document.getElementById('status-body');
+        if (!rows.length) {
+            body.innerHTML =
+                '<tr><td colspan="10">暂无在挂订单或监控未运行</td></tr>';
+            return;
+        }
+        body.innerHTML = rows.map(r => {
+            const t = r.ts
+                ? new Date(r.ts * 1000).toLocaleString('zh-CN') : '';
+            return `<tr>
+                <td>${escapeHtml(t)}</td>
+                <td title="${escapeHtml(r.wallet)}">${escapeHtml(shortWallet(r.wallet))}</td>
+                <td>${escapeHtml(r.market)}</td>
+                <td>${escapeHtml(r.side)}</td>
+                <td>${escapeHtml(r.price)}</td>
+                <td>${escapeHtml(r.size)}</td>
+                <td>${escapeHtml(r.matched)}</td>
+                <td>${escapeHtml(r.stage)}</td>
+                <td class="${actionClass(r.action)}">${escapeHtml(r.action)}</td>
+                <td>${escapeHtml(r.detail)}</td>
+            </tr>`;
+        }).join('');
     });
 }
 
-function clearLogs() {
-    if (!confirm('确定清空运行日志缓冲？(market_maker.log 文件不受影响)')) return;
-    fetch('/api/logs/clear', {method: 'POST'}).then(r => r.json()).then(() => {
-        logEntries = [];
-        renderLogs();
-    });
-}
-
-refreshLogs();
-setInterval(refreshLogs, 4000);
+refreshStatus();
+setInterval(refreshStatus, 4000);
 </script>
 {% endblock %}
