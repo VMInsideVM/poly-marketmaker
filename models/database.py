@@ -389,7 +389,7 @@ class Database:
             placeholders = ",".join("?" * len(action_types))
             query += f" AND action_type IN ({placeholders})"
             params.extend(action_types)
-        query += " ORDER BY created_at DESC"
+        query += " ORDER BY created_at DESC, id DESC"
         c.execute(query, params)
         return [dict(row) for row in c.fetchall()]
 
