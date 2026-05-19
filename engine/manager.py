@@ -314,8 +314,13 @@ class EngineManager:
         )
 
     def test_place_orders(self) -> dict:
-        """Place up to 3 strategy-compliant test buys on the first enabled,
-        running wallet, iterating eligible markets until 3 succeed."""
+        """Place up to 3 strategy-compliant test buys on the first enabled
+        wallet, iterating eligible markets until 3 succeed.
+
+        Does not require the monitor to be running: if the first enabled
+        wallet already has a running worker it is reused (so fills get
+        monitored and written to history); otherwise a transient API/worker
+        is constructed just to place the orders (no monitor thread)."""
         if not self.eligible_markets:
             return {"ok": False, "message": "请先扫描市场"}
 
@@ -324,16 +329,24 @@ class EngineManager:
             key=lambda m: float(m.get("market_competitiveness", 0) or 0),
         )
 
-        worker = None
-        for w in self.db.list_wallets():
-            if not w["enabled"]:
-                continue
-            candidate = self.engines.get(w["address"])
-            if candidate and candidate.running:
-                worker = candidate
-                break
-        if worker is None:
-            return {"ok": False, "message": "请先启动监控"}
+        wallet = next((w for w in self.db.list_wallets() if w["enabled"]), None)
+        if wallet is None:
+            return {"ok": False, "message": "没有启用的钱包"}
+
+        address = wallet["address"]
+        existing = self.engines.get(address)
+        if existing and existing.running:
+            worker = existing
+        else:
+            try:
+                private_key = decrypt(wallet["encrypted_key"], self.encryption_key)
+                funder = wallet.get("funder", "")
+                api = PolymarketAPI(private_key, funder=funder or None)
+                settings = self.db.get_settings()
+                worker = WalletWorker(api, self.db, address, settings)
+            except Exception as e:
+                logger.error("Error building API for test orders: %s", e)
+                return {"ok": False, "message": f"测试挂单失败：{e}"}
 
         try:
             worker.place_orders(sorted_markets, limit=3)

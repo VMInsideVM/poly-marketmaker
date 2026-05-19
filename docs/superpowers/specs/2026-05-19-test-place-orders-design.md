@@ -9,14 +9,16 @@
 ## 背景与可见性说明
 
 - **订单管理页 (`/api/orders`)**：挂单成功后立即可见——该页实时调 API `get_open_orders()` 读取钱包在 Polymarket 上真实挂着的单子。
-- **历史记录页 (`/api/history`)**：单纯挂单**不会**写历史。`trades` 表只在监控线程检测到买单成交、挂出止盈卖单时写入。因此测试挂单后历史记录要等买单成交、监控捕捉到后才出现——这正是本功能要求"先启动监控"的原因（复用已启动 worker，成交后现有监控线程自动挂止盈并写历史，与正式流程一致）。
+- **历史记录页 (`/api/history`)**：单纯挂单**不会**写历史。`trades` 表只在监控线程检测到买单成交、挂出止盈卖单时写入。**测试挂单不要求先启动监控**：若第一个启用钱包恰好已有 running worker（监控在跑）则复用它，成交能被监控捕捉、自动挂止盈并写历史；否则临时构造 API 仅用于挂单——此时测试买单若成交，没有监控线程会自动挂止盈/写历史（用户已接受此权衡，测试只验证能否成功挂出符合策略的单，订单管理页可见即可）。
 
 ## 前置条件
 
 点击"测试挂单"时：
 
-1. 必须已「启动监控」：存在至少一个 `enabled` 且在 `manager.engines` 中 `running` 的 worker。否则返回中文提示"请先启动监控"。
-2. 必须已「扫描」过：`manager.eligible_markets` 非空。否则返回中文提示"请先扫描市场"。
+1. 必须已「扫描」过：`manager.eligible_markets` 非空。否则返回中文提示"请先扫描市场"。
+2. 必须至少有一个 `enabled` 钱包。否则返回中文提示"没有启用的钱包"。
+
+**不要求**先启动监控/引擎。
 
 ## 行为定义
 
@@ -35,7 +37,12 @@
 
 ### 钱包选择
 
-"第一个启用钱包" = 按 `db.list_wallets()` 返回顺序，第一个满足"`enabled` 且其地址在 `manager.engines` 且对应 worker `running`"的钱包对应的 worker。找不到则视为前置条件 1 未满足。
+"第一个启用钱包" = 按 `db.list_wallets()` 返回顺序，第一个 `enabled` 的钱包（与是否启动监控无关）。没有任何 enabled 钱包 → 返回"没有启用的钱包"。
+
+确定该钱包后取 worker：
+
+- 若 `manager.engines[address]` 存在且 `running` → **复用**该 worker（成交可被监控捕捉、写历史）。
+- 否则用该钱包密钥**临时构造** `PolymarketAPI` 与 `WalletWorker`（构造方式同 `start_wallet`：`decrypt` 私钥 → `PolymarketAPI(pk, funder=funder or None)` → `WalletWorker(api, db, address, settings)`），**不调用 `worker.start()`**（不起监控线程），仅用于本次挂单。
 
 ### 市场顺序
 
@@ -59,13 +66,17 @@
 def test_place_orders(self) -> dict:
     1. eligible_markets 为空 → return {"ok": False, "message": "请先扫描市场"}
     2. 按 market_competitiveness 升序排序全部 eligible_markets
-    3. 按 db.list_wallets() 顺序找第一个 enabled 且 address 在 self.engines
-       且 worker.running 的 worker；找不到 → return {"ok": False, "message": "请先启动监控"}
-    4. worker.place_orders(sorted_markets, limit=3)
-    5. return {"ok": True, "message": "已对符合策略的市场提交最多 3 个测试买单，请到订单管理查看"}
+    3. 取 db.list_wallets() 中第一个 enabled 钱包；没有 → return
+       {"ok": False, "message": "没有启用的钱包"}
+    4. 若该钱包 self.engines[address] 存在且 running → worker = 它；
+       否则 try: 临时构造 worker（decrypt → PolymarketAPI → WalletWorker，
+       不 start()）；构造异常 → return {"ok": False, "message": f"测试挂单失败：{e}"}
+    5. try: worker.place_orders(sorted_markets, limit=3)
+       except: log + return {"ok": False, "message": f"测试挂单失败：{e}"}
+    6. return {"ok": True, "message": "已对符合策略的市场提交最多 3 个测试买单，请到订单管理查看"}
 ```
 
-不改动 `place_all_orders`。
+不改动 `place_all_orders`。复用 `engine/manager.py` 已导入的 `decrypt` / `PolymarketAPI` / `WalletWorker`。
 
 ### 3. 路由 `POST /api/engine/test-place-orders`（`web/routes.py`）
 

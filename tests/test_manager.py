@@ -71,12 +71,34 @@ class TestTestPlaceOrders:
         result = manager.test_place_orders()
         assert result == {"ok": False, "message": "请先扫描市场"}
 
-    def test_no_running_worker_returns_monitor_hint(self):
+    def test_no_enabled_wallet_returns_error(self):
         manager, db = _make_manager()
-        manager.eligible_markets = [{"market_competitiveness": 0.1}]
-        # No workers started -> engines empty
+        db.list_wallets.return_value = [
+            {"address": "0xABC", "encrypted_key": "e1", "enabled": 0},
+        ]
+        manager.eligible_markets = [{"market_competitiveness": 0.5}]
         result = manager.test_place_orders()
-        assert result == {"ok": False, "message": "请先启动监控"}
+        assert result == {"ok": False, "message": "没有启用的钱包"}
+
+    def test_no_running_worker_builds_transient_api_and_places(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = [{"market_competitiveness": 0.5, "name": "m"}]
+        # engines empty -> first enabled wallet has no running worker;
+        # must construct a transient API/worker just to place the orders.
+        fake_worker = MagicMock()
+        with patch("engine.manager.decrypt", return_value="0xkey"), patch(
+            "engine.manager.PolymarketAPI"
+        ) as mock_api_cls, patch(
+            "engine.manager.WalletWorker", return_value=fake_worker
+        ):
+            result = manager.test_place_orders()
+        assert result["ok"] is True
+        mock_api_cls.assert_called_once()
+        fake_worker.place_orders.assert_called_once()
+        _, kwargs = fake_worker.place_orders.call_args
+        assert kwargs.get("limit") == 3
+        # transient worker must NOT start a monitor thread
+        fake_worker.start.assert_not_called()
 
     def test_places_on_first_enabled_running_worker_with_limit_3(self):
         manager, db = _make_manager()
