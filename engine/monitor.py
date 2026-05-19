@@ -1,11 +1,13 @@
 """engine/monitor.py — API-driven fill detection, stop-loss, strategy compliance."""
 
 import logging
+import time
 from py_clob_client_v2.clob_types import TradeParams
 from engine.fills import select_new_buy_fills
 from engine.strategy_check import needs_replace
 from engine.risk import stop_loss_triggered
 from engine.strategy import determine_order_price
+from engine.rewards import extract_max_spread
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,8 @@ class OrderMonitor:
         # Watermark: lower bound for get_trades(after=) — bounds fetch size;
         # real idempotency is _seen_fill_keys.
         self._after_ts: float = 0.0
+        # condition_id -> (max_spread, fetched_at) TTL cache for Step 3.
+        self._max_spread_cache: dict = {}
 
     def init_watermark(self):
         """Seed watermark from latest recorded trade ts for this wallet.
@@ -173,6 +177,26 @@ class OrderMonitor:
             except Exception as e:
                 logger.error("Compliance error on %s: %s", o.get("id"), e)
 
+    def _market_max_spread(self, condition_id: str) -> int | None:
+        """Real rewards_max_spread for a market, TTL-cached. None if unknown."""
+        if not condition_id:
+            return None
+        ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
+        now = time.time()
+        hit = self._max_spread_cache.get(condition_id)
+        if hit and (now - hit[1]) < ttl:
+            return hit[0]
+        try:
+            items = self.api.get_rewards_for_market(condition_id)
+        except Exception as e:
+            logger.warning("get_rewards_for_market(%s) failed: %s", condition_id, e)
+            return None
+        ms = extract_max_spread(items)
+        if ms is None:
+            return None
+        self._max_spread_cache[condition_id] = (ms, now)
+        return ms
+
     def _check_compliance(self, o: dict):
         token_id = o.get("asset_id", "")
         ob = self.api.get_orderbook(token_id)
@@ -185,8 +209,9 @@ class OrderMonitor:
         midpoint = (best_bid + best_ask) / 2
         tick = float(ob.get("tick_size", "0.01"))
         tick_str = ob.get("tick_size", "0.01")
-        # rewards_max_spread is not on the order; recover from settings default
-        max_spread = 2
+        max_spread = self._market_max_spread(o.get("market", ""))
+        if max_spread is None:
+            return  # can't determine real max_spread: skip this tick, never mis-cancel
         rmin = midpoint - max_spread * tick
         rmax = midpoint + max_spread * tick
         try:

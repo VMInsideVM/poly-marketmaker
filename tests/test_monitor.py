@@ -11,6 +11,7 @@ def _make_monitor(settings=None):
     default_settings = {
         "stop_loss_pct": 15.0,
         "cooldown_minutes": 20,
+        "rewards_cache_ttl_sec": 600,
     }
     if settings:
         default_settings.update(settings)
@@ -246,12 +247,14 @@ class TestCheckSellOrders:
                 "id": "o1",
                 "side": "BUY",
                 "asset_id": "tok1",
+                "market": "cid1",
                 "size_matched": "0",
                 "price": "0.48",
                 "original_size": "500",
             }
         ]
         api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
 
         with patch("engine.monitor.needs_replace", return_value="keep"):
             monitor.check_sell_orders()
@@ -265,6 +268,7 @@ class TestCheckSellOrders:
                 "id": "o1",
                 "side": "BUY",
                 "asset_id": "tok1",
+                "market": "cid1",
                 "size_matched": "0",
                 "price": "0.40",
                 "original_size": "500",
@@ -272,6 +276,7 @@ class TestCheckSellOrders:
             }
         ]
         api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
         api.place_limit_buy.return_value = {"orderID": "o2"}
 
         with patch("engine.monitor.needs_replace", return_value="replace"), patch(
@@ -289,12 +294,14 @@ class TestCheckSellOrders:
                 "id": "o1",
                 "side": "BUY",
                 "asset_id": "tok1",
+                "market": "cid1",
                 "size_matched": "0",
                 "price": "0.40",
                 "original_size": "500",
             }
         ]
         api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
 
         with patch("engine.monitor.needs_replace", return_value="cancel"), patch(
             "engine.monitor.determine_order_price", return_value=0.48
@@ -361,3 +368,98 @@ class TestCheckSellOrders:
         monitor.check_sell_orders()
 
         api.cancel_orders.assert_not_called()
+
+    def test_uses_real_max_spread_from_rewards_api(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.48",
+                "original_size": "500",
+            }
+        ]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+
+        with patch("engine.monitor.needs_replace", return_value="keep"), patch(
+            "engine.monitor.determine_order_price", return_value=0.48
+        ) as dop:
+            monitor.check_sell_orders()
+
+        assert dop.call_args.kwargs["max_spread"] == 3
+
+    def test_rewards_cache_hit_single_api_call(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.48",
+                "original_size": "500",
+            },
+            {
+                "id": "o2",
+                "side": "BUY",
+                "asset_id": "tok2",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.48",
+                "original_size": "500",
+            },
+        ]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+
+        with patch("engine.monitor.needs_replace", return_value="keep"):
+            monitor.check_sell_orders()
+
+        assert api.get_rewards_for_market.call_count == 1
+
+    def test_skip_when_rewards_api_fails(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.48",
+                "original_size": "500",
+            },
+        ]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.side_effect = Exception("boom")
+
+        monitor.check_sell_orders()
+
+        api.cancel_orders.assert_not_called()
+        api.place_limit_buy.assert_not_called()
+
+    def test_skip_when_max_spread_unparseable(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.48",
+                "original_size": "500",
+            },
+        ]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{}]
+
+        monitor.check_sell_orders()
+
+        api.cancel_orders.assert_not_called()
+        api.place_limit_buy.assert_not_called()
