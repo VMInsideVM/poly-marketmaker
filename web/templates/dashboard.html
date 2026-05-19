@@ -194,7 +194,7 @@ function pollScanProgress() {
         } else {
             box.style.display = 'none';
             box.innerHTML = '';
-            if (status === 'done' && scanPollTimer) {
+            if (scanPollTimer) {
                 clearInterval(scanPollTimer);
                 scanPollTimer = null;
             }
