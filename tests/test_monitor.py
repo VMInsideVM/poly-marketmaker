@@ -1,5 +1,6 @@
 """tests/test_monitor.py — API-driven OrderMonitor unit tests."""
 
+import logging
 import pytest
 from unittest.mock import MagicMock, call, patch
 from engine.monitor import OrderMonitor
@@ -463,3 +464,114 @@ class TestCheckSellOrders:
 
         api.cancel_orders.assert_not_called()
         api.place_limit_buy.assert_not_called()
+
+    def test_log_replace_has_detail(self, caplog):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.40",
+                "original_size": "500",
+                "neg_risk": False,
+            }
+        ]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        api.place_limit_buy.return_value = {"orderID": "o2"}
+        with caplog.at_level(logging.INFO, logger="engine.monitor"), patch(
+            "engine.monitor.needs_replace", return_value="replace"
+        ), patch("engine.monitor.determine_order_price", return_value=0.48):
+            monitor.check_sell_orders()
+        text = caplog.text
+        assert "[Step3]" in text
+        assert "o1" in text and "cid1" in text
+        assert "max_spread=3" in text
+        assert "replace" in text
+
+    def test_log_keep_has_detail(self, caplog):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.48",
+                "original_size": "500",
+            }
+        ]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        with caplog.at_level(logging.INFO, logger="engine.monitor"), patch(
+            "engine.monitor.needs_replace", return_value="keep"
+        ), patch("engine.monitor.determine_order_price", return_value=0.48):
+            monitor.check_sell_orders()
+        assert "[Step3]" in caplog.text
+        assert "keep" in caplog.text
+
+    def test_log_cancel_has_detail(self, caplog):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.40",
+                "original_size": "500",
+            }
+        ]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        with caplog.at_level(logging.INFO, logger="engine.monitor"), patch(
+            "engine.monitor.needs_replace", return_value="cancel"
+        ), patch("engine.monitor.determine_order_price", return_value=None):
+            monitor.check_sell_orders()
+        assert "[Step3]" in caplog.text
+        assert "cancel" in caplog.text
+
+    def test_log_skip_when_max_spread_unknown(self, caplog):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.40",
+                "original_size": "500",
+            }
+        ]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{}]
+        with caplog.at_level(logging.INFO, logger="engine.monitor"):
+            monitor.check_sell_orders()
+        assert "[Step3]" in caplog.text
+        assert "rewards_max_spread" in caplog.text
+        assert "跳过" in caplog.text
+
+    def test_log_skip_when_empty_orderbook(self, caplog):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.40",
+                "original_size": "500",
+            }
+        ]
+        api.get_orderbook.return_value = {"bids": [], "asks": [], "tick_size": "0.01"}
+        with caplog.at_level(logging.INFO, logger="engine.monitor"):
+            monitor.check_sell_orders()
+        assert "[Step3]" in caplog.text
+        assert "盘口为空" in caplog.text

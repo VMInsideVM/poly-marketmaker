@@ -203,6 +203,11 @@ class OrderMonitor:
         bids = sorted(ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True)
         asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))
         if not bids or not asks:
+            logger.info(
+                "[Step3] 单 %s 市场 %s | 盘口为空，本轮跳过",
+                o.get("id"),
+                o.get("market", ""),
+            )
             return
         best_bid = float(bids[0]["price"])
         best_ask = float(asks[0]["price"])
@@ -211,7 +216,14 @@ class OrderMonitor:
         tick_str = ob.get("tick_size", "0.01")
         max_spread = self._market_max_spread(o.get("market", ""))
         if max_spread is None:
-            return  # can't determine real max_spread: skip this tick, never mis-cancel
+            logger.info(
+                "[Step3] 单 %s 市场 %s 现价 %.4f | 取不到 rewards_max_spread，"
+                "本轮跳过（不撤不重挂）",
+                o.get("id"),
+                o.get("market", ""),
+                float(o.get("price", 0) or 0),
+            )
+            return
         rmin = midpoint - max_spread * tick
         rmax = midpoint + max_spread * tick
         try:
@@ -226,6 +238,27 @@ class OrderMonitor:
             logger.warning("determine_order_price failed for %s: %s", o.get("id"), e)
             return
         action = needs_replace(float(o.get("price", 0)), want, tick)
+        action_zh = {
+            "keep": "keep → 保持不动",
+            "replace": f"replace → 撤单并重挂 {want}",
+            "cancel": "cancel → 撤单不重挂",
+        }.get(action, action)
+        logger.info(
+            "[Step3] 单 %s 市场 %s 现价 %.4f | 盘口 bid %.4f ask %.4f mid %.4f "
+            "tick %.4f | max_spread=%d 区间[%.4f,%.4f] | 应挂价 %s | 判定 %s",
+            o.get("id"),
+            o.get("market", ""),
+            float(o.get("price", 0) or 0),
+            best_bid,
+            best_ask,
+            midpoint,
+            tick,
+            max_spread,
+            rmin,
+            rmax,
+            ("无" if want is None else f"{want:.4f}"),
+            action_zh,
+        )
         if action == "keep":
             return
         try:
