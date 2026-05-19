@@ -258,7 +258,7 @@ class OrderMonitor:
             avg,
         )
         self._status_add(
-            market=pos.get("conditionId", ""),
+            market=cid,
             side="卖出",
             price=f"{cur:.4f}",
             size=str(size),
