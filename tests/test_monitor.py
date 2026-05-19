@@ -825,3 +825,97 @@ class TestStep2ActionLog:
         with patch("engine.monitor.stop_loss_triggered", return_value=False):
             monitor.check_stop_loss()
         db.record_action.assert_not_called()
+
+
+class TestStep3ActionLog:
+    def _ob(self):
+        return {
+            "bids": [{"price": "0.48", "size": "1000"}],
+            "asks": [{"price": "0.52", "size": "1000"}],
+            "tick_size": "0.01",
+        }
+
+    def _order(self, price="0.40"):
+        return {
+            "id": "o1",
+            "side": "BUY",
+            "asset_id": "tok1",
+            "market": "cid1",
+            "size_matched": "0",
+            "price": price,
+            "original_size": "500",
+            "neg_risk": False,
+        }
+
+    def test_replace_records_cancel_old_and_replace_new(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        api.place_limit_buy.return_value = {"orderID": "o2"}
+        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
+            "engine.monitor.determine_order_price", return_value=0.48
+        ):
+            monitor.check_sell_orders()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["step3_cancel_old", "step3_replace_new"]
+        new = db.record_action.call_args_list[1]
+        assert new.kwargs["side"] == "买入"
+        assert new.kwargs["price"] == 0.48
+        assert "determine_order_price" in new.kwargs["price_basis"]
+        assert "奖励区间" in new.kwargs["reason"]
+
+    def test_cancel_nocompliant_records_single_action(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        with patch("engine.monitor.needs_replace", return_value="cancel"), patch(
+            "engine.monitor.determine_order_price", return_value=None
+        ):
+            monitor.check_sell_orders()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["step3_cancel_nocompliant"]
+        api.place_limit_buy.assert_not_called()
+
+    def test_keep_records_no_action(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._order(price="0.48")]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        with patch("engine.monitor.needs_replace", return_value="keep"), patch(
+            "engine.monitor.determine_order_price", return_value=0.48
+        ):
+            monitor.check_sell_orders()
+        db.record_action.assert_not_called()
+
+    def test_empty_orderbook_records_no_action(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = {"bids": [], "asks": [], "tick_size": "0.01"}
+        monitor.check_sell_orders()
+        db.record_action.assert_not_called()
+
+    def test_no_max_spread_records_no_action(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{}]
+        monitor.check_sell_orders()
+        db.record_action.assert_not_called()
+
+    def test_partial_fill_records_no_action(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "100",
+                "price": "0.48",
+                "original_size": "500",
+            }
+        ]
+        monitor.check_sell_orders()
+        db.record_action.assert_not_called()

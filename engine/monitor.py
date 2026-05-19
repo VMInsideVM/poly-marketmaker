@@ -427,17 +427,56 @@ class OrderMonitor:
         )
         if action == "keep":
             return
+        old_price = float(o.get("price", 0) or 0)
+        osize = int(float(o.get("original_size", 0) or 0))
+        cid = o.get("market", "")
+        basis = (
+            f"旧价 {old_price:.4f}；区间[{rmin:.4f},{rmax:.4f}] "
+            f"mid{midpoint:.4f} ms{max_spread} tick{tick:.4f}；"
+            f"来源：CLOB get_orderbook + get_rewards_for_market"
+        )
         try:
             self.api.cancel_orders([o["id"]])
         except Exception as e:
             logger.warning("Cancel %s failed: %s", o.get("id"), e)
             return
         if action == "replace":
-            size = int(float(o.get("original_size", 0) or 0))
+            self._record_action(
+                market_id=cid,
+                action_type="step3_cancel_old",
+                side="-",
+                price=-1,
+                size=osize,
+                reason=f"挂单价 {old_price:.4f} 不在最新奖励区间内，撤旧买单准备重挂",
+                price_basis=basis,
+            )
             neg_risk = bool(o.get("neg_risk", False))
             self.api.place_limit_buy(
-                token_id, want, size, tick_size=tick_str, neg_risk=neg_risk
+                token_id, want, osize, tick_size=tick_str, neg_risk=neg_risk
+            )
+            self._record_action(
+                market_id=cid,
+                action_type="step3_replace_new",
+                side="买入",
+                price=want,
+                size=osize,
+                reason="按策略在奖励区间内重挂买单（贴最优买价深度，最大化奖励占比）",
+                price_basis=(
+                    f"应挂价 {want:.4f}=determine_order_price(bids, "
+                    f"ms{max_spread}, tick{tick:.4f}, "
+                    f"区间[{rmin:.4f},{rmax:.4f}])；"
+                    f"来源：CLOB get_orderbook + get_rewards_for_market"
+                ),
             )
             logger.info("Replaced buy %s -> %.4f", o.get("id"), want)
         else:
+            self._record_action(
+                market_id=cid,
+                action_type="step3_cancel_nocompliant",
+                side="-",
+                price=-1,
+                size=osize,
+                reason="奖励区间内无合规价，撤该买单（不重挂）",
+                price_basis=basis,
+            )
             logger.info("Cancelled non-compliant buy %s (no valid price)", o.get("id"))
