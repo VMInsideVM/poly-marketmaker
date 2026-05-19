@@ -48,6 +48,24 @@ class OrderMonitor:
         except Exception as e:
             logger.warning("publish_status failed: %s", e)
 
+    def _record_action(
+        self, market_id, action_type, side, price, size, reason, price_basis
+    ) -> None:
+        """Persist one order-mutating action. Never breaks Step1/2/3."""
+        try:
+            self.db.record_action(
+                wallet=self.wallet_address,
+                market_id=market_id,
+                action_type=action_type,
+                side=side,
+                price=price,
+                size=size,
+                reason=reason,
+                price_basis=price_basis,
+            )
+        except Exception as e:
+            logger.warning("record_action failed: %s", e)
+
     def init_watermark(self):
         """Seed watermark from latest recorded trade ts for this wallet.
 
@@ -110,6 +128,26 @@ class OrderMonitor:
             price=price,
             size=size,
         )
+        # Main history also records the take-profit sell so the direction
+        # column is complete (buy / sell / stop_loss).
+        self.db.record_trade(
+            wallet=self.wallet_address,
+            market_id=market_id,
+            market_name="",
+            side="sell",
+            price=price,
+            size=size,
+            pnl=0.0,
+        )
+        self._record_action(
+            market_id=market_id,
+            action_type="take_profit_sell",
+            side="卖出",
+            price=price,
+            size=size,
+            reason="买单成交，按成交价挂等价止盈卖单（赚流动性奖励，原价卖出不亏本金）",
+            price_basis=f"卖价=买入成交价 {price:.4f}；来源：CLOB get_trades 的 maker_orders 成交价",
+        )
         self.db.set_cooldown(
             self.wallet_address, market_id, self.db.get_settings()["cooldown_minutes"]
         )
@@ -117,6 +155,15 @@ class OrderMonitor:
             try:
                 self.api.cancel_orders([order_id])
                 cancelled_orders.add(order_id)
+                self._record_action(
+                    market_id=market_id,
+                    action_type="cancel_remainder",
+                    side="-",
+                    price=-1,
+                    size=size,
+                    reason="该买单已成交，撤销同一买单剩余未成交量，避免超买",
+                    price_basis=f"撤 order_id={order_id}；撤单操作无价格",
+                )
             except Exception as e:
                 logger.warning("Cancel remainder of %s failed: %s", order_id, e)
         self._status_add(

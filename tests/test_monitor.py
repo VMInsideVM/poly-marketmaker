@@ -65,9 +65,28 @@ class TestCheckBuyOrders:
             monitor.check_buy_orders()
 
         api.place_limit_sell.assert_called_with("tok1", 0.25, 1000.0)
-        db.record_trade.assert_called_once()
+        assert db.record_trade.call_count == 2
+        sides = [c.kwargs["side"] for c in db.record_trade.call_args_list]
+        assert sides == ["buy", "sell"]
+        for c in db.record_trade.call_args_list:
+            assert c.kwargs["price"] == 0.25
+            assert c.kwargs["size"] == 1000.0
         db.set_cooldown.assert_called_with("0xABC", "mkt1", 20)
         api.cancel_orders.assert_called_with(["ord1"])
+        action_types = [
+            c.kwargs["action_type"] for c in db.record_action.call_args_list
+        ]
+        assert "take_profit_sell" in action_types
+        assert "cancel_remainder" in action_types
+        tp = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "take_profit_sell"
+        )
+        assert tp.kwargs["side"] == "卖出"
+        assert tp.kwargs["price"] == 0.25
+        assert "成交价" in tp.kwargs["price_basis"]
+        assert "止盈" in tp.kwargs["reason"]
 
     def test_partial_fill_places_sell_for_filled_portion(self):
         monitor, api, db = _make_monitor()
@@ -709,3 +728,46 @@ class TestMonitorStatusSnapshot:
         monitor.publish_status()
         assert len(get_snapshot()["rows"]) == first
         assert len(get_snapshot()["rows"]) == 1
+
+
+class TestStep1ActionLog:
+    def test_cancel_remainder_not_recorded_when_no_order_id(self):
+        monitor, api, db = _make_monitor()
+        api.get_trades.return_value = []
+        api.place_limit_sell.return_value = {}
+        with patch("engine.monitor.select_new_buy_fills") as mf:
+            mf.return_value = [
+                {
+                    "trade_id": "t1",
+                    "order_id": None,
+                    "asset_id": "tok1",
+                    "price": 0.25,
+                    "size": 100.0,
+                    "market": "mkt1",
+                    "ts": 1.0,
+                }
+            ]
+            monitor.check_buy_orders()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert "take_profit_sell" in ats
+        assert "cancel_remainder" not in ats
+
+    def test_record_action_never_breaks_fill(self):
+        monitor, api, db = _make_monitor()
+        api.get_trades.return_value = []
+        api.place_limit_sell.return_value = {}
+        db.record_action.side_effect = RuntimeError("db down")
+        with patch("engine.monitor.select_new_buy_fills") as mf:
+            mf.return_value = [
+                {
+                    "trade_id": "t1",
+                    "order_id": "o1",
+                    "asset_id": "tok1",
+                    "price": 0.25,
+                    "size": 100.0,
+                    "market": "mkt1",
+                    "ts": 1.0,
+                }
+            ]
+            monitor.check_buy_orders()  # must not raise
+        api.place_limit_sell.assert_called_once()
