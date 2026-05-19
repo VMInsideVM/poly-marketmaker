@@ -64,9 +64,11 @@ class WalletWorker:
         """Monitor loop: check fills and stop-loss at check_interval."""
         check_interval = self.settings["fill_check_interval_sec"]
         while not self._stop_event.is_set():
+            self.monitor.begin_status_tick()
             self.monitor.check_buy_orders()
             self.monitor.check_stop_loss()
             self.monitor.check_sell_orders()
+            self.monitor.publish_status()
             self._stop_event.wait(timeout=check_interval)
 
     def place_orders(self, eligible_markets: list[dict], limit: int | None = None):

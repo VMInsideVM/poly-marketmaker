@@ -4,6 +4,7 @@ import logging
 import pytest
 from unittest.mock import MagicMock, call, patch
 from engine.monitor import OrderMonitor
+from engine.monitor_status import get_snapshot, clear_snapshot
 
 
 def _make_monitor(settings=None):
@@ -577,3 +578,131 @@ class TestCheckSellOrders:
             monitor.check_sell_orders()
         assert "[Step3]" in caplog.text
         assert "盘口为空" in caplog.text
+
+
+class TestMonitorStatusSnapshot:
+    @pytest.fixture(autouse=True)
+    def _clean_snap(self):
+        clear_snapshot()
+        yield
+        clear_snapshot()
+
+    def _ob(self):
+        return {
+            "bids": [{"price": "0.48", "size": "1000"}],
+            "asks": [{"price": "0.52", "size": "1000"}],
+            "tick_size": "0.01",
+        }
+
+    def test_step3_keep_records_row(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.48",
+                "original_size": "500",
+            }
+        ]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        monitor.begin_status_tick()
+        with patch("engine.monitor.needs_replace", return_value="keep"), patch(
+            "engine.monitor.determine_order_price", return_value=0.48
+        ):
+            monitor.check_sell_orders()
+        monitor.publish_status()
+        rows = get_snapshot()["rows"]
+        r = next(x for x in rows if x.get("stage") == "Step3")
+        assert r["wallet"] == "0xABC"
+        assert "keep" in r["action"]
+        assert "cid1" in r["market"]
+
+    def test_step3_skip_empty_orderbook_records_row(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.40",
+                "original_size": "500",
+            }
+        ]
+        api.get_orderbook.return_value = {"bids": [], "asks": [], "tick_size": "0.01"}
+        monitor.begin_status_tick()
+        monitor.check_sell_orders()
+        monitor.publish_status()
+        rows = get_snapshot()["rows"]
+        assert any("盘口为空" in x.get("action", "") for x in rows)
+
+    def test_sell_order_gets_a_row(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "s1",
+                "side": "SELL",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.60",
+                "original_size": "200",
+            }
+        ]
+        monitor.begin_status_tick()
+        monitor.check_sell_orders()
+        monitor.publish_status()
+        rows = get_snapshot()["rows"]
+        r = next(x for x in rows if x["side"] == "卖出")
+        assert r["stage"] == "止盈卖单"
+        assert r["action"] == "挂单中"
+
+    def test_step1_fill_records_row(self):
+        monitor, api, db = _make_monitor()
+        db.get_settings.return_value = {
+            "cooldown_minutes": 20,
+            "rewards_cache_ttl_sec": 600,
+            "stop_loss_pct": 15.0,
+        }
+        monitor.begin_status_tick()
+        monitor._handle_fill(
+            {
+                "size": 120,
+                "price": 0.60,
+                "asset_id": "tok1",
+                "market": "cid1",
+                "order_id": "o9",
+            },
+            set(),
+        )
+        monitor.publish_status()
+        rows = get_snapshot()["rows"]
+        r = next(x for x in rows if x["stage"] == "Step1")
+        assert "成交" in r["action"]
+
+    def test_begin_tick_clears_previous_rows(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {
+                "id": "s1",
+                "side": "SELL",
+                "asset_id": "t",
+                "market": "c",
+                "size_matched": "0",
+                "price": "0.6",
+                "original_size": "1",
+            }
+        ]
+        monitor.begin_status_tick()
+        monitor.check_sell_orders()
+        monitor.publish_status()
+        first = len(get_snapshot()["rows"])
+        monitor.begin_status_tick()
+        monitor.check_sell_orders()
+        monitor.publish_status()
+        assert len(get_snapshot()["rows"]) == first

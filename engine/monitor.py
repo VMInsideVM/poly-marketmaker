@@ -8,6 +8,7 @@ from engine.strategy_check import needs_replace
 from engine.risk import stop_loss_triggered
 from engine.strategy import determine_order_price
 from engine.rewards import extract_max_spread
+from engine import monitor_status
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,28 @@ class OrderMonitor:
         self._after_ts: float = 0.0
         # condition_id -> (max_spread, fetched_at) TTL cache for Step 3.
         self._max_spread_cache: dict = {}
+        self._status_rows: list = []
+        self._tick_ts: float = 0.0
+
+    def begin_status_tick(self) -> None:
+        self._status_rows = []
+        self._tick_ts = time.time()
+
+    def _status_add(self, **fields) -> None:
+        try:
+            row = {"ts": self._tick_ts, "wallet": self.wallet_address}
+            row.update(fields)
+            self._status_rows.append(row)
+        except Exception as e:  # never break Step1/2/3
+            logger.warning("status_add failed: %s", e)
+
+    def publish_status(self) -> None:
+        try:
+            monitor_status.set_snapshot(
+                self.wallet_address, self._status_rows, self._tick_ts
+            )
+        except Exception as e:
+            logger.warning("publish_status failed: %s", e)
 
     def init_watermark(self):
         """Seed watermark from latest recorded trade ts for this wallet.
@@ -96,6 +119,16 @@ class OrderMonitor:
                 cancelled_orders.add(order_id)
             except Exception as e:
                 logger.warning("Cancel remainder of %s failed: %s", order_id, e)
+        self._status_add(
+            market=market_id,
+            side="买入",
+            price=f"{price:.4f}",
+            size=str(size),
+            matched=str(size),
+            stage="Step1",
+            action="成交→挂止盈+撤余",
+            detail=f"成交{size} 止盈卖{price:.4f}",
+        )
 
     # --- Step 2: stop-loss via Data API positions ---
     def check_stop_loss(self):
@@ -158,6 +191,16 @@ class OrderMonitor:
             cur,
             avg,
         )
+        self._status_add(
+            market=pos.get("conditionId", ""),
+            side="卖出",
+            price=f"{cur:.4f}",
+            size=str(size),
+            matched="-",
+            stage="Step2",
+            action="止损→市价平仓",
+            detail=f"cur{cur:.4f}<avg{avg:.4f} 触发",
+        )
 
     # --- Step 3: strategy compliance on resting buy orders ---
     def check_sell_orders(self):
@@ -168,9 +211,32 @@ class OrderMonitor:
             logger.error("get_open_orders failed for %s: %s", self.wallet_address, e)
             return
         for o in open_orders:
+            price_s = f"{float(o.get('price', 0) or 0):.4f}"
+            size_s = str(o.get("original_size", ""))
+            matched_s = str(o.get("size_matched", "0"))
             if o.get("side") != "BUY":
+                self._status_add(
+                    market=o.get("market", ""),
+                    side="卖出",
+                    price=price_s,
+                    size=size_s,
+                    matched=matched_s,
+                    stage="止盈卖单",
+                    action="挂单中",
+                    detail="",
+                )
                 continue
             if float(o.get("size_matched", 0) or 0) > 0:
+                self._status_add(
+                    market=o.get("market", ""),
+                    side="买入",
+                    price=price_s,
+                    size=size_s,
+                    matched=matched_s,
+                    stage="Step1",
+                    action="部分成交",
+                    detail=f"已成交{matched_s}",
+                )
                 continue
             try:
                 self._check_compliance(o)
@@ -208,6 +274,16 @@ class OrderMonitor:
                 o.get("id"),
                 o.get("market", ""),
             )
+            self._status_add(
+                market=o.get("market", ""),
+                side="买入",
+                price=f"{float(o.get('price', 0) or 0):.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="跳过(盘口为空)",
+                detail="盘口为空",
+            )
             return
         best_bid = float(bids[0]["price"])
         best_ask = float(asks[0]["price"])
@@ -222,6 +298,16 @@ class OrderMonitor:
                 o.get("id"),
                 o.get("market", ""),
                 float(o.get("price", 0) or 0),
+            )
+            self._status_add(
+                market=o.get("market", ""),
+                side="买入",
+                price=f"{float(o.get('price', 0) or 0):.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="跳过(取不到max_spread)",
+                detail="取不到 rewards_max_spread",
             )
             return
         rmin = midpoint - max_spread * tick
@@ -259,6 +345,19 @@ class OrderMonitor:
             rmax,
             ("无" if want is None else f"{want:.4f}"),
             action_zh,
+        )
+        self._status_add(
+            market=o.get("market", ""),
+            side="买入",
+            price=f"{float(o.get('price', 0) or 0):.4f}",
+            size=str(o.get("original_size", "")),
+            matched=str(o.get("size_matched", "0")),
+            stage="Step3",
+            action=action_zh,
+            detail=(
+                f"bid{best_bid:.4f} ask{best_ask:.4f} mid{midpoint:.4f} "
+                f"ms{max_spread} 区间[{rmin:.4f},{rmax:.4f}] 应挂{want_str}"
+            ),
         )
         if action == "keep":
             return
