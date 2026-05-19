@@ -62,3 +62,54 @@ class TestEngineLifecycle:
         status = manager.get_status()
         assert isinstance(status, dict)
         assert "engines" in status
+
+
+class TestTestPlaceOrders:
+    def test_no_eligible_markets_returns_scan_hint(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = []
+        result = manager.test_place_orders()
+        assert result == {"ok": False, "message": "请先扫描市场"}
+
+    def test_no_running_worker_returns_monitor_hint(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = [{"market_competitiveness": 0.1}]
+        # No workers started -> engines empty
+        result = manager.test_place_orders()
+        assert result == {"ok": False, "message": "请先启动监控"}
+
+    def test_places_on_first_enabled_running_worker_with_limit_3(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = [
+            {"market_competitiveness": 0.9, "name": "high"},
+            {"market_competitiveness": 0.1, "name": "low"},
+        ]
+        worker = MagicMock()
+        worker.running = True
+        # db.list_wallets()[0] is 0xABC (enabled) per _make_manager
+        manager.engines = {"0xABC": worker}
+        result = manager.test_place_orders()
+        assert result["ok"] is True
+        worker.place_orders.assert_called_once()
+        args, kwargs = worker.place_orders.call_args
+        passed_markets = args[0]
+        # sorted ascending by competitiveness: low (0.1) before high (0.9)
+        assert [m["name"] for m in passed_markets] == ["low", "high"]
+        assert kwargs.get("limit") == 3
+
+    def test_skips_disabled_or_not_running_picks_first_valid(self):
+        manager, db = _make_manager()
+        db.list_wallets.return_value = [
+            {"address": "0xABC", "encrypted_key": "e1", "enabled": 0},
+            {"address": "0xDEF", "encrypted_key": "e2", "enabled": 1},
+        ]
+        manager.eligible_markets = [{"market_competitiveness": 0.5, "name": "m"}]
+        stopped = MagicMock()
+        stopped.running = False
+        good = MagicMock()
+        good.running = True
+        manager.engines = {"0xABC": stopped, "0xDEF": good}
+        result = manager.test_place_orders()
+        assert result["ok"] is True
+        good.place_orders.assert_called_once()
+        stopped.place_orders.assert_not_called()

@@ -313,6 +313,34 @@ class EngineManager:
             len(self.engines),
         )
 
+    def test_place_orders(self) -> dict:
+        """Place up to 3 strategy-compliant test buys on the first enabled,
+        running wallet, iterating eligible markets until 3 succeed."""
+        if not self.eligible_markets:
+            return {"ok": False, "message": "请先扫描市场"}
+
+        sorted_markets = sorted(
+            self.eligible_markets,
+            key=lambda m: float(m.get("market_competitiveness", 0) or 0),
+        )
+
+        worker = None
+        for w in self.db.list_wallets():
+            if not w["enabled"]:
+                continue
+            candidate = self.engines.get(w["address"])
+            if candidate and candidate.running:
+                worker = candidate
+                break
+        if worker is None:
+            return {"ok": False, "message": "请先启动监控"}
+
+        worker.place_orders(sorted_markets, limit=3)
+        return {
+            "ok": True,
+            "message": "已对符合策略的市场提交最多 3 个测试买单，请到订单管理查看",
+        }
+
     def start_wallet(self, address: str, encrypted_key: str = None):
         if address in self.engines and self.engines[address].running:
             return
