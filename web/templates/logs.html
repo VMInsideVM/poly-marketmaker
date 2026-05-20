@@ -3,6 +3,10 @@
 <h1>监控状态</h1>
 
 <div class="filter-bar">
+    <label>钱包：</label>
+    <select id="wallet-filter" onchange="refreshStatus(); refreshActions();">
+        <option value="">全部</option>
+    </select>
     <span id="updated">最后更新：-</span>
     <button class="btn btn-sm" onclick="refreshStatus()">刷新</button>
 </div>
@@ -16,6 +20,24 @@
         </tr>
     </thead>
     <tbody id="status-body"></tbody>
+</table>
+
+<h2 style="margin-top:2rem;">操作记录</h2>
+<div class="filter-bar">
+    <label>开始日期：</label>
+    <input type="date" id="act-start" onchange="refreshActions()">
+    <label>结束日期：</label>
+    <input type="date" id="act-end" onchange="refreshActions()">
+</div>
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>时间</th><th>钱包</th><th>市场</th><th>动作</th>
+            <th>方向</th><th>价格</th><th>数量</th>
+            <th>原因</th><th>价格依据/来源</th>
+        </tr>
+    </thead>
+    <tbody id="actions-body"></tbody>
 </table>
 {% endblock %}
 
@@ -42,7 +64,8 @@ function refreshStatus() {
         const upd = data.updated
             ? new Date(data.updated * 1000).toLocaleString('zh-CN') : '-';
         document.getElementById('updated').textContent = '最后更新：' + upd;
-        const rows = data.rows || [];
+        const sel = document.getElementById('wallet-filter').value;
+        const rows = (data.rows || []).filter(r => !sel || r.wallet === sel);
         const body = document.getElementById('status-body');
         if (!rows.length) {
             body.innerHTML =
@@ -68,7 +91,59 @@ function refreshStatus() {
     });
 }
 
+const ACTION_LABELS = {
+    take_profit_sell: '止盈挂卖单',
+    cancel_remainder: '撤成交剩余',
+    stoploss_cancel_sell: '止损撤止盈卖',
+    stoploss_market_sell: '止损市价卖',
+    step3_cancel_old: 'Step3撤旧单',
+    step3_replace_new: 'Step3重挂买',
+    step3_cancel_nocompliant: 'Step3撤单(无合规价)',
+};
+
+function refreshActions() {
+    const wallet = document.getElementById('wallet-filter').value;
+    const s = document.getElementById('act-start').value;
+    const e = document.getElementById('act-end').value;
+    const params = new URLSearchParams();
+    if (wallet) params.set('wallet', wallet);
+    if (s) params.set('start', new Date(s).getTime() / 1000);
+    if (e) params.set('end', new Date(e + 'T23:59:59').getTime() / 1000);
+
+    fetch(`/api/actions?${params}`).then(r => r.json()).then(rows => {
+        const body = document.getElementById('actions-body');
+        if (!rows.length) {
+            body.innerHTML = '<tr><td colspan="9">暂无操作记录</td></tr>';
+            return;
+        }
+        body.innerHTML = rows.map(a => `
+            <tr>
+                <td>${escapeHtml(new Date(a.created_at * 1000).toLocaleString('zh-CN'))}</td>
+                <td title="${escapeHtml(a.wallet)}">${escapeHtml(shortWallet(a.wallet))}</td>
+                <td title="${escapeHtml(a.market_id)}">${escapeHtml(a.market_id.slice(0,8) + '...' + a.market_id.slice(-6))}</td>
+                <td class="${actionClass(a.action_type)}">${escapeHtml(ACTION_LABELS[a.action_type] || a.action_type)}</td>
+                <td>${escapeHtml(a.side)}</td>
+                <td>${a.price < 0 ? '-' : escapeHtml(a.price.toFixed(4))}</td>
+                <td>${escapeHtml(a.size)}</td>
+                <td>${escapeHtml(a.reason)}</td>
+                <td>${escapeHtml(a.price_basis)}</td>
+            </tr>
+        `).join('');
+    });
+}
+
+fetch('/api/wallets').then(r => r.json()).then(wallets => {
+    const select = document.getElementById('wallet-filter');
+    wallets.forEach(w => {
+        const opt = document.createElement('option');
+        opt.value = w.address;
+        opt.textContent = `${w.address.slice(0,6)}...${w.address.slice(-4)}`;
+        select.appendChild(opt);
+    });
+});
+
 refreshStatus();
-setInterval(refreshStatus, 4000);
+refreshActions();
+setInterval(() => { refreshStatus(); refreshActions(); }, 4000);
 </script>
 {% endblock %}
