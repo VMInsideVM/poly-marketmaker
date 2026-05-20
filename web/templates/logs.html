@@ -54,7 +54,7 @@ function shortWallet(w) {
 
 function actionClass(a) {
     a = a || '';
-    if (/replace|cancel|止损|跳过/.test(a)) return 'loss';
+    if (/replace|cancel|止损|跳过|stoploss/.test(a)) return 'loss';
     if (/成交/.test(a)) return 'profit';
     return '';
 }
