@@ -1,6 +1,7 @@
 """tests/test_scanner.py — Tests updated to match Polymarket API response format."""
 
 import time
+import pytest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 from engine.scanner import MarketScanner
@@ -87,6 +88,9 @@ class TestMarketFiltering:
         assert len(results) == 1
         assert results[0]["market_id"] == "0xabc123"
         assert results[0]["token_id"] == "tok1"
+        # min_cost = rewards_min_size(100) * lowest tick in reward range.
+        # mid=0.305, max_spread=2, tick=0.01 -> range_min=0.285 -> ceil tick 0.29
+        assert results[0]["min_cost"] == pytest.approx(100 * 0.29)
 
     def test_rejects_low_reward(self):
         scanner, api, db = _make_scanner()
@@ -132,15 +136,17 @@ class TestMarketFiltering:
         results = scanner.scan()
         assert len(results) == 0
 
-    def test_rejects_insufficient_balance(self):
+    def test_low_balance_still_eligible_with_min_cost(self):
+        # Scanning no longer filters by balance (each wallet has its own).
+        # The market is listed and carries a min_cost threshold instead.
         scanner, api, db = _make_scanner(balance=1.0)  # Only $1
-        api.get_rewards_markets.return_value = [
-            _sample_market(rewards_min_size=1000)  # 1000 * 0.29 = $290 needed
-        ]
+        api.get_rewards_markets.return_value = [_sample_market(rewards_min_size=1000)]
         api.get_orderbook.return_value = _sample_orderbook()
 
         results = scanner.scan()
-        assert len(results) == 0
+        assert len(results) == 1
+        # 1000 * lowest tick in reward range (0.29) = 290
+        assert results[0]["min_cost"] == pytest.approx(1000 * 0.29)
 
     def test_rejects_cooldown_market(self):
         scanner, api, db = _make_scanner()

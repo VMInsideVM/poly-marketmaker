@@ -15,6 +15,7 @@ import time
 import logging
 from datetime import datetime
 from engine.strategy import determine_order_price
+from engine.take_profit import ceil_to_tick
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,9 @@ class MarketScanner:
         Returns list of dicts, each representing one token to place an order on.
         """
         settings = self.db.get_settings()
-        balance = self.api.get_balance()
+        # No balance filter here: the eligible list is shared across wallets,
+        # each of which has a different balance. We record a per-market min_cost
+        # threshold instead, and each wallet gates on it at placement time.
         min_reward = settings["min_reward_usd"]
         min_price_cents = settings["min_price_cents"]
         max_price_cents = settings["max_price_cents"]
@@ -189,16 +192,19 @@ class MarketScanner:
                 if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
                     continue
 
-                # Balance check
-                if min_size * best_bid > balance:
-                    continue
-
                 # Calculate reward range and determine order price
                 tick_size_str = orderbook.get("tick_size", "0.01")
                 tick_size = float(tick_size_str)
                 midpoint = (best_bid + best_ask) / 2
                 reward_range_min = midpoint - max_spread_reward * tick_size
                 reward_range_max = midpoint + max_spread_reward * tick_size
+
+                # Minimum capital to place a reward-qualifying order here:
+                # rewards_min_size x the lowest tradable tick inside the reward
+                # range. Each wallet gates on this at placement time.
+                min_cost = min_size * ceil_to_tick(
+                    max(reward_range_min, 0.0), tick_size
+                )
 
                 try:
                     order_price = determine_order_price(
@@ -233,6 +239,7 @@ class MarketScanner:
                     "reward_range_max": reward_range_max,
                     "order_price": order_price,
                     "order_size": min_size,
+                    "min_cost": min_cost,
                 }
                 eligible.append(entry)
                 if on_found:

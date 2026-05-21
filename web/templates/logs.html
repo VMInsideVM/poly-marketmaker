@@ -24,12 +24,22 @@
 
 <h2 style="margin-top:2rem;">操作记录</h2>
 <div class="filter-bar">
+    <span class="hint">（按上方所选钱包过滤）</span>
+    <label>动作：</label>
+    <select id="act-type" onchange="refreshActions()">
+        <option value="">全部</option>
+    </select>
     <label>开始日期：</label>
     <input type="date" id="act-start" onchange="refreshActions()">
     <label>结束日期：</label>
     <input type="date" id="act-end" onchange="refreshActions()">
 </div>
-<table class="data-table">
+<table class="data-table" style="table-layout:fixed;width:100%">
+    <colgroup>
+        <col style="width:13%"><col style="width:8%"><col style="width:11%">
+        <col style="width:9%"><col style="width:6%"><col style="width:7%">
+        <col style="width:6%"><col style="width:18%"><col style="width:22%">
+    </colgroup>
     <thead>
         <tr>
             <th>时间</th><th>钱包</th><th>市场</th><th>动作</th>
@@ -92,6 +102,7 @@ function refreshStatus() {
 }
 
 const ACTION_LABELS = {
+    place_buy: '挂买单',
     take_profit_sell: '止盈挂卖单',
     take_profit_recancel: '止盈撤旧改一笔',
     cancel_remainder: '撤成交剩余',
@@ -104,10 +115,12 @@ const ACTION_LABELS = {
 
 function refreshActions() {
     const wallet = document.getElementById('wallet-filter').value;
+    const type = document.getElementById('act-type').value;
     const s = document.getElementById('act-start').value;
     const e = document.getElementById('act-end').value;
     const params = new URLSearchParams();
     if (wallet) params.set('wallet', wallet);
+    if (type) params.set('types', type);
     if (s) params.set('start', new Date(s).getTime() / 1000);
     if (e) params.set('end', new Date(e + 'T23:59:59').getTime() / 1000);
 
@@ -142,6 +155,17 @@ fetch('/api/wallets').then(r => r.json()).then(wallets => {
         select.appendChild(opt);
     });
 });
+
+// Populate the 动作 (action-type) filter from the known labels.
+(function () {
+    const sel = document.getElementById('act-type');
+    Object.entries(ACTION_LABELS).forEach(([k, v]) => {
+        const opt = document.createElement('option');
+        opt.value = k;
+        opt.textContent = v;
+        sel.appendChild(opt);
+    });
+})();
 
 refreshStatus();
 refreshActions();

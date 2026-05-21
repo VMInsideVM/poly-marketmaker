@@ -57,6 +57,73 @@ def test_no_limit_places_on_all_markets_regression():
     assert api.place_limit_buy.call_count == 5
 
 
+def test_records_place_buy_action_on_success():
+    # A successful placement is logged to the actions table as "place_buy" so
+    # the operations log (操作记录) covers buy orders too, not just sells.
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders([_market(0)])
+    api.place_limit_buy.assert_called_once()
+    calls = [c for c in db.record_action.call_args_list]
+    assert any(c.kwargs.get("action_type") == "place_buy" for c in calls)
+    pb = next(c for c in calls if c.kwargs.get("action_type") == "place_buy")
+    assert pb.kwargs["side"] == "买入"
+    assert pb.kwargs["price"] == 0.40
+    assert pb.kwargs["market_id"] == "m0"
+
+
+def test_no_place_buy_action_when_placement_fails():
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    api.place_limit_buy.side_effect = Exception("rejected")
+    worker = _worker(api, db)
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders([_market(0)])  # must not raise
+    ats = [c.kwargs.get("action_type") for c in db.record_action.call_args_list]
+    assert "place_buy" not in ats
+
+
+def test_skips_market_when_balance_below_min_cost():
+    # Each wallet gates on its own balance vs the recorded min_cost BEFORE the
+    # detailed strategy (so it doesn't even fetch the orderbook).
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_balance.return_value = 100.0
+    worker = _worker(api, db)
+    m = _market(0)
+    m["min_cost"] = 500.0  # 100 balance < 500 threshold
+    worker.place_orders([m])
+    api.get_orderbook.assert_not_called()
+    api.place_limit_buy.assert_not_called()
+
+
+def test_places_when_balance_above_min_cost():
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    m = _market(0)
+    m["min_cost"] = 50.0  # 1000 balance > 50 threshold
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders([m])
+    api.place_limit_buy.assert_called_once()
+
+
 def test_skipped_markets_do_not_count_toward_limit():
     api = MagicMock()
     db = MagicMock()

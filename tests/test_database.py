@@ -173,3 +173,24 @@ class TestActions:
         rows = db.get_actions()
         assert rows[0]["reason"] == "second"
         assert rows[1]["reason"] == "first"
+
+
+class TestEligibleMarkets:
+    def test_min_cost_round_trips(self, db):
+        db.save_eligible_markets(
+            [
+                {
+                    "market_id": "0xabc",
+                    "token_id": "tok1",
+                    "market_name": "M",
+                    "outcome": "Yes",
+                    "daily_reward": 150.0,
+                    "order_price": 0.30,
+                    "order_size": 100,
+                    "min_cost": 29.0,
+                }
+            ]
+        )
+        rows = db.get_eligible_markets()
+        assert len(rows) == 1
+        assert rows[0]["min_cost"] == 29.0

@@ -102,6 +102,18 @@ class WalletWorker:
             if market["token_id"] in open_buy_assets:
                 continue
 
+            # Per-wallet balance gate: skip markets this wallet can't even
+            # afford the minimum reward-qualifying order on, before doing any
+            # detailed work (orderbook/strategy). min_cost is recorded at scan.
+            min_cost = float(market.get("min_cost", 0) or 0)
+            if self.api.get_balance() < min_cost:
+                logger.info(
+                    "Skip %s: balance below min_cost %.2f",
+                    market["market_name"],
+                    min_cost,
+                )
+                continue
+
             try:
                 ob = self.api.get_orderbook(market["token_id"])
             except Exception as e:
@@ -161,10 +173,31 @@ class WalletWorker:
                     market["order_size"],
                 )
                 placed += 1
+                self._record_place_buy(market, order_price, max_spread, rmin, rmax)
                 if limit is not None and placed >= limit:
                     break
             except Exception as e:
                 logger.error("Error placing order for %s: %s", market["market_name"], e)
+
+    def _record_place_buy(self, market, order_price, max_spread, rmin, rmax):
+        """Log a successful buy placement to the actions table (never raises)."""
+        try:
+            self.db.record_action(
+                wallet=self.wallet_address,
+                market_id=market["market_id"],
+                action_type="place_buy",
+                side="买入",
+                price=order_price,
+                size=market["order_size"],
+                reason="按策略在奖励区间内挂买单（贴最优买价深度，最大化奖励占比）",
+                price_basis=(
+                    f"应挂价 {order_price:.4f}=determine_order_price(bids, "
+                    f"ms{max_spread}, 区间[{rmin:.4f},{rmax:.4f}])；"
+                    f"来源：CLOB get_orderbook"
+                ),
+            )
+        except Exception as e:
+            logger.warning("record_action(place_buy) failed: %s", e)
 
 
 class EngineManager:

@@ -14,7 +14,7 @@
 </div>
 
 <h2>当前持仓（成本均价）</h2>
-<p class="hint">数据来自 Polymarket 实时持仓（Data API）。成本价为该持仓的真实加权均价 avgPrice；已平仓的仓位不在此表，平仓动作见下方“卖单理由”。</p>
+<p class="hint">数据来自 Polymarket 实时持仓（Data API）。成本价为该持仓的真实加权均价 avgPrice；已平仓的仓位不在此表，平仓动作见下方“卖单记录”。</p>
 <table class="data-table">
     <thead>
         <tr>
@@ -25,7 +25,7 @@
     <tbody id="history-body"></tbody>
 </table>
 
-<h2 style="margin-top:2rem;">卖单理由</h2>
+<h2 style="margin-top:2rem;">卖单记录</h2>
 <table class="data-table">
     <thead>
         <tr>
@@ -82,7 +82,8 @@ function refreshSellReasons() {
     const startDate = document.getElementById('start-date').value;
     const endDate = document.getElementById('end-date').value;
     const params = new URLSearchParams();
-    params.set('types', 'take_profit_sell,stoploss_market_sell');
+    params.set('types',
+        'take_profit_sell,take_profit_recancel,stoploss_market_sell,stoploss_cancel_sell');
     if (wallet) params.set('wallet', wallet);
     if (startDate) params.set('start', new Date(startDate).getTime() / 1000);
     if (endDate) params.set('end', new Date(endDate + 'T23:59:59').getTime() / 1000);

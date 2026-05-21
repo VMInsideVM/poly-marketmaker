@@ -111,6 +111,7 @@ class Database:
                 reward_range_max REAL DEFAULT 1,
                 order_price REAL NOT NULL,
                 order_size INTEGER NOT NULL,
+                min_cost REAL DEFAULT 0,
                 end_date TEXT DEFAULT '',
                 scanned_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
@@ -126,6 +127,11 @@ class Database:
         cols = {row[1] for row in c.fetchall()}
         if "funder" not in cols:
             c.execute("ALTER TABLE wallets ADD COLUMN funder TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
+        c.execute("PRAGMA table_info(eligible_markets)")
+        em_cols = {row[1] for row in c.fetchall()}
+        if em_cols and "min_cost" not in em_cols:
+            c.execute("ALTER TABLE eligible_markets ADD COLUMN min_cost REAL DEFAULT 0")
             self.conn.commit()
 
     # --- Settings ---
@@ -429,8 +435,8 @@ class Database:
                  daily_reward, rewards_max_spread, rewards_min_size,
                  tick_size, tick_size_str, neg_risk,
                  reward_range_min, reward_range_max,
-                 order_price, order_size, end_date, scanned_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 order_price, order_size, min_cost, end_date, scanned_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     m.get("market_id", ""),
                     m.get("token_id", ""),
@@ -447,6 +453,7 @@ class Database:
                     m.get("reward_range_max", 1),
                     m.get("order_price", 0),
                     m.get("order_size", 0),
+                    m.get("min_cost", 0),
                     m.get("end_date", ""),
                     now,
                 ),
