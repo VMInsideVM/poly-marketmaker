@@ -4,6 +4,7 @@ import logging
 import time
 from py_clob_client_v2.clob_types import TradeParams
 from engine.fills import select_new_buy_fills
+from engine.take_profit import plan_take_profit
 from engine.strategy_check import needs_replace
 from engine.risk import stop_loss_triggered
 from engine.strategy import determine_order_price
@@ -67,16 +68,19 @@ class OrderMonitor:
             logger.warning("record_action failed: %s", e)
 
     def init_watermark(self):
-        """Seed watermark from latest recorded trade ts for this wallet.
+        """Seed watermark from latest recorded trade/action ts for this wallet.
 
         DB created_at is local record time; trade match_time is exchange
         time. Both ~unix seconds; this is only a conservative lower bound,
-        (trade_id, order_id) dedup guarantees no double-processing.
+        (trade_id, order_id) dedup guarantees no double-processing. Actions are
+        included so that clearing the trades table does not reset the watermark
+        to 0 (which would refetch all history and re-cooldown old markets).
         """
         rows = self.db.get_trade_history(self.wallet_address)
-        self._after_ts = (
-            max((r.get("created_at", 0) or 0) for r in rows) if rows else 0.0
-        )
+        actions = self.db.get_actions(self.wallet_address)
+        times = [r.get("created_at", 0) or 0 for r in rows]
+        times += [a.get("created_at", 0) or 0 for a in actions]
+        self._after_ts = max(times) if times else 0.0
 
     def _funder(self) -> str:
         """Proxy/funder address — used for get_trades maker filter and Data API."""
@@ -113,41 +117,14 @@ class OrderMonitor:
     def _handle_fill(self, ev: dict, cancelled_orders: set):
         size = float(ev.get("size", 0) or 0)  # real data is fractional
         price = float(ev.get("price", 0) or 0)
-        asset_id = ev.get("asset_id", "")
         market_id = ev.get("market", "")
         order_id = ev.get("order_id")
         if size <= 0:
             return
-        # Take-profit sell at the fill price (our resting maker buy filled here)
-        self.api.place_limit_sell(asset_id, price, size)
-        self.db.record_trade(
-            wallet=self.wallet_address,
-            market_id=market_id,
-            market_name="",
-            side="buy",
-            price=price,
-            size=size,
-        )
-        # Main history also records the take-profit sell so the direction
-        # column is complete (buy / sell / stop_loss).
-        self.db.record_trade(
-            wallet=self.wallet_address,
-            market_id=market_id,
-            market_name="",
-            side="sell",
-            price=price,
-            size=size,
-            pnl=0.0,
-        )
-        self._record_action(
-            market_id=market_id,
-            action_type="take_profit_sell",
-            side="卖出",
-            price=price,
-            size=size,
-            reason="买单成交，按成交价挂等价止盈卖单（赚流动性奖励，原价卖出不亏本金）",
-            price_basis=f"卖价=买入成交价 {price:.4f}；来源：CLOB get_trades 的 maker_orders 成交价",
-        )
+        # No trades-table write: buy "history" is now the live Data API position
+        # (avgPrice), because per-fill maker_orders prices were unreliable. The
+        # take-profit SELL is maintained by check_take_profit() at the position's
+        # avgPrice. Step 1 only sets the cooldown and cancels the buy's remainder.
         self.db.set_cooldown(
             self.wallet_address, market_id, self.db.get_settings()["cooldown_minutes"]
         )
@@ -173,8 +150,124 @@ class OrderMonitor:
             size=str(size),
             matched=str(size),
             stage="Step1",
-            action="成交→挂止盈+撤余",
-            detail=f"成交{size} 止盈卖{price:.4f}",
+            action="成交→撤余单",
+            detail=f"成交{size}，止盈由持仓维护",
+        )
+
+    # --- Step 1b: position-driven take-profit (one resting sell at cost) ---
+    def check_take_profit(self):
+        """Maintain exactly one resting SELL per position at its cost price.
+
+        Reads the authoritative position (Data API avgPrice + size) instead of
+        replaying per-fill prices from get_trades, so a position is flattened by
+        a single sell at its real average cost — never split into many orders
+        nor priced off stale/divergent per-fill data.
+        """
+        funder = self._funder()
+        try:
+            positions = self.api.get_user_positions(funder)
+        except Exception as e:
+            logger.warning(
+                "Data API positions failed for %s (skip take-profit): %s",
+                self.wallet_address,
+                e,
+            )
+            return
+        try:
+            open_orders = self.api.get_open_orders()
+        except Exception as e:
+            logger.error("get_open_orders failed for %s: %s", self.wallet_address, e)
+            return
+        for pos in positions:
+            try:
+                self._reconcile_take_profit(pos, open_orders)
+            except Exception as e:
+                logger.error("Take-profit error on %s: %s", pos.get("asset"), e)
+
+    def _sell_tick(self, asset_id: str):
+        """(tick_float, tick_str) for an asset; falls back to 0.01 if unavailable."""
+        try:
+            ob = self.api.get_orderbook(asset_id)
+            tick_str = ob.get("tick_size", "0.01")
+            return float(tick_str), tick_str
+        except Exception as e:
+            logger.warning(
+                "orderbook for %s failed (take-profit tick=0.01): %s", asset_id, e
+            )
+            return 0.01, "0.01"
+
+    def _reconcile_take_profit(self, pos: dict, open_orders: list):
+        asset_id = pos.get("asset", "")
+        size = float(pos.get("size", 0) or 0)
+        avg = float(pos.get("avgPrice", 0) or 0)
+        cid = pos.get("conditionId", "")
+        if size <= 0 or avg <= 0:
+            return
+        tick, tick_str = self._sell_tick(asset_id)
+        sells = [
+            o
+            for o in open_orders
+            if o.get("asset_id") == asset_id and o.get("side") == "SELL"
+        ]
+        plan = plan_take_profit(size, avg, tick, sells)
+        if plan["action"] in ("noop", "keep"):
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price=f"{avg:.4f}",
+                size=str(size),
+                matched="-",
+                stage="止盈卖单",
+                action="保持(按成本价)",
+                detail=f"成本{avg:.4f} 持仓{size} 已挂一笔",
+            )
+            return
+        # replace: cancel any mismatched sells, then place exactly one at cost
+        if plan["cancel_ids"]:
+            try:
+                self.api.cancel_orders(plan["cancel_ids"])
+                self._record_action(
+                    market_id=cid,
+                    action_type="take_profit_recancel",
+                    side="-",
+                    price=-1,
+                    size=size,
+                    reason="撤销与持仓不符的旧止盈卖单（价格/数量不符或被拆成多笔），改为按持仓挂单一笔",
+                    price_basis=(
+                        f"撤 {len(plan['cancel_ids'])} 笔 SELL；"
+                        f"来源：CLOB get_open_orders（asset={asset_id} 的 SELL）"
+                    ),
+                )
+            except Exception as e:
+                logger.warning("Cancel stale sells for %s failed: %s", asset_id, e)
+                return
+        want = plan["price"]
+        try:
+            self.api.place_limit_sell(asset_id, want, size, tick_size=tick_str)
+        except Exception as e:
+            logger.warning("Place take-profit sell for %s failed: %s", asset_id, e)
+            return
+        self._record_action(
+            market_id=cid,
+            action_type="take_profit_sell",
+            side="卖出",
+            price=want,
+            size=size,
+            reason="按持仓成本价挂单一笔止盈卖单（原价卖出不亏本金，赚流动性奖励）",
+            price_basis=(
+                f"卖价=持仓成本价 avgPrice {avg:.4f}→对齐tick {want:.4f}；"
+                f"来源：Polymarket Data API /positions"
+            ),
+        )
+        self._status_add(
+            market=cid,
+            side="卖出",
+            price=f"{want:.4f}",
+            size=str(size),
+            matched="-",
+            stage="止盈卖单",
+            action="按持仓挂单",
+            detail=f"成本{avg:.4f} 持仓{size} 挂卖{want:.4f}",
         )
 
     # --- Step 2: stop-loss via Data API positions ---

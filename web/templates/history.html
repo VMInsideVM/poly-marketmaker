@@ -13,11 +13,13 @@
     <input type="date" id="end-date" onchange="refreshHistory()">
 </div>
 
+<h2>当前持仓（成本均价）</h2>
+<p class="hint">数据来自 Polymarket 实时持仓（Data API）。成本价为该持仓的真实加权均价 avgPrice；已平仓的仓位不在此表，平仓动作见下方“卖单理由”。</p>
 <table class="data-table">
     <thead>
         <tr>
-            <th>时间</th><th>钱包</th><th>市场</th>
-            <th>方向</th><th>价格</th><th>数量</th><th>盈亏</th>
+            <th>钱包</th><th>市场</th><th>方向</th>
+            <th>成本价</th><th>数量</th><th>现价</th><th>浮动盈亏</th><th>止损价</th>
         </tr>
     </thead>
     <tbody id="history-body"></tbody>
@@ -39,32 +41,34 @@
 <script>
 function refreshHistory() {
     const wallet = document.getElementById('wallet-filter').value;
-    const startDate = document.getElementById('start-date').value;
-    const endDate = document.getElementById('end-date').value;
     const params = new URLSearchParams();
     if (wallet) params.set('wallet', wallet);
-    if (startDate) params.set('start', new Date(startDate).getTime() / 1000);
-    if (endDate) params.set('end', new Date(endDate + 'T23:59:59').getTime() / 1000);
 
-    fetch(`/api/history?${params}`).then(r => r.json()).then(trades => {
-        const sideLabels = {buy: '买入', sell: '卖出', stop_loss: '止损'};
-        document.getElementById('history-body').innerHTML = trades.map(t => `
+    fetch(`/api/positions?${params}`).then(r => r.json()).then(rows => {
+        const body = document.getElementById('history-body');
+        if (!rows.length) {
+            body.innerHTML = '<tr><td colspan="8">暂无持仓</td></tr>';
+        } else {
+            body.innerHTML = rows.map(p => `
             <tr>
-                <td>${new Date(t.created_at * 1000).toLocaleString('zh-CN')}</td>
-                <td title="${t.wallet}">${t.wallet.slice(0,6)}...${t.wallet.slice(-4)}</td>
-                <td>${t.market_name}</td>
-                <td class="${t.side === 'buy' ? 'buy-side' : t.side === 'stop_loss' ? 'loss' : 'sell-side'}">${sideLabels[t.side] || t.side}</td>
-                <td>${t.price.toFixed(4)}</td>
-                <td>${t.size}</td>
-                <td class="${t.pnl >= 0 ? 'profit' : 'loss'}">${t.pnl.toFixed(2)}</td>
+                <td title="${p.wallet}">${p.wallet.slice(0,6)}...${p.wallet.slice(-4)}</td>
+                <td>${p.market_name}</td>
+                <td class="buy-side">${p.outcome || '持有'}</td>
+                <td>${p.buy_price.toFixed(4)}</td>
+                <td>${p.size}</td>
+                <td>${p.current_price.toFixed(4)}</td>
+                <td class="${p.pnl >= 0 ? 'profit' : 'loss'}">${p.pnl.toFixed(2)}</td>
+                <td>${p.stop_price.toFixed(4)}</td>
             </tr>
         `).join('');
+        }
     });
     refreshSellReasons();
 }
 
 const ACTION_LABELS = {
     take_profit_sell: '止盈挂卖单',
+    take_profit_recancel: '止盈撤旧改一笔',
     stoploss_market_sell: '止损市价卖',
     cancel_remainder: '撤成交剩余',
     stoploss_cancel_sell: '止损撤止盈卖',

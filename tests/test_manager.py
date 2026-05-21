@@ -3,7 +3,7 @@
 import time
 import pytest
 from unittest.mock import MagicMock, patch
-from engine.manager import EngineManager
+from engine.manager import EngineManager, WalletWorker
 
 
 def _make_manager():
@@ -62,6 +62,23 @@ class TestEngineLifecycle:
         status = manager.get_status()
         assert isinstance(status, dict)
         assert "engines" in status
+
+
+class TestWalletWorkerTick:
+    def test_tick_runs_take_profit_between_fills_and_stoploss(self):
+        worker = WalletWorker(
+            MagicMock(), MagicMock(), "0xABC", {"fill_check_interval_sec": 5}
+        )
+        worker.monitor = MagicMock()
+
+        worker._tick()
+
+        worker.monitor.begin_status_tick.assert_called_once()
+        worker.monitor.check_buy_orders.assert_called_once()
+        worker.monitor.check_take_profit.assert_called_once()
+        worker.monitor.check_stop_loss.assert_called_once()
+        worker.monitor.check_sell_orders.assert_called_once()
+        worker.monitor.publish_status.assert_called_once()
 
 
 class TestTestPlaceOrders:

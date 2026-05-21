@@ -526,7 +526,9 @@ def api_get_positions():
                     {
                         "wallet": addr,
                         "market_name": p.get("title", p.get("conditionId", "")),
+                        "outcome": p.get("outcome", ""),
                         "buy_price": avg,
+                        "size": size,
                         "current_price": cur,
                         "stop_price": avg * (1 - sl),
                         "pnl": (cur - avg) * size,

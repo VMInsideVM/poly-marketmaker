@@ -61,15 +61,22 @@ class WalletWorker:
             )
 
     def _run(self):
-        """Monitor loop: check fills and stop-loss at check_interval."""
+        """Monitor loop: run one tick at each check_interval."""
         check_interval = self.settings["fill_check_interval_sec"]
         while not self._stop_event.is_set():
-            self.monitor.begin_status_tick()
-            self.monitor.check_buy_orders()
-            self.monitor.check_stop_loss()
-            self.monitor.check_sell_orders()
-            self.monitor.publish_status()
+            self._tick()
             self._stop_event.wait(timeout=check_interval)
+
+    def _tick(self):
+        """One monitor pass: detect fills, maintain take-profit sells, stop-loss,
+        strategy compliance. check_take_profit runs right after fill detection so
+        the position-driven sell reflects the latest fills."""
+        self.monitor.begin_status_tick()
+        self.monitor.check_buy_orders()
+        self.monitor.check_take_profit()
+        self.monitor.check_stop_loss()
+        self.monitor.check_sell_orders()
+        self.monitor.publish_status()
 
     def place_orders(self, eligible_markets: list[dict], limit: int | None = None):
         """Place orders on eligible markets; price recomputed at placement time.

@@ -30,25 +30,12 @@ def _make_monitor(settings=None):
 
 
 class TestCheckBuyOrders:
-    def test_filled_order_triggers_sell(self):
+    def test_filled_order_sets_cooldown_and_cancels_remainder(self):
+        # Take-profit is position-driven (check_take_profit) and buy "history"
+        # is the live Data API position now, so Step 1 writes NO trade row — it
+        # only sets the cooldown and cancels the filled buy's remainder.
         monitor, api, db = _make_monitor()
-        trade = {
-            "id": "trade1",
-            "maker_orders": [
-                {
-                    "order_id": "ord1",
-                    "asset_id": "tok1",
-                    "matched_amount": "1000",
-                    "price": "0.25",
-                    "side": "BUY",
-                    "maker_address": "0xFUNDER",
-                    "market": "mkt1",
-                    "match_time": "1000000",
-                }
-            ],
-        }
-        api.get_trades.return_value = [trade]
-        api.place_limit_sell.return_value = {"orderID": "sell1"}
+        api.get_trades.return_value = []
 
         with patch("engine.monitor.select_new_buy_fills") as mock_fills:
             mock_fills.return_value = [
@@ -64,34 +51,19 @@ class TestCheckBuyOrders:
             ]
             monitor.check_buy_orders()
 
-        api.place_limit_sell.assert_called_with("tok1", 0.25, 1000.0)
-        assert db.record_trade.call_count == 2
-        sides = [c.kwargs["side"] for c in db.record_trade.call_args_list]
-        assert sides == ["buy", "sell"]
-        for c in db.record_trade.call_args_list:
-            assert c.kwargs["price"] == 0.25
-            assert c.kwargs["size"] == 1000.0
+        api.place_limit_sell.assert_not_called()  # no per-fill sell anymore
+        db.record_trade.assert_not_called()  # no trades-table write anymore
         db.set_cooldown.assert_called_with("0xABC", "mkt1", 20)
         api.cancel_orders.assert_called_with(["ord1"])
         action_types = [
             c.kwargs["action_type"] for c in db.record_action.call_args_list
         ]
-        assert "take_profit_sell" in action_types
+        assert "take_profit_sell" not in action_types
         assert "cancel_remainder" in action_types
-        tp = next(
-            c
-            for c in db.record_action.call_args_list
-            if c.kwargs["action_type"] == "take_profit_sell"
-        )
-        assert tp.kwargs["side"] == "卖出"
-        assert tp.kwargs["price"] == 0.25
-        assert "成交价" in tp.kwargs["price_basis"]
-        assert "止盈" in tp.kwargs["reason"]
 
-    def test_partial_fill_places_sell_for_filled_portion(self):
+    def test_partial_fill_writes_no_trade(self):
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = []
-        api.place_limit_sell.return_value = {"orderID": "sell1"}
 
         with patch("engine.monitor.select_new_buy_fills") as mock_fills:
             mock_fills.return_value = [
@@ -107,7 +79,8 @@ class TestCheckBuyOrders:
             ]
             monitor.check_buy_orders()
 
-        api.place_limit_sell.assert_called_with("tok1", 0.25, 600.0)
+        api.place_limit_sell.assert_not_called()
+        db.record_trade.assert_not_called()
 
     def test_unfilled_order_no_action(self):
         monitor, api, db = _make_monitor()
@@ -151,10 +124,10 @@ class TestCheckBuyOrders:
         assert monitor._after_ts == 9999.0
 
     def test_handle_fill_exception_still_marks_seen(self):
-        """If place_limit_sell raises, seen-key and watermark must still be updated."""
+        """If a fill handler op raises, seen-key and watermark must still update."""
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = []
-        api.place_limit_sell.side_effect = Exception("boom")
+        db.set_cooldown.side_effect = Exception("boom")
 
         with patch("engine.monitor.select_new_buy_fills") as mock_fills:
             mock_fills.return_value = [
@@ -172,6 +145,183 @@ class TestCheckBuyOrders:
 
         assert ("T", "O") in monitor._seen_fill_keys
         assert monitor._after_ts == 123.0
+
+
+class TestInitWatermark:
+    """Watermark seeds from trades AND actions, so clearing the trades table
+    does not reset it to 0 (which would refetch all history every restart)."""
+
+    def test_seeds_from_actions_when_trades_empty(self):
+        monitor, api, db = _make_monitor()
+        db.get_trade_history.return_value = []
+        db.get_actions.return_value = [{"created_at": 555.0}]
+        monitor.init_watermark()
+        assert monitor._after_ts == 555.0
+
+    def test_seeds_from_max_of_trades_and_actions(self):
+        monitor, api, db = _make_monitor()
+        db.get_trade_history.return_value = [{"created_at": 100.0}]
+        db.get_actions.return_value = [{"created_at": 555.0}]
+        monitor.init_watermark()
+        assert monitor._after_ts == 555.0
+
+    def test_zero_when_both_empty(self):
+        monitor, api, db = _make_monitor()
+        db.get_trade_history.return_value = []
+        db.get_actions.return_value = []
+        monitor.init_watermark()
+        assert monitor._after_ts == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Step 1b: check_take_profit — position-driven take-profit (one sell at cost)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckTakeProfit:
+    def _pos(self, size=222.08, avg=0.30, asset="tok1", cid="mkt1"):
+        return {
+            "asset": asset,
+            "size": size,
+            "avgPrice": avg,
+            "curPrice": avg,
+            "conditionId": cid,
+        }
+
+    def _sell(self, oid, price, original, asset="tok1", matched=0):
+        return {
+            "id": oid,
+            "asset_id": asset,
+            "side": "SELL",
+            "price": str(price),
+            "original_size": str(original),
+            "size_matched": str(matched),
+        }
+
+    def test_places_one_sell_at_cost_when_none_exist(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_called_once_with(
+            "tok1", 0.30, 222.08, tick_size="0.01"
+        )
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert "take_profit_sell" in ats
+        tp = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "take_profit_sell"
+        )
+        assert tp.kwargs["price"] == 0.30
+        assert "avgPrice" in tp.kwargs["price_basis"]
+
+    def test_keeps_correct_single_sell(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = [self._sell("s1", 0.30, 222.08)]
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.cancel_orders.assert_not_called()
+        api.place_limit_sell.assert_not_called()
+
+    def test_replaces_phantom_and_split_sells_with_one(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = [
+            self._sell("a", 0.38, 177.77),
+            self._sell("b", 0.38, 22.23),
+            self._sell("c", 0.30, 25.0),
+            self._sell("d", 0.30, 22.857),
+            self._sell("e", 0.30, 8.171),
+            self._sell("f", 0.30, 7.471),
+            self._sell("g", 0.30, 7.28),
+            self._sell("h", 0.30, 7.128),
+        ]
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        cancelled = api.cancel_orders.call_args[0][0]
+        assert set(cancelled) == {"a", "b", "c", "d", "e", "f", "g", "h"}
+        api.place_limit_sell.assert_called_once_with(
+            "tok1", 0.30, 222.08, tick_size="0.01"
+        )
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert "take_profit_recancel" in ats
+        assert "take_profit_sell" in ats
+
+    def test_positions_api_failure_skips(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.side_effect = Exception("Data API down")
+
+        monitor.check_take_profit()  # must not raise
+
+        api.place_limit_sell.assert_not_called()
+
+    def test_open_orders_failure_skips(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.side_effect = Exception("timeout")
+
+        monitor.check_take_profit()  # must not raise
+
+        api.place_limit_sell.assert_not_called()
+
+    def test_zero_size_position_skipped(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(size=0.0)]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_not_called()
+
+    def test_orderbook_failure_falls_back_to_default_tick(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(avg=0.30)]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.side_effect = Exception("ob down")
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_called_once_with(
+            "tok1", 0.30, 222.08, tick_size="0.01"
+        )
+
+    def test_ignores_other_assets_and_buy_orders(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(asset="tok1")]
+        api.get_open_orders.return_value = [
+            self._sell("other", 0.50, 100.0, asset="tok2"),  # different asset
+            {  # our asset but a BUY — must not be cancelled/counted
+                "id": "buy1",
+                "asset_id": "tok1",
+                "side": "BUY",
+                "price": "0.30",
+                "original_size": "222.08",
+                "size_matched": "0",
+            },
+        ]
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        # No matching SELL for tok1 -> place one; never cancel the other-asset
+        # sell or our own buy.
+        api.place_limit_sell.assert_called_once_with(
+            "tok1", 0.30, 222.08, tick_size="0.01"
+        )
+        if api.cancel_orders.called:
+            cancelled = api.cancel_orders.call_args[0][0]
+            assert "other" not in cancelled
+            assert "buy1" not in cancelled
 
 
 # ---------------------------------------------------------------------------
@@ -731,10 +881,9 @@ class TestMonitorStatusSnapshot:
 
 
 class TestStep1ActionLog:
-    def test_cancel_remainder_not_recorded_when_no_order_id(self):
+    def test_no_sell_no_cancel_when_no_order_id(self):
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = []
-        api.place_limit_sell.return_value = {}
         with patch("engine.monitor.select_new_buy_fills") as mf:
             mf.return_value = [
                 {
@@ -749,13 +898,13 @@ class TestStep1ActionLog:
             ]
             monitor.check_buy_orders()
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
-        assert "take_profit_sell" in ats
+        assert "take_profit_sell" not in ats
         assert "cancel_remainder" not in ats
+        api.place_limit_sell.assert_not_called()
 
     def test_record_action_never_breaks_fill(self):
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = []
-        api.place_limit_sell.return_value = {}
         db.record_action.side_effect = RuntimeError("db down")
         with patch("engine.monitor.select_new_buy_fills") as mf:
             mf.return_value = [
@@ -770,8 +919,9 @@ class TestStep1ActionLog:
                 }
             ]
             monitor.check_buy_orders()  # must not raise
-        api.place_limit_sell.assert_called_once()
-        assert db.record_trade.call_count == 2
+        api.place_limit_sell.assert_not_called()
+        db.record_trade.assert_not_called()
+        api.cancel_orders.assert_called_once_with(["o1"])
 
 
 class TestStep2ActionLog:
