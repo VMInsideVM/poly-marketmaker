@@ -92,9 +92,22 @@ class WalletWorker:
         except Exception as e:
             logger.error("get_open_orders failed for %s: %s", self.wallet_address, e)
             return
-        open_buy_assets = {
-            o.get("asset_id") for o in open_orders if o.get("side") == "BUY"
-        }
+        buy_orders = [o for o in open_orders if o.get("side") == "BUY"]
+        open_buy_assets = {o.get("asset_id") for o in buy_orders}
+
+        # Cap the wallet's TOTAL open buy orders at max_buy_orders_per_wallet:
+        # available slots = cap - existing buys. Recomputed each distribution
+        # from the live order count, so the total never exceeds the cap.
+        max_buys = int(self.settings.get("max_buy_orders_per_wallet", 5))
+        slots = max_buys - len(buy_orders)
+        if slots <= 0:
+            logger.info(
+                "Buy-order cap (%d) reached for %s, skipping placement",
+                max_buys,
+                self.wallet_address,
+            )
+            return
+        effective_limit = slots if limit is None else min(limit, slots)
 
         for market in eligible_markets:
             if self.db.is_in_cooldown(self.wallet_address, market["market_id"]):
@@ -174,7 +187,7 @@ class WalletWorker:
                 )
                 placed += 1
                 self._record_place_buy(market, order_price, max_spread, rmin, rmax)
-                if limit is not None and placed >= limit:
+                if placed >= effective_limit:
                     break
             except Exception as e:
                 logger.error("Error placing order for %s: %s", market["market_name"], e)

@@ -57,6 +57,47 @@ def test_no_limit_places_on_all_markets_regression():
     assert api.place_limit_buy.call_count == 5
 
 
+def _worker_capped(api, db, cap):
+    return WalletWorker(
+        api,
+        db,
+        "0xWALLET",
+        {"fill_check_interval_sec": 5, "max_buy_orders_per_wallet": cap},
+    )
+
+
+def test_caps_new_buys_at_per_wallet_max():
+    # max_buy_orders_per_wallet caps the TOTAL open buy orders per wallet.
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []  # 0 existing buys
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker_capped(api, db, cap=2)
+    markets = [_market(i) for i in range(5)]
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders(markets)
+    assert api.place_limit_buy.call_count == 2  # capped at 2, not 5
+
+
+def test_no_new_buys_when_cap_already_reached():
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = [
+        {"id": "o1", "side": "BUY", "asset_id": "x1"},
+        {"id": "o2", "side": "BUY", "asset_id": "x2"},
+    ]  # already 2 open buys == cap
+    api.get_balance.return_value = 1000.0
+    worker = _worker_capped(api, db, cap=2)
+    markets = [_market(i) for i in range(5)]
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders(markets)
+    api.get_orderbook.assert_not_called()
+    api.place_limit_buy.assert_not_called()
+
+
 def test_records_place_buy_action_on_success():
     # A successful placement is logged to the actions table as "place_buy" so
     # the operations log (操作记录) covers buy orders too, not just sells.

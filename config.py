@@ -11,9 +11,10 @@ DEFAULTS = {
     "fill_check_interval_sec": 5,
     "cooldown_minutes": 20,
     "rewards_cache_ttl_sec": 600,
+    "max_buy_orders_per_wallet": 5,
 }
 
 DB_PATH = "market_maker.db"
 HOST = "127.0.0.1"
-PORT = 5000
+PORT = 8000
 SECRET_KEY = None  # Set at runtime from user password
