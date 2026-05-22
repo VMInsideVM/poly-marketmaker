@@ -25,11 +25,8 @@ class OrderMonitor:
         # Watermark: lower bound for get_trades(after=) — bounds fetch size;
         # real idempotency is _seen_fill_keys.
         self._after_ts: float = 0.0
-        # condition_id -> ((max_spread, reward_total), fetched_at) and
-        # condition_id -> (end_ts, fetched_at): independent TTL caches for the
-        # Step 3 scanner-eligibility re-check.
-        self._rewards_cache: dict = {}
-        self._end_ts_cache: dict = {}
+        # condition_id -> (max_spread, fetched_at) TTL cache for Step 3.
+        self._max_spread_cache: dict = {}
         self._status_rows: list = []
         self._tick_ts: float = 0.0
 
@@ -406,66 +403,30 @@ class OrderMonitor:
             except Exception as e:
                 logger.error("Compliance error on %s: %s", o.get("id"), e)
 
-    def _market_rewards_info(self, condition_id: str) -> dict:
-        """Per-market {"max_spread", "reward_total", "end_ts"}, each None when
-        unavailable. max_spread + reward_total share one rewards cache; end_ts
-        has its own. Only successful fetches are cached (TTL=rewards_cache_ttl_sec)
-        so a transient failure is retried next tick rather than stuck for the TTL.
-        reward_total is None unless at least one rewards_config carries a parseable
-        rate_per_day (so 'no rate info' is treated as unknown, not zero)."""
-        out = {"max_spread": None, "reward_total": None, "end_ts": None}
+    def _market_max_spread(self, condition_id: str) -> int | None:
+        """Real rewards_max_spread for a market, TTL-cached. None if unknown."""
         if not condition_id:
-            return out
+            return None
         ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
         now = time.time()
-
-        rhit = self._rewards_cache.get(condition_id)
-        if rhit and (now - rhit[1]) < ttl:
-            out["max_spread"], out["reward_total"] = rhit[0]
-        else:
-            try:
-                items = self.api.get_rewards_for_market(condition_id)
-            except Exception as e:
-                logger.warning("get_rewards_for_market(%s) failed: %s", condition_id, e)
-                items = None
-            if items:
-                ms = extract_max_spread(items)
-                rt, seen = 0.0, False
-                for it in items:
-                    if not isinstance(it, dict):
-                        continue
-                    for rc in it.get("rewards_config") or []:
-                        v = rc.get("rate_per_day")
-                        if v is None:
-                            continue
-                        try:
-                            rt += float(v)
-                            seen = True
-                        except (TypeError, ValueError):
-                            continue
-                reward_total = rt if seen else None
-                out["max_spread"], out["reward_total"] = ms, reward_total
-                self._rewards_cache[condition_id] = ((ms, reward_total), now)
-
-        ehit = self._end_ts_cache.get(condition_id)
-        if ehit and (now - ehit[1]) < ttl:
-            out["end_ts"] = ehit[0]
-        else:
-            try:
-                ets = self.api.get_market_end_ts(condition_id)
-            except Exception as e:
-                logger.warning("get_market_end_ts(%s) failed: %s", condition_id, e)
-                ets = None
-            if isinstance(ets, (int, float)) and not isinstance(ets, bool):
-                out["end_ts"] = float(ets)
-                self._end_ts_cache[condition_id] = (float(ets), now)
-
-        return out
+        hit = self._max_spread_cache.get(condition_id)
+        if hit and (now - hit[1]) < ttl:
+            return hit[0]
+        try:
+            items = self.api.get_rewards_for_market(condition_id)
+        except Exception as e:
+            logger.warning("get_rewards_for_market(%s) failed: %s", condition_id, e)
+            return None
+        ms = extract_max_spread(items)
+        if ms is None:
+            return None
+        self._max_spread_cache[condition_id] = (ms, now)
+        return ms
 
     def _check_compliance(self, o: dict):
-        """Decide what to do with a resting buy this tick: first re-check scanner
-        eligibility (cancel if the market no longer qualifies), else price compliance.
-        """
+        """Decide what to do with a resting buy this tick: first re-check the
+        bid-ask spread (cancel if it widened past the threshold), else price
+        compliance."""
         token_id = o.get("asset_id", "")
         cid = o.get("market", "")
         settings = self.db.get_settings()
@@ -474,23 +435,16 @@ class OrderMonitor:
         asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))
         best_bid = float(bids[0]["price"]) if bids else None
         best_ask = float(asks[0]["price"]) if asks else None
-        best_bid_cents = best_bid * 100 if best_bid is not None else None
         spread_cents = (
             (best_ask - best_bid) * 100
             if (best_bid is not None and best_ask is not None)
             else None
         )
 
-        # Scanner-eligibility re-check (runs even if the book is empty: reward /
-        # settlement still apply). reward_total / max_spread / end_ts are fetched
-        # once here and the max_spread is reused by the price-compliance path.
-        info = self._market_rewards_info(cid)
-        max_spread = info["max_spread"]
-        end_ts = info["end_ts"]
-        days_left = ((end_ts - time.time()) / 86400) if end_ts else None
-        cancel, reason = recheck_resting_buy(
-            info["reward_total"], days_left, best_bid_cents, spread_cents, settings
-        )
+        # Eligibility re-check: only the bid-ask spread now (cancel a resting buy
+        # whose market's spread widened past max_spread_cents). None spread = book
+        # side missing -> unknown -> keep.
+        cancel, reason = recheck_resting_buy(spread_cents, settings)
         if cancel:
             old_price = float(o.get("price", 0) or 0)
             osize = int(float(o.get("original_size", 0) or 0))
@@ -506,10 +460,7 @@ class OrderMonitor:
                 price=-1,
                 size=osize,
                 reason=reason,
-                price_basis=(
-                    "市场已不满足扫描初筛(奖励/结算/价格/价差)；"
-                    "来源：CLOB get_orderbook + get_rewards_for_market + get_market"
-                ),
+                price_basis="买一卖一价差超阈值复查；来源：CLOB get_orderbook",
             )
             self._status_add(
                 market=cid,
@@ -518,7 +469,7 @@ class OrderMonitor:
                 size=str(o.get("original_size", "")),
                 matched=str(o.get("size_matched", "0")),
                 stage="Step3",
-                action="复查撤单(市场不合格)",
+                action="复查撤单(价差过大)",
                 detail=reason,
             )
             logger.info(
@@ -547,6 +498,7 @@ class OrderMonitor:
         midpoint = (best_bid + best_ask) / 2
         tick = float(ob.get("tick_size", "0.01"))
         tick_str = ob.get("tick_size", "0.01")
+        max_spread = self._market_max_spread(cid)
         if max_spread is None:
             logger.info(
                 "[Step3] 单 %s 市场 %s 现价 %.4f | 取不到 rewards_max_spread，"

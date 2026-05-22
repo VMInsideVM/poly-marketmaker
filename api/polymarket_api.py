@@ -3,7 +3,6 @@
 import logging
 import time
 import requests
-from datetime import datetime, timezone
 from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
     AssetType,
@@ -28,32 +27,6 @@ SIG_GNOSIS_SAFE = 2  # Browser-wallet proxy signature type
 # Rewards API is part of the CLOB API
 REWARDS_API = POLYMARKET_HOST
 DATA_API_HOST = "https://data-api.polymarket.com"
-
-
-def _end_ts_from_market(info) -> "float | None":
-    """Parse a CLOB market's settlement date into a Unix timestamp.
-
-    Reads ``end_date_iso`` (CLOB market object) and falls back to ``end_date``
-    (the field name couldn't be verified offline, so both are tried). Returns
-    None when info isn't a dict, both fields are absent/empty, or the value
-    can't be parsed. Callers treat None as 'settlement date unknown'.
-    """
-    if not isinstance(info, dict):
-        return None
-    s = (info.get("end_date_iso") or info.get("end_date") or "").strip()
-    if not s:
-        return None
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    # A date-only or offset-less value parses to a naive datetime; treat it as
-    # UTC so .timestamp() doesn't silently use the host's local timezone.
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
 
 
 def derive_deposit_address(eoa_address: str) -> str:
@@ -262,23 +235,6 @@ class PolymarketAPI:
         original_size, size_matched, price, asset_id, market, etc.
         """
         return self.client.get_open_orders()
-
-    def get_market(self, condition_id: str) -> dict:
-        """CLOB market info by condition_id (includes end_date_iso)."""
-        return self.client.get_market(condition_id)
-
-    def get_market_end_ts(self, condition_id: str) -> "float | None":
-        """Settlement time (Unix seconds) for a market; None if unavailable.
-
-        Reads end_date_iso via CLOB get_market(condition_id). Any failure /
-        missing field returns None (caller treats as 'settlement unknown ->
-        skip that dimension').
-        """
-        try:
-            return _end_ts_from_market(self.get_market(condition_id))
-        except Exception as e:
-            logger.warning("get_market_end_ts(%s) failed: %s", condition_id, e)
-            return None
 
     def get_trades(self, params: TradeParams = None) -> list:
         """Get trade history for this wallet (auto-paginated)."""

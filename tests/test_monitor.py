@@ -1088,75 +1088,8 @@ class TestStep3ActionLog:
         assert ats == ["step3_cancel_old"]
 
 
-class TestMarketRewardsInfo:
-    def test_returns_max_spread_and_reward_total(self):
-        monitor, api, db = _make_monitor()
-        api.get_rewards_for_market.return_value = [
-            {
-                "rewards_max_spread": 3,
-                "rewards_config": [{"rate_per_day": 40}, {"rate_per_day": 60}],
-            }
-        ]
-        api.get_market_end_ts.return_value = 4_100_000_000.0
-        info = monitor._market_rewards_info("cid1")
-        assert info["max_spread"] == 3
-        assert info["reward_total"] == 100.0
-        assert info["end_ts"] == 4_100_000_000.0
-
-    def test_reward_total_none_when_no_rate_present(self):
-        monitor, api, db = _make_monitor()
-        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        api.get_market_end_ts.return_value = None
-        info = monitor._market_rewards_info("cid1")
-        assert info["reward_total"] is None
-        assert info["max_spread"] == 3
-
-    def test_reward_total_none_when_items_empty(self):
-        monitor, api, db = _make_monitor()
-        api.get_rewards_for_market.return_value = []
-        api.get_market_end_ts.return_value = None
-        info = monitor._market_rewards_info("cid1")
-        assert info["reward_total"] is None
-        assert info["max_spread"] is None
-
-    def test_end_ts_none_when_non_numeric(self):
-        # A bare MagicMock api (get_market_end_ts unset) returns a MagicMock;
-        # it must be treated as None, not a number.
-        monitor, api, db = _make_monitor()
-        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        # deliberately do NOT set api.get_market_end_ts.return_value
-        info = monitor._market_rewards_info("cid1")
-        assert info["end_ts"] is None
-
-    def test_rewards_failure_yields_none_fields(self):
-        monitor, api, db = _make_monitor()
-        api.get_rewards_for_market.side_effect = Exception("boom")
-        api.get_market_end_ts.return_value = None
-        info = monitor._market_rewards_info("cid1")
-        assert info["max_spread"] is None
-        assert info["reward_total"] is None
-
-    def test_caches_within_ttl_single_api_call(self):
-        monitor, api, db = _make_monitor()
-        api.get_rewards_for_market.return_value = [
-            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 200}]}
-        ]
-        api.get_market_end_ts.return_value = 4_100_000_000.0
-        monitor._market_rewards_info("cid1")
-        monitor._market_rewards_info("cid1")
-        assert api.get_rewards_for_market.call_count == 1
-        assert api.get_market_end_ts.call_count == 1
-
-
 class TestStep3EligibilityRecheck:
-    # Full scanner thresholds so the gates are active.
-    THRESH = {
-        "min_reward_usd": 100.0,
-        "min_settlement_days": 4,
-        "min_price_cents": 10.0,
-        "max_price_cents": 50.0,
-        "max_spread_cents": 3.0,
-    }
+    SETTINGS = {"max_spread_cents": 3.0}
 
     def _ob(self, best_bid="0.30", best_ask="0.31", tick="0.01"):
         return {
@@ -1178,104 +1111,56 @@ class TestStep3EligibilityRecheck:
             }
         ]
 
-    def _far_future(self):
-        import time as _t
-
-        return _t.time() + 60 * 86400  # 60 days out
-
-    def test_cancels_when_reward_below_threshold(self):
-        monitor, api, db = _make_monitor(self.THRESH)
-        api.get_open_orders.return_value = self._buy()
-        api.get_orderbook.return_value = self._ob()
-        api.get_rewards_for_market.return_value = [
-            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 50}]}
-        ]
-        api.get_market_end_ts.return_value = self._far_future()
-        monitor.check_sell_orders()
-        api.cancel_orders.assert_called_once_with(["o1"])
-        api.place_limit_buy.assert_not_called()
-
-    def test_cancels_when_near_settlement(self):
-        import time as _t
-
-        monitor, api, db = _make_monitor(self.THRESH)
-        api.get_open_orders.return_value = self._buy()
-        api.get_orderbook.return_value = self._ob()
-        api.get_rewards_for_market.return_value = [
-            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 500}]}
-        ]
-        api.get_market_end_ts.return_value = _t.time() + 1 * 86400  # 1 day < 4
-        monitor.check_sell_orders()
-        api.cancel_orders.assert_called_once_with(["o1"])
-
-    def test_cancels_when_bid_out_of_band(self):
-        monitor, api, db = _make_monitor(self.THRESH)
-        api.get_open_orders.return_value = self._buy()
-        api.get_orderbook.return_value = self._ob(best_bid="0.60", best_ask="0.61")
-        api.get_rewards_for_market.return_value = [
-            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 500}]}
-        ]
-        api.get_market_end_ts.return_value = self._far_future()
-        monitor.check_sell_orders()
-        api.cancel_orders.assert_called_once_with(["o1"])
-
-    def test_cancels_when_spread_too_wide(self):
-        monitor, api, db = _make_monitor(self.THRESH)
+    def test_cancels_when_spread_at_or_over_threshold(self):
+        monitor, api, db = _make_monitor(self.SETTINGS)
         api.get_open_orders.return_value = self._buy()
         api.get_orderbook.return_value = self._ob(
             best_bid="0.30", best_ask="0.35"
         )  # 5c >= 3c
-        api.get_rewards_for_market.return_value = [
-            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 500}]}
-        ]
-        api.get_market_end_ts.return_value = self._far_future()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
         monitor.check_sell_orders()
         api.cancel_orders.assert_called_once_with(["o1"])
+        api.place_limit_buy.assert_not_called()
 
     def test_records_eligibility_cancel_action(self):
-        monitor, api, db = _make_monitor(self.THRESH)
+        monitor, api, db = _make_monitor(self.SETTINGS)
         api.get_open_orders.return_value = self._buy()
-        api.get_orderbook.return_value = self._ob()
-        api.get_rewards_for_market.return_value = [
-            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 50}]}
-        ]
-        api.get_market_end_ts.return_value = self._far_future()
+        api.get_orderbook.return_value = self._ob(best_bid="0.30", best_ask="0.36")
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
         monitor.check_sell_orders()
         ats = [c.kwargs.get("action_type") for c in db.record_action.call_args_list]
         assert "eligibility_cancel" in ats
 
     def test_eligibility_cancel_failure_does_not_record_action(self):
-        monitor, api, db = _make_monitor(self.THRESH)
+        monitor, api, db = _make_monitor(self.SETTINGS)
         api.get_open_orders.return_value = self._buy()
-        api.get_orderbook.return_value = self._ob()
-        api.get_rewards_for_market.return_value = [
-            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 50}]}
-        ]
-        api.get_market_end_ts.return_value = self._far_future()
+        api.get_orderbook.return_value = self._ob(best_bid="0.30", best_ask="0.36")
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
         api.cancel_orders.side_effect = Exception("network error")
         monitor.check_sell_orders()
         db.record_action.assert_not_called()
 
-    def test_keeps_and_runs_compliance_when_all_pass(self):
-        monitor, api, db = _make_monitor(self.THRESH)
+    def test_keeps_and_runs_compliance_when_spread_narrow(self):
+        monitor, api, db = _make_monitor(self.SETTINGS)
         api.get_open_orders.return_value = self._buy()
-        api.get_orderbook.return_value = self._ob()  # bid 30c in band, spread 1c
-        api.get_rewards_for_market.return_value = [
-            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 500}]}
-        ]
-        api.get_market_end_ts.return_value = self._far_future()
+        api.get_orderbook.return_value = self._ob(
+            best_bid="0.30", best_ask="0.31"
+        )  # 1c < 3c
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
         with patch("engine.monitor.needs_replace", return_value="keep"):
             monitor.check_sell_orders()
         api.cancel_orders.assert_not_called()
 
-    def test_keeps_when_reward_and_end_ts_unknown(self):
-        # rewards items lack rate, end_ts unknown -> those gates skipped;
-        # bid in band & spread narrow -> keep -> falls to compliance.
-        monitor, api, db = _make_monitor(self.THRESH)
+    def test_dropped_dimensions_do_not_cause_cancel(self):
+        # reward / settlement / price-band are no longer checked: a market that
+        # would have failed those (e.g. bid far out of the old price band) must
+        # NOT be cancelled as long as the spread is within threshold.
+        monitor, api, db = _make_monitor(self.SETTINGS)
         api.get_open_orders.return_value = self._buy()
-        api.get_orderbook.return_value = self._ob()
+        api.get_orderbook.return_value = self._ob(
+            best_bid="0.60", best_ask="0.61"
+        )  # 1c spread
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        api.get_market_end_ts.return_value = None
         with patch("engine.monitor.needs_replace", return_value="keep"):
             monitor.check_sell_orders()
         api.cancel_orders.assert_not_called()
