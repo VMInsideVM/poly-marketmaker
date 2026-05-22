@@ -1244,6 +1244,18 @@ class TestStep3EligibilityRecheck:
         ats = [c.kwargs.get("action_type") for c in db.record_action.call_args_list]
         assert "eligibility_cancel" in ats
 
+    def test_eligibility_cancel_failure_does_not_record_action(self):
+        monitor, api, db = _make_monitor(self.THRESH)
+        api.get_open_orders.return_value = self._buy()
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 50}]}
+        ]
+        api.get_market_end_ts.return_value = self._far_future()
+        api.cancel_orders.side_effect = Exception("network error")
+        monitor.check_sell_orders()
+        db.record_action.assert_not_called()
+
     def test_keeps_and_runs_compliance_when_all_pass(self):
         monitor, api, db = _make_monitor(self.THRESH)
         api.get_open_orders.return_value = self._buy()

@@ -463,6 +463,9 @@ class OrderMonitor:
         return out
 
     def _check_compliance(self, o: dict):
+        """Decide what to do with a resting buy this tick: first re-check scanner
+        eligibility (cancel if the market no longer qualifies), else price compliance.
+        """
         token_id = o.get("asset_id", "")
         cid = o.get("market", "")
         settings = self.db.get_settings()
@@ -492,7 +495,7 @@ class OrderMonitor:
             old_price = float(o.get("price", 0) or 0)
             osize = int(float(o.get("original_size", 0) or 0))
             try:
-                self.api.cancel_orders([o["id"]])
+                self.api.cancel_orders([o.get("id")])
             except Exception as e:
                 logger.warning("Eligibility cancel %s failed: %s", o.get("id"), e)
                 return
