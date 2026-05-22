@@ -26,6 +26,11 @@ class OrderMonitor:
         self._after_ts: float = 0.0
         # condition_id -> (max_spread, fetched_at) TTL cache for Step 3.
         self._max_spread_cache: dict = {}
+        # condition_id -> ((max_spread, reward_total), fetched_at) and
+        # condition_id -> (end_ts, fetched_at): independent TTL caches for the
+        # Step 3 scanner-eligibility re-check.
+        self._rewards_cache: dict = {}
+        self._end_ts_cache: dict = {}
         self._status_rows: list = []
         self._tick_ts: float = 0.0
 
@@ -421,6 +426,62 @@ class OrderMonitor:
             return None
         self._max_spread_cache[condition_id] = (ms, now)
         return ms
+
+    def _market_rewards_info(self, condition_id: str) -> dict:
+        """Per-market {"max_spread", "reward_total", "end_ts"}, each None when
+        unavailable. max_spread + reward_total share one rewards cache; end_ts
+        has its own. Only successful fetches are cached (TTL=rewards_cache_ttl_sec)
+        so a transient failure is retried next tick rather than stuck for the TTL.
+        reward_total is None unless at least one rewards_config carries a parseable
+        rate_per_day (so 'no rate info' is treated as unknown, not zero)."""
+        out = {"max_spread": None, "reward_total": None, "end_ts": None}
+        if not condition_id:
+            return out
+        ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
+        now = time.time()
+
+        rhit = self._rewards_cache.get(condition_id)
+        if rhit and (now - rhit[1]) < ttl:
+            out["max_spread"], out["reward_total"] = rhit[0]
+        else:
+            try:
+                items = self.api.get_rewards_for_market(condition_id)
+            except Exception as e:
+                logger.warning("get_rewards_for_market(%s) failed: %s", condition_id, e)
+                items = None
+            if items:
+                ms = extract_max_spread(items)
+                rt, seen = 0.0, False
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    for rc in it.get("rewards_config") or []:
+                        v = rc.get("rate_per_day")
+                        if v is None:
+                            continue
+                        try:
+                            rt += float(v)
+                            seen = True
+                        except (TypeError, ValueError):
+                            continue
+                reward_total = rt if seen else None
+                out["max_spread"], out["reward_total"] = ms, reward_total
+                self._rewards_cache[condition_id] = ((ms, reward_total), now)
+
+        ehit = self._end_ts_cache.get(condition_id)
+        if ehit and (now - ehit[1]) < ttl:
+            out["end_ts"] = ehit[0]
+        else:
+            try:
+                ets = self.api.get_market_end_ts(condition_id)
+            except Exception as e:
+                logger.warning("get_market_end_ts(%s) failed: %s", condition_id, e)
+                ets = None
+            if isinstance(ets, (int, float)) and not isinstance(ets, bool):
+                out["end_ts"] = float(ets)
+                self._end_ts_cache[condition_id] = (float(ets), now)
+
+        return out
 
     def _check_compliance(self, o: dict):
         token_id = o.get("asset_id", "")

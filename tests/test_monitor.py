@@ -1086,3 +1086,63 @@ class TestStep3ActionLog:
             monitor.check_sell_orders()  # must not raise
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
         assert ats == ["step3_cancel_old"]
+
+
+class TestMarketRewardsInfo:
+    def test_returns_max_spread_and_reward_total(self):
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.return_value = [
+            {
+                "rewards_max_spread": 3,
+                "rewards_config": [{"rate_per_day": 40}, {"rate_per_day": 60}],
+            }
+        ]
+        api.get_market_end_ts.return_value = 4_100_000_000.0
+        info = monitor._market_rewards_info("cid1")
+        assert info["max_spread"] == 3
+        assert info["reward_total"] == 100.0
+        assert info["end_ts"] == 4_100_000_000.0
+
+    def test_reward_total_none_when_no_rate_present(self):
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        api.get_market_end_ts.return_value = None
+        info = monitor._market_rewards_info("cid1")
+        assert info["reward_total"] is None
+        assert info["max_spread"] == 3
+
+    def test_reward_total_none_when_items_empty(self):
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.return_value = []
+        api.get_market_end_ts.return_value = None
+        info = monitor._market_rewards_info("cid1")
+        assert info["reward_total"] is None
+        assert info["max_spread"] is None
+
+    def test_end_ts_none_when_non_numeric(self):
+        # A bare MagicMock api (get_market_end_ts unset) returns a MagicMock;
+        # it must be treated as None, not a number.
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        # deliberately do NOT set api.get_market_end_ts.return_value
+        info = monitor._market_rewards_info("cid1")
+        assert info["end_ts"] is None
+
+    def test_rewards_failure_yields_none_fields(self):
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.side_effect = Exception("boom")
+        api.get_market_end_ts.return_value = None
+        info = monitor._market_rewards_info("cid1")
+        assert info["max_spread"] is None
+        assert info["reward_total"] is None
+
+    def test_caches_within_ttl_single_api_call(self):
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 200}]}
+        ]
+        api.get_market_end_ts.return_value = 4_100_000_000.0
+        monitor._market_rewards_info("cid1")
+        monitor._market_rewards_info("cid1")
+        assert api.get_rewards_for_market.call_count == 1
+        assert api.get_market_end_ts.call_count == 1
