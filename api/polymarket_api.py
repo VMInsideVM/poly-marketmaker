@@ -340,7 +340,11 @@ class PolymarketAPI:
         page = 0
         while True:
             page += 1
-            params = {"page_size": 500}
+            # One page of 100 (sorted by rate_per_day DESC) already covers every
+            # reward-qualifying market; next_cursor pagination covers the rest.
+            # Do NOT combine a large page_size with min_price/max_price + order_by
+            # — that combination makes this endpoint hang / 500 (see scanner.py).
+            params = {"page_size": 100}
             if min_price is not None:
                 params["min_price"] = min_price
             if max_price is not None:
@@ -362,7 +366,7 @@ class PolymarketAPI:
                     resp = requests.get(
                         f"{REWARDS_API}/rewards/markets/multi",
                         params=params,
-                        timeout=20,
+                        timeout=30,
                     )
                     resp.raise_for_status()
                     resp_data = resp.json()

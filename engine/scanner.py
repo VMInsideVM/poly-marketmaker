@@ -64,12 +64,14 @@ class MarketScanner:
         max_spread_cents = settings["max_spread_cents"]
         min_days = settings["min_settlement_days"]
 
-        # Step 1: Fetch markets (server-side filter: price 0.10~0.90, sorted by rate)
+        # Step 1: Fetch markets sorted by rate_per_day DESC.
+        # Do NOT pass min_price/max_price: the server-side price filter combined
+        # with order_by=rate_per_day makes /rewards/markets/multi hang (read
+        # timeout) or return HTTP 500, which silently emptied the scan. Token
+        # prices are filtered client-side below (Step 5 + best_bid check), so the
+        # server-side price filter was redundant anyway.
         logger.info("Fetching rewards markets...")
-        markets = self.api.get_rewards_markets(
-            min_price=0.10,
-            max_price=0.90,
-        )
+        markets = self.api.get_rewards_markets()
         logger.info("Fetched %d markets, filtering...", len(markets))
 
         eligible = []
