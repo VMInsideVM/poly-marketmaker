@@ -4,7 +4,13 @@ from unittest.mock import MagicMock, patch
 from engine.manager import WalletWorker
 
 
-def _worker(api, db):
+def _worker(api, db, cap=5):
+    # The buy-order cap is read live from db.get_settings() at placement time
+    # (not the constructor snapshot), so tests seed it on the db mock.
+    db.get_settings.return_value = {
+        "max_buy_orders_per_wallet": cap,
+        "cooldown_minutes": 20,
+    }
     return WalletWorker(api, db, "0xWALLET", {"fill_check_interval_sec": 5})
 
 
@@ -58,6 +64,10 @@ def test_no_limit_places_on_all_markets_regression():
 
 
 def _worker_capped(api, db, cap):
+    db.get_settings.return_value = {
+        "max_buy_orders_per_wallet": cap,
+        "cooldown_minutes": 20,
+    }
     return WalletWorker(
         api,
         db,
@@ -184,3 +194,98 @@ def test_skipped_markets_do_not_count_toward_limit():
     with patch("engine.strategy.determine_order_price", side_effect=prices):
         worker.place_orders(markets, limit=3)
     assert api.place_limit_buy.call_count == 3
+
+
+def test_cap_read_live_from_db_not_constructor_snapshot():
+    # The cap must be read live from db.get_settings() so a config change takes
+    # effect on the next placement without restarting the engine. Constructor
+    # snapshot says 10, live DB says 2 -> only 2 buys are placed.
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = WalletWorker(
+        api,
+        db,
+        "0xWALLET",
+        {"fill_check_interval_sec": 5, "max_buy_orders_per_wallet": 10},
+    )
+    db.get_settings.return_value = {
+        "max_buy_orders_per_wallet": 2,
+        "cooldown_minutes": 20,
+    }
+    markets = [_market(i) for i in range(5)]
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders(markets)
+    assert api.place_limit_buy.call_count == 2  # live cap 2, not snapshot 10
+
+
+def test_cancels_excess_buys_over_cap_keeping_oldest():
+    # Existing open buys exceed the live cap -> cancel the NEWEST excess
+    # (keep the oldest by created_at = best queue priority) down to the cap.
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = [
+        {"id": "old1", "side": "BUY", "asset_id": "a1", "created_at": 100},
+        {"id": "old2", "side": "BUY", "asset_id": "a2", "created_at": 200},
+        {"id": "new1", "side": "BUY", "asset_id": "a3", "created_at": 300},
+        {"id": "new2", "side": "BUY", "asset_id": "a4", "created_at": 400},
+    ]
+    api.get_balance.return_value = 1000.0
+    worker = _worker_capped(api, db, cap=2)
+    worker.place_orders([])  # no markets; only cap enforcement runs
+    api.cancel_orders.assert_called_once()
+    cancelled = set(api.cancel_orders.call_args[0][0])
+    assert cancelled == {"new1", "new2"}
+    api.place_limit_buy.assert_not_called()  # over cap -> no room for new
+
+
+def test_excess_cancel_logged_to_actions():
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = [
+        {"id": "old1", "side": "BUY", "asset_id": "a1", "created_at": 100},
+        {"id": "new1", "side": "BUY", "asset_id": "a2", "created_at": 300},
+    ]
+    api.get_balance.return_value = 1000.0
+    worker = _worker_capped(api, db, cap=1)
+    worker.place_orders([])
+    ats = [c.kwargs.get("action_type") for c in db.record_action.call_args_list]
+    assert "cap_cancel_excess" in ats
+
+
+def test_no_excess_cancel_when_at_cap():
+    # Exactly at cap (not over) -> existing buys are kept untouched.
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = [
+        {"id": "o1", "side": "BUY", "asset_id": "a1", "created_at": 100},
+        {"id": "o2", "side": "BUY", "asset_id": "a2", "created_at": 200},
+    ]
+    api.get_balance.return_value = 1000.0
+    worker = _worker_capped(api, db, cap=2)
+    worker.place_orders([])
+    api.cancel_orders.assert_not_called()
+
+
+def test_excess_cancel_ignores_sell_orders():
+    # Only BUY orders count toward the buy cap; resting SELLs (take-profit) are
+    # never cancelled by cap enforcement.
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = [
+        {"id": "b1", "side": "BUY", "asset_id": "a1", "created_at": 100},
+        {"id": "s1", "side": "SELL", "asset_id": "a2", "created_at": 50},
+        {"id": "b2", "side": "BUY", "asset_id": "a3", "created_at": 200},
+    ]
+    api.get_balance.return_value = 1000.0
+    worker = _worker_capped(api, db, cap=1)
+    worker.place_orders([])
+    cancelled = set(api.cancel_orders.call_args[0][0])
+    assert cancelled == {"b2"}  # newest BUY only; SELL s1 untouched

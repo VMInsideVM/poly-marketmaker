@@ -93,12 +93,41 @@ class WalletWorker:
             logger.error("get_open_orders failed for %s: %s", self.wallet_address, e)
             return
         buy_orders = [o for o in open_orders if o.get("side") == "BUY"]
-        open_buy_assets = {o.get("asset_id") for o in buy_orders}
 
-        # Cap the wallet's TOTAL open buy orders at max_buy_orders_per_wallet:
+        # Hard per-wallet cap on the TOTAL open buy orders. Read live from
+        # settings (not the constructor snapshot) so a config change takes
+        # effect on the next placement without restarting the engine.
+        max_buys = int(self.db.get_settings().get("max_buy_orders_per_wallet", 5))
+
+        # If existing buys already exceed the cap (e.g. the user just lowered
+        # it), cancel the excess down to the cap. Keep the oldest orders
+        # (smallest created_at = longest queue priority / most rewards) and
+        # cancel the newest excess.
+        if len(buy_orders) > max_buys:
+            ordered = sorted(
+                buy_orders, key=lambda o: float(o.get("created_at", 0) or 0)
+            )
+            keep, excess = ordered[:max_buys], ordered[max_buys:]
+            excess_ids = [o["id"] for o in excess if o.get("id")]
+            if excess_ids:
+                try:
+                    self.api.cancel_orders(excess_ids)
+                    logger.info(
+                        "Cancelled %d excess buy orders for %s (cap %d)",
+                        len(excess_ids),
+                        self.wallet_address,
+                        max_buys,
+                    )
+                    self._record_cap_cancel(excess)
+                    buy_orders = keep
+                except Exception as e:
+                    logger.error(
+                        "Cancel excess buys for %s failed: %s", self.wallet_address, e
+                    )
+
+        open_buy_assets = {o.get("asset_id") for o in buy_orders}
         # available slots = cap - existing buys. Recomputed each distribution
         # from the live order count, so the total never exceeds the cap.
-        max_buys = int(self.settings.get("max_buy_orders_per_wallet", 5))
         slots = max_buys - len(buy_orders)
         if slots <= 0:
             logger.info(
@@ -191,6 +220,29 @@ class WalletWorker:
                     break
             except Exception as e:
                 logger.error("Error placing order for %s: %s", market["market_name"], e)
+
+    def _record_cap_cancel(self, excess: list):
+        """Log each buy order cancelled for exceeding the per-wallet cap."""
+        for o in excess:
+            try:
+                self.db.record_action(
+                    wallet=self.wallet_address,
+                    market_id=o.get("market", ""),
+                    action_type="cap_cancel_excess",
+                    side="-",
+                    price=-1,
+                    size=int(float(o.get("original_size", 0) or 0)),
+                    reason=(
+                        "超过每钱包挂买单上限，撤销多余买单"
+                        "（保留挂得最久的，丢失队列优先级最小）"
+                    ),
+                    price_basis=(
+                        f"撤 order_id={o.get('id')}；上限=max_buy_orders_per_wallet；"
+                        f"来源：CLOB get_open_orders"
+                    ),
+                )
+            except Exception as e:
+                logger.warning("record_action(cap_cancel_excess) failed: %s", e)
 
     def _record_place_buy(self, market, order_price, max_spread, rmin, rmax):
         """Log a successful buy placement to the actions table (never raises)."""
