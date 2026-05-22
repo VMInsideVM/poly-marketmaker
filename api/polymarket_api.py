@@ -15,6 +15,8 @@ from py_clob_client_v2.clob_types import (
     TradeParams,
     OrdersScoringParams,
 )
+from py_builder_relayer_client.builder.derive import derive as _derive_safe
+from py_builder_relayer_client.config import get_contract_config
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,19 @@ SIG_GNOSIS_SAFE = 2  # Browser-wallet proxy signature type
 # Rewards API is part of the CLOB API
 REWARDS_API = POLYMARKET_HOST
 DATA_API_HOST = "https://data-api.polymarket.com"
+
+
+def derive_deposit_address(eoa_address: str) -> str:
+    """Polymarket deposit-wallet (funder) address for a given signer EOA.
+
+    Polymarket deploys a deterministic 1-of-1 Gnosis Safe per EOA via CREATE2;
+    that Safe — not the EOA — holds the user's USDC/positions and is what the
+    site shows as the deposit address. We derive it with the official relayer
+    client so the user only ever needs to enter their private key. Matches
+    signature_type=2 (POLY_GNOSIS_SAFE).
+    """
+    cfg = get_contract_config(CHAIN_ID)
+    return _derive_safe(eoa_address, cfg.safe_factory)
 
 
 class PolymarketAPI:
@@ -44,16 +59,22 @@ class PolymarketAPI:
         Args:
             private_key: Hex private key string.
             signature_type: 2=GNOSIS_SAFE (default, browser-wallet proxy).
-            funder: Proxy wallet address. If None, derived from private key.
+            funder: Deposit-wallet (Gnosis Safe) address. If None, it is
+                derived from the signer EOA via derive_deposit_address so the
+                user only needs to provide a private key.
         """
         self.private_key = private_key
-        # Step 1: Create temp client to derive API creds
+        # Step 1: Create temp client to derive API creds + the signer EOA.
         temp_client = ClobClient(
             host=POLYMARKET_HOST,
             key=private_key,
             chain_id=CHAIN_ID,
         )
         api_creds = temp_client.derive_api_key()
+        # The deposit wallet (where funds live) is the Polymarket Gnosis Safe
+        # deterministically derived from the EOA — NOT the EOA itself. Derive
+        # it when no funder is supplied.
+        eoa_address = temp_client.get_address()
         # Step 2: Create full client with L2 auth
         self.client = ClobClient(
             host=POLYMARKET_HOST,
@@ -61,7 +82,7 @@ class PolymarketAPI:
             chain_id=CHAIN_ID,
             creds=api_creds,
             signature_type=signature_type,
-            funder=funder or temp_client.get_address(),
+            funder=funder or derive_deposit_address(eoa_address),
         )
 
     def get_address(self) -> str:

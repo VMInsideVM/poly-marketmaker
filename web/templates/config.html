@@ -6,13 +6,13 @@
     <h2>钱包管理</h2>
     <div class="form-inline">
         <input type="password" id="new-private-key" placeholder="钱包私钥（64位十六进制）">
-        <input type="text" id="new-funder" placeholder="存款钱包地址（0x开头，42位）">
+        <input type="text" id="new-funder" placeholder="存款钱包地址（可选，留空自动识别）">
         <button class="btn btn-primary" onclick="addWallet()">添加钱包</button>
     </div>
-    <p style="color:#888;font-size:12px;margin-top:4px;">存款地址 = 在 polymarket.com/settings 看到的、持有资金的地址</p>
+    <p style="color:#888;font-size:12px;margin-top:4px;">一般只需输入私钥，存款钱包地址会自动识别；若自动识别的地址与 polymarket.com/settings 不一致，可在第二个框手动填写正确的存款地址。</p>
     <table class="data-table" id="wallet-config-table">
         <thead>
-            <tr><th>地址</th><th>状态</th><th>操作</th></tr>
+            <tr><th>地址</th><th>存款地址</th><th>状态</th><th>操作</th></tr>
         </thead>
         <tbody id="wallet-config-body"></tbody>
     </table>
@@ -99,6 +99,7 @@ function loadWallets() {
         tbody.innerHTML = wallets.map(w => `
             <tr>
                 <td title="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</td>
+                <td title="${w.funder || ''}">${w.funder ? w.funder.slice(0,6)+'...'+w.funder.slice(-4) : '-'}</td>
                 <td>
                     <label class="switch">
                         <input type="checkbox" ${w.enabled ? 'checked' : ''}
@@ -120,15 +121,18 @@ function addWallet() {
     const key = input.value.trim();
     const funder = funderInput.value.trim();
     if (!key) { alert('请输入私钥'); return; }
-    if (!funder) { alert('请输入存款钱包地址'); return; }
+    const body = funder ? {private_key: key, funder: funder} : {private_key: key};
     fetch('/api/wallets', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({private_key: key, funder: funder}),
+        body: JSON.stringify(body),
     }).then(r => r.json()).then(data => {
         if (data.error) { alert(data.error); return; }
         input.value = '';
         funderInput.value = '';
+        alert('钱包添加成功。\n\n存款钱包地址：\n' + data.funder +
+              '\n\n请到 polymarket.com/settings 核对：此地址应与你看到的存款（资金）地址一致。' +
+              '\n若不一致，请删除该钱包，并在“存款钱包地址”框手动填写正确地址后重新添加。');
         loadWallets();
     });
 }

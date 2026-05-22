@@ -271,19 +271,23 @@ def api_add_wallet():
         )
     private_key = "0x" + private_key
 
-    # Deposit wallet address (funder)
-    funder = data.get("funder", "").strip()
-    funder = re.sub(r"[^0-9a-fA-Fx]", "", funder)
+    # Optional deposit-wallet (funder) override. Normally left blank and
+    # auto-derived from the private key; the user may supply one when the
+    # auto-derived address doesn't match polymarket.com/settings.
+    funder = re.sub(r"[^0-9a-fA-Fx]", "", data.get("funder", "").strip())
     if funder and not funder.startswith("0x"):
         funder = "0x" + funder
-    if not funder or len(funder) != 42:
-        return jsonify({"error": "请输入有效的存款钱包地址（42位，0x开头）"}), 400
+    if funder and len(funder) != 42:
+        return jsonify({"error": "存款钱包地址格式错误：需要42位、0x开头"}), 400
 
     from api.polymarket_api import PolymarketAPI
 
+    # PolymarketAPI derives the funder from the EOA when none is supplied;
+    # get_funder() then returns whichever address (override or derived) is used.
     try:
-        api = PolymarketAPI(private_key, funder=funder)
+        api = PolymarketAPI(private_key, funder=funder or None)
         address = api.get_address()
+        funder = api.get_funder()
     except Exception as e:
         return jsonify({"error": f"私钥无效: {e}"}), 400
 
