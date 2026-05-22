@@ -6,6 +6,7 @@ from py_clob_client_v2.clob_types import TradeParams
 from engine.fills import select_new_buy_fills
 from engine.take_profit import plan_take_profit
 from engine.strategy_check import needs_replace
+from engine.eligibility import recheck_resting_buy
 from engine.risk import stop_loss_triggered
 from engine.strategy import determine_order_price
 from engine.rewards import extract_max_spread
@@ -24,8 +25,6 @@ class OrderMonitor:
         # Watermark: lower bound for get_trades(after=) — bounds fetch size;
         # real idempotency is _seen_fill_keys.
         self._after_ts: float = 0.0
-        # condition_id -> (max_spread, fetched_at) TTL cache for Step 3.
-        self._max_spread_cache: dict = {}
         # condition_id -> ((max_spread, reward_total), fetched_at) and
         # condition_id -> (end_ts, fetched_at): independent TTL caches for the
         # Step 3 scanner-eligibility re-check.
@@ -407,26 +406,6 @@ class OrderMonitor:
             except Exception as e:
                 logger.error("Compliance error on %s: %s", o.get("id"), e)
 
-    def _market_max_spread(self, condition_id: str) -> int | None:
-        """Real rewards_max_spread for a market, TTL-cached. None if unknown."""
-        if not condition_id:
-            return None
-        ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
-        now = time.time()
-        hit = self._max_spread_cache.get(condition_id)
-        if hit and (now - hit[1]) < ttl:
-            return hit[0]
-        try:
-            items = self.api.get_rewards_for_market(condition_id)
-        except Exception as e:
-            logger.warning("get_rewards_for_market(%s) failed: %s", condition_id, e)
-            return None
-        ms = extract_max_spread(items)
-        if ms is None:
-            return None
-        self._max_spread_cache[condition_id] = (ms, now)
-        return ms
-
     def _market_rewards_info(self, condition_id: str) -> dict:
         """Per-market {"max_spread", "reward_total", "end_ts"}, each None when
         unavailable. max_spread + reward_total share one rewards cache; end_ts
@@ -485,17 +464,74 @@ class OrderMonitor:
 
     def _check_compliance(self, o: dict):
         token_id = o.get("asset_id", "")
+        cid = o.get("market", "")
+        settings = self.db.get_settings()
         ob = self.api.get_orderbook(token_id)
         bids = sorted(ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True)
         asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))
+        best_bid = float(bids[0]["price"]) if bids else None
+        best_ask = float(asks[0]["price"]) if asks else None
+        best_bid_cents = best_bid * 100 if best_bid is not None else None
+        spread_cents = (
+            (best_ask - best_bid) * 100
+            if (best_bid is not None and best_ask is not None)
+            else None
+        )
+
+        # Scanner-eligibility re-check (runs even if the book is empty: reward /
+        # settlement still apply). reward_total / max_spread / end_ts are fetched
+        # once here and the max_spread is reused by the price-compliance path.
+        info = self._market_rewards_info(cid)
+        max_spread = info["max_spread"]
+        end_ts = info["end_ts"]
+        days_left = ((end_ts - time.time()) / 86400) if end_ts else None
+        cancel, reason = recheck_resting_buy(
+            info["reward_total"], days_left, best_bid_cents, spread_cents, settings
+        )
+        if cancel:
+            old_price = float(o.get("price", 0) or 0)
+            osize = int(float(o.get("original_size", 0) or 0))
+            try:
+                self.api.cancel_orders([o["id"]])
+            except Exception as e:
+                logger.warning("Eligibility cancel %s failed: %s", o.get("id"), e)
+                return
+            self._record_action(
+                market_id=cid,
+                action_type="eligibility_cancel",
+                side="-",
+                price=-1,
+                size=osize,
+                reason=reason,
+                price_basis=(
+                    "市场已不满足扫描初筛(奖励/结算/价格/价差)；"
+                    "来源：CLOB get_orderbook + get_rewards_for_market + get_market"
+                ),
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price=f"{old_price:.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="复查撤单(市场不合格)",
+                detail=reason,
+            )
+            logger.info(
+                "[Step3] eligibility cancel %s market %s: %s", o.get("id"), cid, reason
+            )
+            return
+
+        # --- price compliance (unchanged behavior) ---
         if not bids or not asks:
             logger.info(
                 "[Step3] 单 %s 市场 %s | 盘口为空，本轮跳过",
                 o.get("id"),
-                o.get("market", ""),
+                cid,
             )
             self._status_add(
-                market=o.get("market", ""),
+                market=cid,
                 side="买入",
                 price=f"{float(o.get('price', 0) or 0):.4f}",
                 size=str(o.get("original_size", "")),
@@ -505,22 +541,19 @@ class OrderMonitor:
                 detail="盘口为空",
             )
             return
-        best_bid = float(bids[0]["price"])
-        best_ask = float(asks[0]["price"])
         midpoint = (best_bid + best_ask) / 2
         tick = float(ob.get("tick_size", "0.01"))
         tick_str = ob.get("tick_size", "0.01")
-        max_spread = self._market_max_spread(o.get("market", ""))
         if max_spread is None:
             logger.info(
                 "[Step3] 单 %s 市场 %s 现价 %.4f | 取不到 rewards_max_spread，"
                 "本轮跳过（不撤不重挂）",
                 o.get("id"),
-                o.get("market", ""),
+                cid,
                 float(o.get("price", 0) or 0),
             )
             self._status_add(
-                market=o.get("market", ""),
+                market=cid,
                 side="买入",
                 price=f"{float(o.get('price', 0) or 0):.4f}",
                 size=str(o.get("original_size", "")),
@@ -554,7 +587,7 @@ class OrderMonitor:
             "[Step3] 单 %s 市场 %s 现价 %.4f | 盘口 bid %.4f ask %.4f mid %.4f "
             "tick %.4f | max_spread=%d 区间[%.4f,%.4f] | 应挂价 %s | 判定 %s",
             o.get("id"),
-            o.get("market", ""),
+            cid,
             float(o.get("price", 0) or 0),
             best_bid,
             best_ask,
@@ -567,7 +600,7 @@ class OrderMonitor:
             action_zh,
         )
         self._status_add(
-            market=o.get("market", ""),
+            market=cid,
             side="买入",
             price=f"{float(o.get('price', 0) or 0):.4f}",
             size=str(o.get("original_size", "")),
@@ -583,7 +616,6 @@ class OrderMonitor:
             return
         old_price = float(o.get("price", 0) or 0)
         osize = int(float(o.get("original_size", 0) or 0))
-        cid = o.get("market", "")
         basis = (
             f"旧价 {old_price:.4f}；区间[{rmin:.4f},{rmax:.4f}] "
             f"mid{midpoint:.4f} ms{max_spread} tick{tick:.4f}；"

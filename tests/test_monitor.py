@@ -1146,3 +1146,124 @@ class TestMarketRewardsInfo:
         monitor._market_rewards_info("cid1")
         assert api.get_rewards_for_market.call_count == 1
         assert api.get_market_end_ts.call_count == 1
+
+
+class TestStep3EligibilityRecheck:
+    # Full scanner thresholds so the gates are active.
+    THRESH = {
+        "min_reward_usd": 100.0,
+        "min_settlement_days": 4,
+        "min_price_cents": 10.0,
+        "max_price_cents": 50.0,
+        "max_spread_cents": 3.0,
+    }
+
+    def _ob(self, best_bid="0.30", best_ask="0.31", tick="0.01"):
+        return {
+            "bids": [{"price": best_bid, "size": "1000"}],
+            "asks": [{"price": best_ask, "size": "1000"}],
+            "tick_size": tick,
+        }
+
+    def _buy(self):
+        return [
+            {
+                "id": "o1",
+                "side": "BUY",
+                "asset_id": "tok1",
+                "market": "cid1",
+                "size_matched": "0",
+                "price": "0.30",
+                "original_size": "500",
+            }
+        ]
+
+    def _far_future(self):
+        import time as _t
+
+        return _t.time() + 60 * 86400  # 60 days out
+
+    def test_cancels_when_reward_below_threshold(self):
+        monitor, api, db = _make_monitor(self.THRESH)
+        api.get_open_orders.return_value = self._buy()
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 50}]}
+        ]
+        api.get_market_end_ts.return_value = self._far_future()
+        monitor.check_sell_orders()
+        api.cancel_orders.assert_called_once_with(["o1"])
+        api.place_limit_buy.assert_not_called()
+
+    def test_cancels_when_near_settlement(self):
+        import time as _t
+
+        monitor, api, db = _make_monitor(self.THRESH)
+        api.get_open_orders.return_value = self._buy()
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 500}]}
+        ]
+        api.get_market_end_ts.return_value = _t.time() + 1 * 86400  # 1 day < 4
+        monitor.check_sell_orders()
+        api.cancel_orders.assert_called_once_with(["o1"])
+
+    def test_cancels_when_bid_out_of_band(self):
+        monitor, api, db = _make_monitor(self.THRESH)
+        api.get_open_orders.return_value = self._buy()
+        api.get_orderbook.return_value = self._ob(best_bid="0.60", best_ask="0.61")
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 500}]}
+        ]
+        api.get_market_end_ts.return_value = self._far_future()
+        monitor.check_sell_orders()
+        api.cancel_orders.assert_called_once_with(["o1"])
+
+    def test_cancels_when_spread_too_wide(self):
+        monitor, api, db = _make_monitor(self.THRESH)
+        api.get_open_orders.return_value = self._buy()
+        api.get_orderbook.return_value = self._ob(
+            best_bid="0.30", best_ask="0.35"
+        )  # 5c >= 3c
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 500}]}
+        ]
+        api.get_market_end_ts.return_value = self._far_future()
+        monitor.check_sell_orders()
+        api.cancel_orders.assert_called_once_with(["o1"])
+
+    def test_records_eligibility_cancel_action(self):
+        monitor, api, db = _make_monitor(self.THRESH)
+        api.get_open_orders.return_value = self._buy()
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 50}]}
+        ]
+        api.get_market_end_ts.return_value = self._far_future()
+        monitor.check_sell_orders()
+        ats = [c.kwargs.get("action_type") for c in db.record_action.call_args_list]
+        assert "eligibility_cancel" in ats
+
+    def test_keeps_and_runs_compliance_when_all_pass(self):
+        monitor, api, db = _make_monitor(self.THRESH)
+        api.get_open_orders.return_value = self._buy()
+        api.get_orderbook.return_value = self._ob()  # bid 30c in band, spread 1c
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 500}]}
+        ]
+        api.get_market_end_ts.return_value = self._far_future()
+        with patch("engine.monitor.needs_replace", return_value="keep"):
+            monitor.check_sell_orders()
+        api.cancel_orders.assert_not_called()
+
+    def test_keeps_when_reward_and_end_ts_unknown(self):
+        # rewards items lack rate, end_ts unknown -> those gates skipped;
+        # bid in band & spread narrow -> keep -> falls to compliance.
+        monitor, api, db = _make_monitor(self.THRESH)
+        api.get_open_orders.return_value = self._buy()
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        api.get_market_end_ts.return_value = None
+        with patch("engine.monitor.needs_replace", return_value="keep"):
+            monitor.check_sell_orders()
+        api.cancel_orders.assert_not_called()
