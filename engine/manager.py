@@ -524,11 +524,19 @@ class EngineManager:
         """Run one scan cycle: find eligible markets, distribute to wallets."""
         eligible = self._scan_with_status()
 
+        # Distribute lowest-competitiveness first (less competition = larger
+        # reward share), matching the manual place_all_orders path. The scan
+        # returns markets in rate_per_day DESC order, so without this sort auto
+        # mode would diverge from the documented "lowest competitiveness first".
+        sorted_markets = sorted(
+            eligible, key=lambda m: float(m.get("market_competitiveness", 0) or 0)
+        )
+
         # Distribute to each running wallet
         for address, worker in self.engines.items():
             if worker.running:
                 try:
-                    worker.place_orders(eligible)
+                    worker.place_orders(sorted_markets)
                 except Exception as e:
                     logger.error("Error distributing to wallet %s: %s", address, e)
 

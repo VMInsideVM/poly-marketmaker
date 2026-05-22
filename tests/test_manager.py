@@ -244,6 +244,35 @@ class TestSharedScanWithStatus:
         worker.place_orders.assert_called_once_with([{"market_id": "m9"}])
         db.save_eligible_markets.assert_not_called()
 
+    def test_auto_do_scan_distributes_sorted_by_competitiveness(self):
+        # Auto mode must distribute lowest-competitiveness first, matching the
+        # manual place_all_orders path and the documented behavior — not the raw
+        # scan order (rate_per_day DESC).
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xABC": worker}
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def scan(self, on_progress=None, on_found=None):
+                # returned OUT of competitiveness order
+                return [
+                    {"market_id": "hi", "market_competitiveness": 0.9},
+                    {"market_id": "lo", "market_competitiveness": 0.1},
+                    {"market_id": "mid", "market_competitiveness": 0.5},
+                ]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._do_scan()
+
+        worker.place_orders.assert_called_once()
+        distributed = worker.place_orders.call_args[0][0]
+        assert [m["market_id"] for m in distributed] == ["lo", "mid", "hi"]
+
     def test_scan_failure_resets_status_and_keeps_last_scan_time(self):
         manager, db = _make_manager()
         manager._scanner_api = MagicMock()
