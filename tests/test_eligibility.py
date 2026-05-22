@@ -41,6 +41,12 @@ def test_keeps_when_days_left_negative():
     assert cancel is False
 
 
+def test_keeps_when_days_left_equals_threshold():
+    # boundary: days_left == min_settlement_days -> NOT excluded (condition is < min_days)
+    cancel, reason = recheck_resting_buy(150.0, 4.0, 30.0, 2.0, S)
+    assert cancel is False
+
+
 def test_keeps_when_days_left_unknown():
     cancel, reason = recheck_resting_buy(150.0, None, 30.0, 2.0, S)
     assert cancel is False

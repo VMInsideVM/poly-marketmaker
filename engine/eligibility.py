@@ -43,7 +43,7 @@ def recheck_resting_buy(
     if reward_total is not None and reward_total < min_reward:
         return (
             True,
-            f"市场日奖励 ${reward_total:.0f} 跌破阈值 ${min_reward:.0f}，撤买单",
+            f"市场日奖励 ${reward_total:.1f} 跌破阈值 ${min_reward:.1f}，撤买单",
         )
 
     # 2. Settlement days (scanner.py:92) — only the [0, min_days) window excludes;
