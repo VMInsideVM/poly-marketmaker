@@ -1,6 +1,7 @@
 """web/routes.py — Flask routes and API endpoints."""
 
 import os
+import sys
 import hashlib
 import logging
 from functools import wraps
@@ -22,10 +23,16 @@ from config import DB_PATH, HOST, PORT
 
 logger = logging.getLogger(__name__)
 
+# When packaged by PyInstaller the source tree isn't on disk; templates and
+# static files are bundled under sys._MEIPASS/web/. In dev, _MEIPASS is absent
+# so we fall back to the project root (parent of this web/ package).
+_BASE = getattr(
+    sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 app = Flask(
     __name__,
-    template_folder=os.path.join(os.path.dirname(__file__), "templates"),
-    static_folder=os.path.join(os.path.dirname(__file__), "static"),
+    template_folder=os.path.join(_BASE, "web", "templates"),
+    static_folder=os.path.join(_BASE, "web", "static"),
 )
 app.secret_key = os.urandom(32)
 

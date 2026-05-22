@@ -5,6 +5,7 @@ market_maker.log
 .pytest_cache/
 dist/
 build/
+installer/
 *.spec
 
 .worktrees/

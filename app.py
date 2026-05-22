@@ -8,14 +8,14 @@ import threading
 from models.database import Database
 from engine.manager import EngineManager
 from web.routes import app, init_app, init_manager, set_encryption_key
-from config import DB_PATH, HOST, PORT
+from config import DB_PATH, LOG_PATH, HOST, PORT
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("market_maker.log", encoding="utf-8"),
+        logging.FileHandler(LOG_PATH, encoding="utf-8"),
     ],
 )
 logger = logging.getLogger(__name__)
