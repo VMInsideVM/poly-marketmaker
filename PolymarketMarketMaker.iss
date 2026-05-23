@@ -7,7 +7,7 @@
 ;       不在安装目录内，因此卸载不会动用户数据，安装包里也绝不含任何私钥或历史。
 
 #define MyAppName "Polymarket 做市助手"
-#define MyAppVersion "1.0.3"
+#define MyAppVersion "1.0.4"
 #define MyAppPublisher "Polymarket 做市助手"
 #define MyAppExeName "MarketMaker.exe"
 
