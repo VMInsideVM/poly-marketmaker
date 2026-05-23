@@ -11,6 +11,7 @@
     <button class="btn btn-sm" onclick="refreshStatus()">刷新</button>
 </div>
 
+<div class="table-scroll">
 <table class="data-table">
     <thead>
         <tr>
@@ -21,6 +22,7 @@
     </thead>
     <tbody id="status-body"></tbody>
 </table>
+</div>
 
 <h2 style="margin-top:2rem;">操作记录</h2>
 <div class="filter-bar">
@@ -34,6 +36,7 @@
     <label>结束日期：</label>
     <input type="date" id="act-end" onchange="refreshActions()">
 </div>
+<div class="table-scroll">
 <table class="data-table" style="table-layout:fixed;width:100%">
     <colgroup>
         <col style="width:13%"><col style="width:8%"><col style="width:11%">
@@ -49,15 +52,11 @@
     </thead>
     <tbody id="actions-body"></tbody>
 </table>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function escapeHtml(s) {
-    return String(s == null ? '' : s)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 function shortWallet(w) {
     return w && w.length > 12 ? w.slice(0, 6) + '..' + w.slice(-4) : (w || '');
 }
@@ -88,7 +87,7 @@ function refreshStatus() {
             return `<tr>
                 <td>${escapeHtml(t)}</td>
                 <td title="${escapeHtml(r.wallet)}">${escapeHtml(shortWallet(r.wallet))}</td>
-                <td>${escapeHtml(r.market)}</td>
+                <td>${marketCell(r.market_name, r.market, r.market_url)}</td>
                 <td>${escapeHtml(r.side)}</td>
                 <td>${escapeHtml(r.price)}</td>
                 <td>${escapeHtml(r.size)}</td>
@@ -135,7 +134,7 @@ function refreshActions() {
             <tr>
                 <td>${escapeHtml(new Date(a.created_at * 1000).toLocaleString('zh-CN'))}</td>
                 <td title="${escapeHtml(a.wallet)}">${escapeHtml(shortWallet(a.wallet))}</td>
-                <td title="${escapeHtml(a.market_id)}">${escapeHtml(a.market_id.slice(0,8) + '...' + a.market_id.slice(-6))}</td>
+                <td>${marketCell(a.market_name, a.market_id, a.market_url)}</td>
                 <td class="${actionClass(a.action_type)}">${escapeHtml(ACTION_LABELS[a.action_type] || a.action_type)}</td>
                 <td>${escapeHtml(a.side)}</td>
                 <td>${a.price < 0 ? '-' : escapeHtml(a.price.toFixed(4))}</td>
