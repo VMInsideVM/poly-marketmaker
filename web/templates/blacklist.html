@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>黑名单</h1>
+<p class="hint">加入黑名单的市场,引擎运行期任何钱包都不会再挂它的买单(YES/NO 都拦)。加入时会撤掉所有钱包挂在该市场的买单;已成交持仓不受影响。</p>
+
+<div class="filter-bar">
+  <label>condition ID：</label>
+  <input type="text" id="bl-cid" placeholder="粘贴完整 condition_id (0x...)" style="width:420px">
+  <label>备注：</label>
+  <input type="text" id="bl-note" placeholder="可选">
+  <button class="btn btn-sm btn-danger" onclick="addBlacklist()">加入黑名单</button>
+</div>
+
+<table class="data-table">
+  <thead><tr><th>市场</th><th>加入时间</th><th>备注</th><th>操作</th></tr></thead>
+  <tbody id="blacklist-body"></tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function refreshBlacklist() {
+  fetch('/api/blacklist').then(r => r.json()).then(rows => {
+    const body = document.getElementById('blacklist-body');
+    if (!rows.length) { body.innerHTML = '<tr><td colspan="4">黑名单为空</td></tr>'; return; }
+    body.innerHTML = rows.map(r => `
+      <tr>
+        <td>${marketCell(r.market_name, r.condition_id, r.market_url)}</td>
+        <td>${r.added_at ? new Date(r.added_at*1000).toLocaleString('zh-CN') : '-'}</td>
+        <td>${escapeHtml(r.note || '')}</td>
+        <td><button class="btn btn-sm" onclick="removeBlacklist('${escapeHtml(r.condition_id)}')">移除</button></td>
+      </tr>`).join('');
+  });
+}
+
+function addBlacklist() {
+  const cid = document.getElementById('bl-cid').value.trim();
+  const note = document.getElementById('bl-note').value.trim();
+  if (!cid) { alert('请粘贴 condition_id'); return; }
+  if (!confirm('加入黑名单将撤掉所有钱包挂在该市场的买单,确定?')) return;
+  fetch('/api/blacklist', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({condition_id: cid, note: note})})
+    .then(r => r.json()).then(d => {
+      if (d.error) { alert(d.error); return; }
+      if (d.cancelled) alert('已加入黑名单,撤掉了 ' + d.cancelled + ' 笔买单');
+      document.getElementById('bl-cid').value = '';
+      document.getElementById('bl-note').value = '';
+      refreshBlacklist();
+    });
+}
+
+function removeBlacklist(cid) {
+  if (!confirm('从黑名单移除该市场?(以后会重新参与挂单)')) return;
+  fetch('/api/blacklist/' + encodeURIComponent(cid), {method:'DELETE'})
+    .then(() => refreshBlacklist());
+}
+
+refreshBlacklist();
+</script>
+{% endblock %}

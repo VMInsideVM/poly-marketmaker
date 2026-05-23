@@ -15,6 +15,7 @@
             <a href="{{ url_for('orders_page') }}" class="{% if request.endpoint == 'orders_page' %}active{% endif %}">订单管理</a>
             <a href="{{ url_for('history_page') }}" class="{% if request.endpoint == 'history_page' %}active{% endif %}">历史记录</a>
             <a href="{{ url_for('logs_page') }}" class="{% if request.endpoint == 'logs_page' %}active{% endif %}">监控状态</a>
+            <a href="{{ url_for('blacklist_page') }}" class="{% if request.endpoint == 'blacklist_page' %}active{% endif %}">黑名单</a>
             <a href="{{ url_for('logout') }}">退出</a>
         </div>
     </nav>

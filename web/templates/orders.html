@@ -101,7 +101,9 @@ function renderOrders(){
     <td>${o.side==='BUY' ? (o.scoring===true?'✓':(o.scoring===false?'✗':'?')) : '—'}</td>
     <td>${o.created_at? new Date(o.created_at*1000).toLocaleString('zh-CN'):'-'}</td>
     <td><button class="btn btn-sm btn-danger"
-        onclick="cancelOne('${o.order_id}','${o.wallet}')">撤单</button></td></tr>`).join('');
+        onclick="cancelOne('${o.order_id}','${o.wallet}')">撤单</button>
+        <button class="btn btn-sm btn-warning"
+        onclick="blacklistMarket('${o.market}')">加入黑名单</button></td></tr>`).join('');
 }
 
 function toggleAll(c){document.querySelectorAll('.order-check').forEach(x=>x.checked=c.checked);}
@@ -130,6 +132,16 @@ function cancelAllBuys(){
   fetch('/api/orders/cancel-all-buys',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({wallet:w||null})}).then(()=>refreshOrders());
+}
+function blacklistMarket(cid){
+  if(!cid){alert('该订单无市场信息');return;}
+  if(!confirm('加入黑名单将撤掉所有钱包在该市场的买单,确定?'))return;
+  fetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({condition_id:cid})}).then(r=>r.json()).then(d=>{
+      if(d.error){alert(d.error);return;}
+      if(d.cancelled)alert('已加入黑名单,撤掉了 '+d.cancelled+' 笔买单');
+      refreshOrders();
+    });
 }
 
 fetch('/api/wallets').then(r=>r.json()).then(ws=>{
