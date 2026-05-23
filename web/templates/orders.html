@@ -25,6 +25,7 @@
   <button class="btn btn-sm btn-danger" onclick="cancelSelected()">撤选中</button>
   <button class="btn btn-sm btn-danger" onclick="cancelAllBuys()">一键撤买单</button>
 </div>
+<div class="table-scroll">
 <table class="data-table">
   <thead><tr>
     <th><input type="checkbox" id="select-all" onchange="toggleAll(this)"></th>
@@ -37,13 +38,16 @@
   </tr></thead>
   <tbody id="orders-body"></tbody>
 </table>
+</div>
 
 <h2>当前持仓</h2>
+<div class="table-scroll">
 <table class="data-table">
   <thead><tr><th>钱包</th><th>市场</th><th>买入价</th><th>当前价</th>
   <th>止损价</th><th>盈亏</th></tr></thead>
   <tbody id="positions-body"></tbody>
 </table>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -65,7 +69,7 @@ function refreshOrders(){
   fetch(`/api/positions${qs}`).then(r=>r.json()).then(ps=>{
     document.getElementById('positions-body').innerHTML = ps.map(p=>`
       <tr><td title="${p.wallet}">${p.wallet.slice(0,6)}...${p.wallet.slice(-4)}</td>
-      <td>${p.market_name}</td><td>${(p.buy_price||0).toFixed(4)}</td>
+      <td>${marketCell(p.market_name, p.condition_id, p.market_url)}</td><td>${(p.buy_price||0).toFixed(4)}</td>
       <td>${p.current_price!=null?p.current_price.toFixed(4):'-'}</td>
       <td>${p.stop_price!=null?p.stop_price.toFixed(4):'-'}</td>
       <td class="${(p.pnl||0)>=0?'profit':'loss'}">${(p.pnl||0).toFixed(2)}</td></tr>`).join('');
@@ -91,7 +95,7 @@ function renderOrders(){
     <tr><td><input type="checkbox" class="order-check"
         data-id="${o.order_id}" data-wallet="${o.wallet}"></td>
     <td title="${o.wallet}">${o.wallet.slice(0,6)}...${o.wallet.slice(-4)}</td>
-    <td>${o.market||''}</td><td>${o.side}</td><td>${o.outcome||''}</td>
+    <td>${marketCell(o.market_name, o.market, o.market_url)}</td><td>${o.side}</td><td>${o.outcome||''}</td>
     <td>${(o.price||0).toFixed(4)}</td><td>${o.original_size}</td>
     <td>${o.size_matched}</td>
     <td>${o.side==='BUY' ? (o.scoring===true?'✓':(o.scoring===false?'✗':'?')) : '—'}</td>
