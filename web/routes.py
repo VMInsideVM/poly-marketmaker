@@ -595,7 +595,8 @@ def api_eligible_markets():
     """
     if not manager:
         # No manager yet, try loading from database
-        markets = db.get_eligible_markets()
+        markets = [dict(m) for m in db.get_eligible_markets()]
+        enrich_with_market_meta(markets, db.get_market_meta(), "market_id")
         return jsonify({"markets": markets, "last_scan_time": 0, "scan_status": "idle"})
 
     # During scanning, use memory (real-time updates)
@@ -608,6 +609,11 @@ def api_eligible_markets():
             if manager.eligible_markets
             else db.get_eligible_markets()
         )
+
+    # Enrich shallow copies so we never mutate the live in-memory eligible list
+    # (mutated by the scanner thread) or the DB rows.
+    markets = [dict(m) for m in markets]
+    enrich_with_market_meta(markets, db.get_market_meta(), "market_id")
 
     return jsonify(
         {
