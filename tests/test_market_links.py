@@ -54,3 +54,27 @@ def test_enrich_respects_id_key():
     meta = {"0xc1": {"name": "X", "market_slug": "s", "event_slug": ""}}
     enrich_with_market_meta(rows, meta, "market_id")
     assert rows[0]["market_url"] == "https://polymarket.com/market/s"
+
+
+def test_market_url_strips_whitespace_slug():
+    assert (
+        market_url({"market_slug": "  abc  ", "event_slug": ""})
+        == "https://polymarket.com/market/abc"
+    )
+
+
+def test_market_url_whitespace_only_market_slug_falls_back_to_event():
+    assert (
+        market_url({"market_slug": "   ", "event_slug": "xyz"})
+        == "https://polymarket.com/event/xyz"
+    )
+
+
+def test_enrich_multiple_rows_mixed_hit_miss():
+    rows = [{"market": "0xc1"}, {"market": "0xUNKNOWN"}]
+    meta = {"0xc1": {"name": "市场A", "market_slug": "a", "event_slug": ""}}
+    enrich_with_market_meta(rows, meta, "market")
+    assert rows[0]["market_name"] == "市场A"
+    assert rows[0]["market_url"] == "https://polymarket.com/market/a"
+    assert rows[1]["market_name"] == ""
+    assert rows[1]["market_url"] == ""
