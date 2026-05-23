@@ -386,7 +386,7 @@ class OrderMonitor:
             price=cur,
             size=size,
             reason=f"现价 {cur:.4f} 跌破成本价 {avg:.4f} 的止损阈值 avg×(1-止损比例{settings['stop_loss_pct']}%)，市价平仓止损",
-            price_basis=f"成本价 avgPrice={avg:.4f}、现价 curPrice={cur:.4f}；来源：Polymarket Data API /positions",
+            price_basis=f"成本价=get_trades加权 {avg:.4f}、现价 curPrice={cur:.4f}；来源：CLOB get_trades + Data API /positions",
         )
         logger.warning(
             "Stop-loss executed: asset=%s size=%s cur=%.4f avg=%.4f",

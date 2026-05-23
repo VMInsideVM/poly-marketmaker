@@ -1076,7 +1076,7 @@ class TestStep2ActionLog:
         )
         assert ms.kwargs["side"] == "卖出"
         assert ms.kwargs["price"] == 0.24
-        assert "avgPrice=0.3000" in ms.kwargs["price_basis"]
+        assert "get_trades加权 0.3000" in ms.kwargs["price_basis"]
         assert "Data API" in ms.kwargs["price_basis"]
         assert "止损阈值" in ms.kwargs["reason"]
 
