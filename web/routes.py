@@ -19,7 +19,7 @@ from models.database import Database
 from engine.manager import EngineManager
 from utils.crypto import derive_key, encrypt, decrypt
 from engine.monitor_status import get_snapshot
-from engine.market_links import enrich_with_market_meta
+from engine.market_links import enrich_with_market_meta, ensure_market_meta
 from config import DB_PATH, HOST, PORT
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,19 @@ def _wallet_apis(only: str = None) -> dict:
             except Exception as e:
                 app.logger.error("API build failed for %s: %s", addr, e)
     return out
+
+
+def _gamma_fetch(condition_ids):
+    """Gamma 解析回调(惰性导入 PolymarketAPI,沿用本文件的惰性导入约定)。"""
+    from api.polymarket_api import PolymarketAPI
+
+    return PolymarketAPI.gamma_markets_by_condition(condition_ids)
+
+
+def _enrich_rows(rows, id_key):
+    """给 rows 补市场名+链接:先用 Gamma 兜底补全 market_meta,再 enrich。"""
+    meta = ensure_market_meta([r.get(id_key, "") for r in rows], db, _gamma_fetch)
+    enrich_with_market_meta(rows, meta, id_key)
 
 
 def login_required(f):
@@ -198,7 +211,7 @@ def logs_page():
 @login_required
 def api_monitor_status():
     snap = get_snapshot()
-    enrich_with_market_meta(snap.get("rows", []), db.get_market_meta(), "market")
+    _enrich_rows(snap.get("rows", []), "market")
     return jsonify(snap)
 
 
@@ -457,7 +470,7 @@ def api_get_orders():
                     ),
                 }
             )
-    enrich_with_market_meta(result, db.get_market_meta(), "market")
+    _enrich_rows(result, "market")
     return jsonify({"orders": result, "errors": errors})
 
 
@@ -552,7 +565,7 @@ def api_get_positions():
                 )
         except Exception as e:
             app.logger.warning("positions failed for %s: %s", addr, e)
-    enrich_with_market_meta(out, db.get_market_meta(), "condition_id")
+    _enrich_rows(out, "condition_id")
     return jsonify(out)
 
 
@@ -578,7 +591,7 @@ def api_get_actions():
     types = request.args.get("types")
     action_types = types.split(",") if types else None
     rows = db.get_actions(wallet, start, end, action_types)
-    enrich_with_market_meta(rows, db.get_market_meta(), "market_id")
+    _enrich_rows(rows, "market_id")
     return jsonify(rows)
 
 
@@ -596,7 +609,7 @@ def api_eligible_markets():
     if not manager:
         # No manager yet, try loading from database
         markets = [dict(m) for m in db.get_eligible_markets()]
-        enrich_with_market_meta(markets, db.get_market_meta(), "market_id")
+        _enrich_rows(markets, "market_id")
         return jsonify({"markets": markets, "last_scan_time": 0, "scan_status": "idle"})
 
     # During scanning, use memory (real-time updates)
@@ -613,7 +626,7 @@ def api_eligible_markets():
     # Enrich shallow copies so we never mutate the live in-memory eligible list
     # (mutated by the scanner thread) or the DB rows.
     markets = [dict(m) for m in markets]
-    enrich_with_market_meta(markets, db.get_market_meta(), "market_id")
+    _enrich_rows(markets, "market_id")
 
     return jsonify(
         {
