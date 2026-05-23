@@ -25,7 +25,10 @@ def get_snapshot() -> dict:
     rows: list = []
     updated = 0.0
     for s in sorted(snaps, key=lambda s: s["ts"]):
-        rows.extend(s["rows"])
+        # Return independent copies: callers (the /api/monitor-status route)
+        # enrich rows in place, and the stored snapshot is read by worker
+        # threads — never hand out references to the stored dicts.
+        rows.extend(dict(r) for r in s["rows"])
         updated = max(updated, s["ts"])
     return {"updated": updated if updated else 0, "rows": rows}
 

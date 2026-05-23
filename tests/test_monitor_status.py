@@ -2,6 +2,7 @@
 
 import pytest
 from engine.monitor_status import set_snapshot, get_snapshot, clear_snapshot
+from engine import monitor_status
 
 
 @pytest.fixture(autouse=True)
@@ -44,3 +45,23 @@ def test_clear_snapshot_empties():
     set_snapshot("0xAB", [{"market": "a"}], 100.0)
     clear_snapshot()
     assert get_snapshot() == {"updated": 0, "rows": []}
+
+
+def test_get_snapshot_returns_independent_row_copies():
+    # Mutating rows returned by get_snapshot must NOT corrupt the stored snapshot,
+    # because the Flask route enriches (mutates) the returned rows in place.
+    monitor_status.set_snapshot("0xW", [{"market": "0xc1", "side": "BUY"}], 100.0)
+    first = monitor_status.get_snapshot()
+    first["rows"][0]["market_name"] = "INJECTED"
+    first["rows"][0]["market"] = "TAMPERED"
+    second = monitor_status.get_snapshot()
+    assert "market_name" not in second["rows"][0]
+    assert second["rows"][0]["market"] == "0xc1"
+
+
+def test_get_snapshot_merges_and_reports_max_ts():
+    monitor_status.set_snapshot("0xA", [{"market": "a"}], 100.0)
+    monitor_status.set_snapshot("0xB", [{"market": "b"}], 200.0)
+    snap = monitor_status.get_snapshot()
+    assert snap["updated"] == 200.0
+    assert {r["market"] for r in snap["rows"]} == {"a", "b"}
