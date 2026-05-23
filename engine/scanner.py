@@ -106,6 +106,14 @@ class MarketScanner:
             total_rate = sum(rc.get("rate_per_day", 0) for rc in rewards_config)
             end_date_str = market.get("end_date", "")
             question = market.get("question", "")
+            # 持久化市场元信息(名称+slug),供各页显示市场名与 Polymarket 链接。
+            # 该表不随扫描清空,逐次累积覆盖。
+            self.db.upsert_market_meta(
+                condition_id,
+                question,
+                market.get("market_slug", ""),
+                market.get("event_slug", ""),
+            )
             checked += 1
             if on_progress:
                 on_progress(checked, len(candidates), f"Checking: {question}")

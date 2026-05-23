@@ -187,3 +187,13 @@ class TestMarketFiltering:
         # tok_yes should pass, tok_no should be rejected (price > 50 cents)
         assert len(results) == 1
         assert results[0]["token_id"] == "tok_yes"
+
+
+def test_scan_upserts_market_meta_with_name_and_slugs():
+    scanner, api, db = _make_scanner()
+    api.get_rewards_markets.return_value = [
+        _sample_market(market_slug="ms-1", event_slug="es-1")
+    ]
+    api.get_orderbook.return_value = _sample_orderbook()
+    scanner.scan()
+    db.upsert_market_meta.assert_any_call("0xabc123", "Test Market?", "ms-1", "es-1")
