@@ -5,6 +5,7 @@ from engine.take_profit import (
     ceil_to_tick,
     plan_take_profit,
     cost_basis_from_buy_fills,
+    take_profit_price,
 )
 
 
@@ -139,3 +140,19 @@ class TestCostBasisFromBuyFills:
 
     def test_zero_size_none(self):
         assert cost_basis_from_buy_fills([_bf(0.28, 361, 1)], 0) is None
+
+
+class TestTakeProfitPrice:
+    def test_cost_above_bid_sells_at_cost(self):
+        # 成本 0.45 > 买一 0.40 -> 挂成本价 0.45
+        assert take_profit_price(0.45, 0.40, 0.01) == 0.45
+
+    def test_cost_below_bid_lifts_to_bid_plus_tick(self):
+        # 事故场景:成本 0.21 < 买一 0.27 -> 上移到 0.28,绝不穿价
+        assert take_profit_price(0.21, 0.27, 0.01) == pytest.approx(0.28)
+
+    def test_no_bid_falls_back_to_cost(self):
+        assert take_profit_price(0.30, None, 0.01) == 0.30
+
+    def test_off_tick_cost_ceiled(self):
+        assert take_profit_price(0.3023, 0.10, 0.01) == 0.31

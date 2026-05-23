@@ -93,3 +93,15 @@ def cost_basis_from_buy_fills(buy_fills: list[dict], size: float) -> float | Non
     if qty_sum <= 0:
         return None
     return cost_sum / qty_sum
+
+
+def take_profit_price(cost: float, best_bid: float | None, tick: float) -> float:
+    """止盈卖价 = max(ceil_to_tick(cost), best_bid + tick) 的穿价护栏。
+
+    保证卖价严格高于买一 -> 永远是挂得住的 maker 单,绝不穿价市价清仓。best_bid 为
+    None(盘口某侧缺失)时退回 ceil_to_tick(cost)(盘口空时本就无买盘可穿)。
+    """
+    base = ceil_to_tick(cost, tick)
+    if best_bid is not None:
+        base = max(base, round(best_bid + tick, 10))
+    return base
