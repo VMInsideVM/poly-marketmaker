@@ -341,9 +341,11 @@ class OrderMonitor:
         # curPrice / conditionId.
         asset_id = pos.get("asset", "")
         size = float(pos.get("size", 0) or 0)
-        avg = float(pos.get("avgPrice", 0) or 0)
         cur = float(pos.get("curPrice", 0) or 0)
         if size <= 0:
+            return
+        avg = self._cost(asset_id, size)  # 真实成交加权成本,替代 Data API avgPrice
+        if avg is None or avg <= 0:
             return
         if not stop_loss_triggered(cur, avg, settings["stop_loss_pct"]):
             return

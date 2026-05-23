@@ -398,6 +398,23 @@ class TestStopLoss:
         api.get_open_orders.return_value = [
             {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
         ]
+        api.get_trades.return_value = [
+            {
+                "id": "t",
+                "market": "mkt1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "1000",
+                        "price": "0.30",
+                        "asset_id": "tok1",
+                    }
+                ],
+            }
+        ]
 
         with patch("engine.monitor.stop_loss_triggered", return_value=True):
             monitor.check_stop_loss()
@@ -418,6 +435,23 @@ class TestStopLoss:
             }
         ]
         api.get_open_orders.return_value = []
+        api.get_trades.return_value = [
+            {
+                "id": "t",
+                "market": "mkt1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "1000",
+                        "price": "0.30",
+                        "asset_id": "tok1",
+                    }
+                ],
+            }
+        ]
 
         with patch("engine.monitor.stop_loss_triggered", return_value=False):
             monitor.check_stop_loss()
@@ -445,6 +479,24 @@ class TestStopLoss:
             }
         ]
         api.get_open_orders.return_value = []
+
+        monitor.check_stop_loss()
+
+        api.place_market_sell.assert_not_called()
+
+    def test_skips_stop_loss_when_cost_unavailable(self):
+        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
+        api.get_user_positions.return_value = [
+            {
+                "asset": "tok1",
+                "size": 1000.0,
+                "avgPrice": 0.30,
+                "curPrice": 0.10,
+                "conditionId": "mkt1",
+            }
+        ]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = []  # 成本 None -> 不在不确定成本上市价平仓
 
         monitor.check_stop_loss()
 
@@ -995,6 +1047,23 @@ class TestStep2ActionLog:
         api.get_open_orders.return_value = [
             {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
         ]
+        api.get_trades.return_value = [
+            {
+                "id": "t",
+                "market": "mkt1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "1000",
+                        "price": "0.30",
+                        "asset_id": "tok1",
+                    }
+                ],
+            }
+        ]
         with patch("engine.monitor.stop_loss_triggered", return_value=True):
             monitor.check_stop_loss()
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
@@ -1015,6 +1084,23 @@ class TestStep2ActionLog:
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
         api.get_user_positions.return_value = self._pos()
         api.get_open_orders.return_value = []
+        api.get_trades.return_value = [
+            {
+                "id": "t",
+                "market": "mkt1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "1000",
+                        "price": "0.30",
+                        "asset_id": "tok1",
+                    }
+                ],
+            }
+        ]
         with patch("engine.monitor.stop_loss_triggered", return_value=True):
             monitor.check_stop_loss()
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
