@@ -429,6 +429,36 @@ class OrderMonitor:
         compliance."""
         token_id = o.get("asset_id", "")
         cid = o.get("market", "")
+        # 黑名单:该市场不应再有在挂买单——撤掉,绝不重挂(覆盖 Step3 重挂这条路径)。
+        if cid in self.db.get_blacklist_ids():
+            old_price = float(o.get("price", 0) or 0)
+            osize = int(float(o.get("original_size", 0) or 0))
+            try:
+                self.api.cancel_orders([o.get("id")])
+            except Exception as e:
+                logger.warning("Blacklist cancel %s failed: %s", o.get("id"), e)
+                return
+            self._record_action(
+                market_id=cid,
+                action_type="blacklist_cancel",
+                side="-",
+                price=-1,
+                size=osize,
+                reason="市场在黑名单,撤掉在挂买单且不重挂",
+                price_basis="黑名单复查；来源：本地 blacklist 表",
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price=f"{old_price:.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="黑名单撤单",
+                detail="市场已加入黑名单",
+            )
+            logger.info("[Step3] blacklist cancel %s market %s", o.get("id"), cid)
+            return
         settings = self.db.get_settings()
         ob = self.api.get_orderbook(token_id)
         bids = sorted(ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True)

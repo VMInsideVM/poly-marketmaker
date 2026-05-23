@@ -18,6 +18,7 @@ def _make_monitor(settings=None):
     if settings:
         default_settings.update(settings)
     db.get_settings.return_value = default_settings
+    db.get_blacklist_ids.return_value = set()
     # funder address via api.get_funder()
     api.get_funder.return_value = "0xFUNDER"
     monitor = OrderMonitor(api, db, "0xABC")
@@ -1164,3 +1165,21 @@ class TestStep3EligibilityRecheck:
         with patch("engine.monitor.needs_replace", return_value="keep"):
             monitor.check_sell_orders()
         api.cancel_orders.assert_not_called()
+
+
+class TestStep3Blacklist:
+    def test_check_compliance_cancels_blacklisted_buy_no_replace(self):
+        monitor, api, db = _make_monitor()
+        db.get_blacklist_ids.return_value = {"cid1"}
+        o = {
+            "asset_id": "t1",
+            "market": "cid1",
+            "id": "o1",
+            "price": "0.40",
+            "original_size": "100",
+            "size_matched": "0",
+        }
+        monitor._check_compliance(o)
+        api.cancel_orders.assert_called_once_with(["o1"])
+        api.place_limit_buy.assert_not_called()
+        api.get_orderbook.assert_not_called()  # 命中黑名单提前返回,不取盘口
