@@ -12,6 +12,7 @@ def _worker(api, db, cap=5):
         "cooldown_minutes": 20,
     }
     db.get_blacklist_ids.return_value = set()
+    api.get_user_positions.return_value = []  # default: no held positions
     return WalletWorker(api, db, "0xWALLET", {"fill_check_interval_sec": 5})
 
 
@@ -70,6 +71,7 @@ def _worker_capped(api, db, cap):
         "cooldown_minutes": 20,
     }
     db.get_blacklist_ids.return_value = set()
+    api.get_user_positions.return_value = []  # default: no held positions
     return WalletWorker(
         api,
         db,
@@ -208,6 +210,7 @@ def test_cap_read_live_from_db_not_constructor_snapshot():
     api.get_open_orders.return_value = []
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
+    api.get_user_positions.return_value = []
     worker = WalletWorker(
         api,
         db,
@@ -402,3 +405,38 @@ def test_non_blacklisted_market_still_placed():
     with patch("engine.strategy.determine_order_price", return_value=0.40):
         worker.place_orders([_market(0)])
     api.place_limit_buy.assert_called_once()
+
+
+def test_skips_market_with_existing_position():
+    # 该 market(condition_id)已有持仓 -> 不再为它挂买单;非持仓的合格市场照常挂。
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    api.get_user_positions.return_value = [
+        {"conditionId": "m0", "size": 100.0, "asset": "t0"}
+    ]
+    markets = [_market(0), _market(1)]
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders(markets)
+    placed_tokens = [c.args[0] for c in api.place_limit_buy.call_args_list]
+    assert "t0" not in placed_tokens  # m0 已持仓 -> 跳过
+    assert "t1" in placed_tokens  # m1 未持仓 -> 照常挂
+
+
+def test_no_placement_when_positions_unavailable():
+    # 取不到持仓(Data API 报错) -> 该轮不挂任何单(保守兜底)。
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    api.get_user_positions.side_effect = Exception("Data API down")
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders([_market(0)])  # must not raise
+    api.place_limit_buy.assert_not_called()

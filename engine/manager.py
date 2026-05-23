@@ -12,6 +12,7 @@ import time
 from api.polymarket_api import PolymarketAPI
 from engine.scanner import MarketScanner
 from engine.monitor import OrderMonitor
+from engine.positions import held_condition_ids
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,16 @@ class WalletWorker:
         except Exception as e:
             logger.error("get_open_orders failed for %s: %s", self.wallet_address, e)
             return
+        try:
+            positions = self.api.get_user_positions(self.api.get_funder())
+        except Exception as e:
+            logger.error(
+                "get_user_positions failed for %s, skip placement: %s",
+                self.wallet_address,
+                e,
+            )
+            return
+        held = held_condition_ids(positions)
         buy_orders = [o for o in open_orders if o.get("side") == "BUY"]
 
         # Hard per-wallet cap on the TOTAL open buy orders. Read live from
@@ -143,6 +154,8 @@ class WalletWorker:
 
         for market in eligible_markets:
             if market["market_id"] in blacklist:
+                continue
+            if market["market_id"] in held:
                 continue
             if self.db.is_in_cooldown(self.wallet_address, market["market_id"]):
                 continue
