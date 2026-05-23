@@ -425,6 +425,36 @@ class PolymarketAPI:
             logger.error("Failed to list markets from Gamma API: %s", e)
             return []
 
+    @staticmethod
+    def gamma_markets_by_condition(condition_ids: list) -> dict:
+        """按 condition_id 批量解析市场名+slug(Gamma 公共接口)。
+
+        GET /markets?condition_ids=a&condition_ids=b... 返回 Gamma 已知的市场。
+        返回 {condition_id: {"name", "market_slug", "event_slug"}}。
+        HTTP/网络失败时抛出(由调用方决定如何处理)。
+        """
+        ids = [c for c in dict.fromkeys(condition_ids) if c]
+        if not ids:
+            return {}
+        resp = requests.get(
+            "https://gamma-api.polymarket.com/markets",
+            params=[("condition_ids", c) for c in ids],
+            timeout=10,
+        )
+        resp.raise_for_status()
+        out = {}
+        for m in resp.json():
+            cid = m.get("conditionId", "")
+            if not cid:
+                continue
+            evs = m.get("events") or []
+            out[cid] = {
+                "name": m.get("question", ""),
+                "market_slug": m.get("slug", ""),
+                "event_slug": (evs[0].get("slug", "") if evs else ""),
+            }
+        return out
+
     # --- Per-market rewards ---
 
     @staticmethod
