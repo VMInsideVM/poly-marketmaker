@@ -1111,6 +1111,28 @@ class TestStep2ActionLog:
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
         api.get_user_positions.return_value = self._pos()
         api.get_open_orders.return_value = []
+        # Provide a real BUY trade so _cost() returns a non-None value and the
+        # code reaches the stop_loss_triggered() branch (patched to False).
+        # Without this, _cost() returns None (no fills) and the method returns
+        # early — never reaching the patched check, so the test was passing for
+        # the wrong reason.
+        api.get_trades.return_value = [
+            {
+                "id": "t-notriggered",
+                "market": "mkt1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o-notriggered",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "1000",
+                        "price": "0.30",
+                        "asset_id": "tok1",
+                    }
+                ],
+            }
+        ]
         with patch("engine.monitor.stop_loss_triggered", return_value=False):
             monitor.check_stop_loss()
         db.record_action.assert_not_called()
