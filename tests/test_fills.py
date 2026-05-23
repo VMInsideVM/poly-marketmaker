@@ -102,3 +102,45 @@ def test_sorted_by_ts_ascending_across_trades():
 def test_funder_match_is_case_insensitive():
     fills = select_new_buy_fills([TRADE_TWO_OURS_BUY], FUNDER.lower(), set())
     assert len(fills) == 2
+
+
+from engine.fills import extract_buy_fills
+
+
+def test_extract_buy_fills_only_our_buys_on_asset():
+    # TRADE_TWO_OURS_BUY 有我们两笔 BUY:ASSET_B1@0.4x20、ASSET_B2@0.41x30
+    fills = extract_buy_fills([TRADE_TWO_OURS_BUY], FUNDER, "ASSET_B1")
+    assert fills == [{"price": 0.4, "size": 20.0, "ts": 1779030000.0}]
+
+
+def test_extract_buy_fills_skips_our_sell_and_others():
+    # TRADE_SELL_MIX:我们的是 SELL(ASSET_YES),另一笔是别人的 BUY(ASSET_NO)
+    assert extract_buy_fills([TRADE_SELL_MIX], FUNDER, "ASSET_YES") == []
+    assert extract_buy_fills([TRADE_SELL_MIX], FUNDER, "ASSET_NO") == []
+
+
+def test_extract_buy_fills_case_insensitive_funder():
+    fills = extract_buy_fills([TRADE_TWO_OURS_BUY], FUNDER.lower(), "ASSET_B2")
+    assert fills == [{"price": 0.41, "size": 30.0, "ts": 1779030000.0}]
+
+
+def test_extract_buy_fills_aggregates_across_trades_same_asset():
+    t2 = {
+        **TRADE_TWO_OURS_BUY,
+        "id": "trade-3",
+        "match_time": "1779031111",
+        "maker_orders": [
+            {
+                "order_id": "ord-b3",
+                "maker_address": FUNDER,
+                "side": "BUY",
+                "matched_amount": "10",
+                "price": "0.42",
+                "asset_id": "ASSET_B1",
+            }
+        ],
+    }
+    fills = extract_buy_fills([TRADE_TWO_OURS_BUY, t2], FUNDER, "ASSET_B1")
+    assert {"price": 0.4, "size": 20.0, "ts": 1779030000.0} in fills
+    assert {"price": 0.42, "size": 10.0, "ts": 1779031111.0} in fills
+    assert len(fills) == 2

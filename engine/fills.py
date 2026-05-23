@@ -43,3 +43,32 @@ def select_new_buy_fills(trades: list[dict], funder: str, seen_keys: set) -> lis
             )
     events.sort(key=lambda e: e["ts"])
     return events
+
+
+def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[dict]:
+    """挑出我们在某 token 上的全部 BUY 成交,用于算加权成本。
+
+    返回 [{price, size, ts}, ...](不去重、不依赖 seen_keys)。只看 maker_orders
+    里 maker_address==funder 且 side==BUY 且 asset_id 匹配的条目;price 取该 maker
+    条目的 price,size 取 matched_amount,ts 取 trade 顶层 match_time。
+    """
+    f = (funder or "").lower()
+    a = str(asset_id)
+    out = []
+    for tr in trades:
+        ts = float(tr.get("match_time", 0) or 0)
+        for mo in tr.get("maker_orders", []) or []:
+            if str(mo.get("maker_address", "")).lower() != f:
+                continue
+            if str(mo.get("side", "")).upper() != "BUY":
+                continue
+            if str(mo.get("asset_id", "")) != a:
+                continue
+            out.append(
+                {
+                    "price": float(mo.get("price", 0) or 0),
+                    "size": float(mo.get("matched_amount", 0) or 0),
+                    "ts": ts,
+                }
+            )
+    return out
