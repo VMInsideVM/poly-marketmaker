@@ -76,6 +76,9 @@ class MarketScanner:
 
         eligible = []
 
+        # 全局黑名单:这些 condition_id 不进 eligible(一次性加载)。
+        blacklist = self.db.get_blacklist_ids()
+
         # Pre-filter: reward + settlement date + cooldown
         candidates = []
         for market in markets:
@@ -92,6 +95,8 @@ class MarketScanner:
             if 0 <= days_left < min_days:
                 continue
             condition_id = market.get("condition_id", "")
+            if condition_id in blacklist:
+                continue
             if self.db.is_in_cooldown(self.wallet_address, condition_id):
                 continue
             candidates.append(market)

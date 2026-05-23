@@ -31,6 +31,7 @@ def _make_scanner(balance=500.0, settings=None):
         default_settings.update(settings)
     db.get_settings.return_value = default_settings
     db.is_in_cooldown.return_value = False
+    db.get_blacklist_ids.return_value = set()
 
     return MarketScanner(api, db, "0xABC"), api, db
 
@@ -197,3 +198,12 @@ def test_scan_upserts_market_meta_with_name_and_slugs():
     api.get_orderbook.return_value = _sample_orderbook()
     scanner.scan()
     db.upsert_market_meta.assert_any_call("0xabc123", "Test Market?", "ms-1", "es-1")
+
+
+def test_scan_excludes_blacklisted_market():
+    scanner, api, db = _make_scanner()
+    db.get_blacklist_ids.return_value = {"0xabc123"}  # _sample_market 的 condition_id
+    api.get_rewards_markets.return_value = [_sample_market()]
+    api.get_orderbook.return_value = _sample_orderbook()
+    results = scanner.scan()
+    assert len(results) == 0
