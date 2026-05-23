@@ -95,7 +95,8 @@ class OrderMonitor:
 
     def _cost(self, asset_id: str, size: float):
         """该持仓的加权成本(本 tick 缓存)。来自 CLOB get_trades 的真实买入成交,
-        替代 Data API avgPrice。取不到 -> None(调用方据此跳过,不在不确定成本上动手)。"""
+        替代 Data API avgPrice。取不到 -> None(调用方据此跳过,不在不确定成本上动手)。
+        结果按 asset_id 缓存至本 tick 结束(size 在 tick 内视为稳定,止盈与止损作用于同一持仓快照)。"""
         if asset_id in self._cost_cache:
             return self._cost_cache[asset_id]
         funder = self._funder()
@@ -149,8 +150,9 @@ class OrderMonitor:
             return
         # No trades-table write: buy "history" is now the live Data API position
         # (avgPrice), because per-fill maker_orders prices were unreliable. The
-        # take-profit SELL is maintained by check_take_profit() at the position's
-        # avgPrice. Step 1 only sets the cooldown and cancels the buy's remainder.
+        # take-profit SELL is maintained by check_take_profit() priced off the
+        # get_trades weighted cost with a 穿价护栏 (max(cost, best_bid+tick)),
+        # not avgPrice. Step 1 only sets the cooldown and cancels the buy's remainder.
         self.db.set_cooldown(
             self.wallet_address, market_id, self.db.get_settings()["cooldown_minutes"]
         )
