@@ -289,3 +289,69 @@ def test_excess_cancel_ignores_sell_orders():
     worker.place_orders([])
     cancelled = set(api.cancel_orders.call_args[0][0])
     assert cancelled == {"b2"}  # newest BUY only; SELL s1 untouched
+
+
+def test_order_size_uses_full_balance():
+    # 每笔买单按全部可用余额下单：floor(balance/price),不是 rewards_min_size。
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    with patch("engine.strategy.determine_order_price", return_value=0.50):
+        worker.place_orders([_market(0)])
+    api.place_limit_buy.assert_called_once()
+    assert api.place_limit_buy.call_args.args[2] == 2000  # floor(1000/0.50)
+
+
+def test_balance_not_decremented_across_markets():
+    # 同一笔余额垫付所有挂单,跨市场不递减 —— 每个市场都拿到全额份数。
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    markets = [_market(i) for i in range(3)]
+    with patch("engine.strategy.determine_order_price", return_value=0.50):
+        worker.place_orders(markets)
+    sizes = [c.args[2] for c in api.place_limit_buy.call_args_list]
+    assert sizes == [2000, 2000, 2000]
+
+
+def test_skip_when_full_balance_below_min_reward_size():
+    # 全额都买不够 rewards_min_size 份时跳过该市场(挂更少拿不到奖励)。
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 3.0  # floor(3.0/0.50)=6 份
+    worker = _worker(api, db)
+    m = _market(0)
+    m["rewards_min_size"] = 10  # 需要 >=10,只买得起 6 -> 跳过
+    with patch("engine.strategy.determine_order_price", return_value=0.50):
+        worker.place_orders([m])
+    api.place_limit_buy.assert_not_called()
+
+
+def test_place_buy_action_records_full_size():
+    # 动作记录里 size 是真实下单的全额份数,不是扫描时的最小份额。
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    with patch("engine.strategy.determine_order_price", return_value=0.50):
+        worker.place_orders([_market(0)])
+    pb = next(
+        c
+        for c in db.record_action.call_args_list
+        if c.kwargs.get("action_type") == "place_buy"
+    )
+    assert pb.kwargs["size"] == 2000

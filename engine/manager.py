@@ -190,12 +190,19 @@ class WalletWorker:
                 continue
 
             balance = self.api.get_balance()
-            required = market["order_size"] * order_price
-            if required > balance:
+            # 每笔买单按全部可用余额下单。Polymarket maker 买单不锁仓,同一笔
+            # 余额垫付所有挂着的买单,所以这里跨市场循环时刻意 *不* 递减余额。
+            order_size = int(balance / order_price)
+            # 全额都买不够拿奖励的最小合格份额,挂了也吃不到奖励 -> 跳过该市场。
+            min_size = int(
+                market.get("rewards_min_size", market.get("order_size", 0)) or 0
+            )
+            if order_size < min_size:
                 logger.info(
-                    "Insufficient balance %.2f < %.2f for %s",
+                    "Balance %.2f only buys %d < min reward size %d for %s, skip",
                     balance,
-                    required,
+                    order_size,
+                    min_size,
                     market["market_name"],
                 )
                 continue
@@ -203,7 +210,7 @@ class WalletWorker:
                 self.api.place_limit_buy(
                     market["token_id"],
                     order_price,
-                    market["order_size"],
+                    order_size,
                     tick_size=tick_str,
                     neg_risk=market.get("neg_risk", False),
                 )
@@ -212,10 +219,12 @@ class WalletWorker:
                     market["market_name"],
                     market["outcome"],
                     order_price,
-                    market["order_size"],
+                    order_size,
                 )
                 placed += 1
-                self._record_place_buy(market, order_price, max_spread, rmin, rmax)
+                self._record_place_buy(
+                    market, order_price, order_size, max_spread, rmin, rmax
+                )
                 if placed >= effective_limit:
                     break
             except Exception as e:
@@ -244,7 +253,9 @@ class WalletWorker:
             except Exception as e:
                 logger.warning("record_action(cap_cancel_excess) failed: %s", e)
 
-    def _record_place_buy(self, market, order_price, max_spread, rmin, rmax):
+    def _record_place_buy(
+        self, market, order_price, order_size, max_spread, rmin, rmax
+    ):
         """Log a successful buy placement to the actions table (never raises)."""
         try:
             self.db.record_action(
@@ -253,7 +264,7 @@ class WalletWorker:
                 action_type="place_buy",
                 side="买入",
                 price=order_price,
-                size=market["order_size"],
+                size=order_size,
                 reason="按策略在奖励区间内挂买单（贴最优买价深度，最大化奖励占比）",
                 price_basis=(
                     f"应挂价 {order_price:.4f}=determine_order_price(bids, "
