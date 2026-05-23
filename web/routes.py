@@ -19,6 +19,7 @@ from models.database import Database
 from engine.manager import EngineManager
 from utils.crypto import derive_key, encrypt, decrypt
 from engine.monitor_status import get_snapshot
+from engine.market_links import enrich_with_market_meta
 from config import DB_PATH, HOST, PORT
 
 logger = logging.getLogger(__name__)
@@ -196,7 +197,9 @@ def logs_page():
 @app.route("/api/monitor-status", methods=["GET"])
 @login_required
 def api_monitor_status():
-    return jsonify(get_snapshot())
+    snap = get_snapshot()
+    enrich_with_market_meta(snap.get("rows", []), db.get_market_meta(), "market")
+    return jsonify(snap)
 
 
 # --- API: Settings ---
@@ -454,6 +457,7 @@ def api_get_orders():
                     ),
                 }
             )
+    enrich_with_market_meta(result, db.get_market_meta(), "market")
     return jsonify({"orders": result, "errors": errors})
 
 
@@ -537,6 +541,7 @@ def api_get_positions():
                     {
                         "wallet": addr,
                         "market_name": p.get("title", p.get("conditionId", "")),
+                        "condition_id": p.get("conditionId", ""),
                         "outcome": p.get("outcome", ""),
                         "buy_price": avg,
                         "size": size,
@@ -547,6 +552,7 @@ def api_get_positions():
                 )
         except Exception as e:
             app.logger.warning("positions failed for %s: %s", addr, e)
+    enrich_with_market_meta(out, db.get_market_meta(), "condition_id")
     return jsonify(out)
 
 
@@ -571,7 +577,9 @@ def api_get_actions():
     end = request.args.get("end", type=float)
     types = request.args.get("types")
     action_types = types.split(",") if types else None
-    return jsonify(db.get_actions(wallet, start, end, action_types))
+    rows = db.get_actions(wallet, start, end, action_types)
+    enrich_with_market_meta(rows, db.get_market_meta(), "market_id")
+    return jsonify(rows)
 
 
 # --- API: Eligible Markets ---
