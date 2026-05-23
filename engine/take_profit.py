@@ -1,14 +1,17 @@
 """engine/take_profit.py — Pure position-driven take-profit planning (no IO).
 
-The monitor maintains exactly ONE resting SELL per position at the position's
-cost price (``avgPrice`` from the Polymarket Data API), rounded UP to the market
-tick so we never sell below cost ("原价卖出不亏本金，赚流动性奖励").
+The monitor maintains exactly ONE resting SELL per position. The sell price is
+``take_profit_price(cost, best_bid, tick)`` = ``max(ceil_to_tick(cost), best_bid
++ tick)``: at/above the real cost so we never sell below it, and strictly above
+the best bid so the order always rests as a maker and never crosses the book
+(原价不亏本金、不穿价市价清仓、赚流动性奖励).
 
-This replaces the old per-fill sell, which placed one sell per ``get_trades``
-fill event at that event's reported price — splitting a single position into
-many orders and trusting per-fill prices that could diverge from the true
-average cost (observed: 200 shares resting at 0.38 for a position whose real
-avgPrice was 0.30).
+``cost`` is the position's weighted-average cost computed from our real CLOB
+``get_trades`` buy fills (``cost_basis_from_buy_fills``), NOT the Polymarket Data
+API ``avgPrice`` — the Data API avgPrice was observed to glitch on freshly
+opened positions (a real 0.28 buy read as ~0.21, dumping the position at
+market). A single resting sell also replaces the older per-fill sells that split
+one position into many orders priced off divergent per-fill data.
 """
 
 import math

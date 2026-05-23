@@ -182,12 +182,13 @@ class OrderMonitor:
 
     # --- Step 1b: position-driven take-profit (one resting sell at cost) ---
     def check_take_profit(self):
-        """Maintain exactly one resting SELL per position at its cost price.
+        """Maintain exactly one resting SELL per position at a cost-based price.
 
-        Reads the authoritative position (Data API avgPrice + size) instead of
-        replaying per-fill prices from get_trades, so a position is flattened by
-        a single sell at its real average cost — never split into many orders
-        nor priced off stale/divergent per-fill data.
+        Cost is the weighted average of our real CLOB get_trades buy fills (via
+        _cost); the Data API position is used only for size. The sell price adds
+        a 穿价护栏 (max(cost, best_bid+tick)) so it always rests as a maker and
+        never crosses the book. Replaces both the old per-fill sells and the
+        later Data-API-avgPrice approach (avgPrice glitched on fresh positions).
         """
         funder = self._funder()
         try:
@@ -263,7 +264,7 @@ class OrderMonitor:
                 matched="-",
                 stage="止盈卖单",
                 action="保持(成本/护栏价)",
-                detail=f"成本{cost:.4f} 持仓{size} 已挂一笔{want:.4f}",
+                detail=f"成本{cost:.4f} 持仓{size} 已挂一笔 {want:.4f}",
             )
             return
         if plan["cancel_ids"]:
