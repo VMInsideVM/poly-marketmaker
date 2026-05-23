@@ -38,3 +38,33 @@ def enrich_with_market_meta(rows: list, meta: dict, id_key: str) -> list:
         if not r.get("market_name"):
             r["market_name"] = entry.get("name", "") if entry else ""
     return rows
+
+
+def ensure_market_meta(condition_ids, db, fetch, max_lookup: int = 50):
+    """确保 market_meta 含给定 condition_ids 的条目,缺的用 fetch(Gamma)解析并落库。
+
+    - 只解析不在 market_meta 里的 id(本地命中/已负缓存的不再查)。
+    - fetch 返回的命中项 upsert 真名+slug;Gamma 应答但不含的 id upsert 空行
+      做负缓存(避免每次轮询重打 Gamma)。
+    - fetch 抛异常(Gamma 临时不可用)则不写负缓存,留待下次轮询重试。
+    - 单次最多解析 max_lookup 个,其余下次轮询再补。
+    返回(可能已更新的)condition_id -> 元信息 映射。永不抛出。
+    """
+    meta = db.get_market_meta()
+    missing = [c for c in dict.fromkeys(condition_ids) if c and c not in meta]
+    if not missing:
+        return meta
+    missing = missing[:max_lookup]
+    try:
+        resolved = fetch(missing)
+    except Exception:
+        return meta  # 临时失败:不负缓存,下次重试
+    for c in missing:
+        r = resolved.get(c)
+        if r:
+            db.upsert_market_meta(
+                c, r.get("name", ""), r.get("market_slug", ""), r.get("event_slug", "")
+            )
+        else:
+            db.upsert_market_meta(c, "", "", "")  # 负缓存:Gamma 无此市场
+    return db.get_market_meta()
