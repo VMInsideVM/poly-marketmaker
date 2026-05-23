@@ -1,5 +1,5 @@
 # tests/test_fills.py
-from engine.fills import select_new_buy_fills
+from engine.fills import select_new_buy_fills, extract_buy_fills
 
 FUNDER = "0x98d67a03a5AFf272Dc02016c06EF9c18aec4ae75"
 
@@ -102,9 +102,6 @@ def test_sorted_by_ts_ascending_across_trades():
 def test_funder_match_is_case_insensitive():
     fills = select_new_buy_fills([TRADE_TWO_OURS_BUY], FUNDER.lower(), set())
     assert len(fills) == 2
-
-
-from engine.fills import extract_buy_fills
 
 
 def test_extract_buy_fills_only_our_buys_on_asset():
