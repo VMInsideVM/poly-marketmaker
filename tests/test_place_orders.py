@@ -355,3 +355,20 @@ def test_place_buy_action_records_full_size():
         if c.kwargs.get("action_type") == "place_buy"
     )
     assert pb.kwargs["size"] == 2000
+
+
+def test_order_size_floors_on_inexact_division():
+    # 余额除不尽时向下取整(floor),不是四舍五入 —— 取整向上会在成交时超出余额。
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    with patch("engine.strategy.determine_order_price", return_value=0.30):
+        worker.place_orders([_market(0)])
+    api.place_limit_buy.assert_called_once()
+    assert (
+        api.place_limit_buy.call_args.args[2] == 3333
+    )  # floor(1000/0.30)=floor(3333.33)
