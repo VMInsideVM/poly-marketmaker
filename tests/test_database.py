@@ -194,3 +194,32 @@ class TestEligibleMarkets:
         rows = db.get_eligible_markets()
         assert len(rows) == 1
         assert rows[0]["min_cost"] == 29.0
+
+
+class TestMarketMeta:
+    def test_upsert_and_get(self, db):
+        db.upsert_market_meta("0xc1", "市场A", "slug-a", "evt-a")
+        meta = db.get_market_meta()
+        assert meta["0xc1"] == {
+            "name": "市场A",
+            "market_slug": "slug-a",
+            "event_slug": "evt-a",
+        }
+
+    def test_upsert_updates_same_condition_id(self, db):
+        db.upsert_market_meta("0xc1", "旧名", "old", "")
+        db.upsert_market_meta("0xc1", "新名", "new", "evt")
+        meta = db.get_market_meta()
+        assert len(meta) == 1
+        assert meta["0xc1"]["name"] == "新名"
+        assert meta["0xc1"]["market_slug"] == "new"
+        assert meta["0xc1"]["event_slug"] == "evt"
+
+    def test_empty_condition_id_skipped(self, db):
+        db.upsert_market_meta("", "x", "y", "z")
+        assert db.get_market_meta() == {}
+
+    def test_accumulates_across_calls(self, db):
+        db.upsert_market_meta("0xc1", "A", "", "")
+        db.upsert_market_meta("0xc2", "B", "", "")
+        assert set(db.get_market_meta().keys()) == {"0xc1", "0xc2"}

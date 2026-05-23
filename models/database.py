@@ -115,6 +115,13 @@ class Database:
                 end_date TEXT DEFAULT '',
                 scanned_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
+            CREATE TABLE IF NOT EXISTS market_meta (
+                condition_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                market_slug TEXT NOT NULL DEFAULT '',
+                event_slug TEXT NOT NULL DEFAULT '',
+                updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+            );
         """
         )
         self.conn.commit()
@@ -465,3 +472,39 @@ class Database:
         c = self.conn.cursor()
         c.execute("SELECT * FROM eligible_markets ORDER BY market_competitiveness DESC")
         return [dict(row) for row in c.fetchall()]
+
+    # --- Market Meta (condition_id -> name + slugs, persistent across scans) ---
+
+    def upsert_market_meta(
+        self, condition_id: str, name: str, market_slug: str = "", event_slug: str = ""
+    ):
+        """Insert or update market metadata. No-op for empty condition_id."""
+        if not condition_id:
+            return
+        c = self.conn.cursor()
+        c.execute(
+            """INSERT OR REPLACE INTO market_meta
+            (condition_id, name, market_slug, event_slug, updated_at)
+            VALUES (?, ?, ?, ?, ?)""",
+            (
+                condition_id,
+                name or "",
+                market_slug or "",
+                event_slug or "",
+                time.time(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_market_meta(self) -> dict:
+        """Return {condition_id: {name, market_slug, event_slug}}."""
+        c = self.conn.cursor()
+        c.execute("SELECT condition_id, name, market_slug, event_slug FROM market_meta")
+        return {
+            row["condition_id"]: {
+                "name": row["name"],
+                "market_slug": row["market_slug"],
+                "event_slug": row["event_slug"],
+            }
+            for row in c.fetchall()
+        }
