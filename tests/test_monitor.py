@@ -199,10 +199,28 @@ class TestCheckTakeProfit:
             "size_matched": str(matched),
         }
 
+    def _buy(self, price=0.30, size=222.08, asset="tok1", ts="100"):
+        return {
+            "id": f"t-{ts}",
+            "market": "mkt1",
+            "match_time": ts,
+            "maker_orders": [
+                {
+                    "order_id": f"o-{ts}",
+                    "maker_address": "0xFUNDER",
+                    "side": "BUY",
+                    "matched_amount": str(size),
+                    "price": str(price),
+                    "asset_id": asset,
+                }
+            ],
+        }
+
     def test_places_one_sell_at_cost_when_none_exist(self):
         monitor, api, db = _make_monitor()
         api.get_user_positions.return_value = [self._pos()]
         api.get_open_orders.return_value = []
+        api.get_trades.return_value = [self._buy()]
         api.get_orderbook.return_value = {"tick_size": "0.01"}
 
         monitor.check_take_profit()
@@ -218,12 +236,13 @@ class TestCheckTakeProfit:
             if c.kwargs["action_type"] == "take_profit_sell"
         )
         assert tp.kwargs["price"] == 0.30
-        assert "avgPrice" in tp.kwargs["price_basis"]
+        assert "get_trades" in tp.kwargs["price_basis"]
 
     def test_keeps_correct_single_sell(self):
         monitor, api, db = _make_monitor()
         api.get_user_positions.return_value = [self._pos()]
         api.get_open_orders.return_value = [self._sell("s1", 0.30, 222.08)]
+        api.get_trades.return_value = [self._buy()]
         api.get_orderbook.return_value = {"tick_size": "0.01"}
 
         monitor.check_take_profit()
@@ -244,6 +263,7 @@ class TestCheckTakeProfit:
             self._sell("g", 0.30, 7.28),
             self._sell("h", 0.30, 7.128),
         ]
+        api.get_trades.return_value = [self._buy()]
         api.get_orderbook.return_value = {"tick_size": "0.01"}
 
         monitor.check_take_profit()
@@ -288,6 +308,7 @@ class TestCheckTakeProfit:
         monitor, api, db = _make_monitor()
         api.get_user_positions.return_value = [self._pos(avg=0.30)]
         api.get_open_orders.return_value = []
+        api.get_trades.return_value = [self._buy()]
         api.get_orderbook.side_effect = Exception("ob down")
 
         monitor.check_take_profit()
@@ -310,6 +331,7 @@ class TestCheckTakeProfit:
                 "size_matched": "0",
             },
         ]
+        api.get_trades.return_value = [self._buy(asset="tok1")]
         api.get_orderbook.return_value = {"tick_size": "0.01"}
 
         monitor.check_take_profit()
@@ -323,6 +345,36 @@ class TestCheckTakeProfit:
             cancelled = api.cancel_orders.call_args[0][0]
             assert "other" not in cancelled
             assert "buy1" not in cancelled
+
+    def test_lifts_sell_above_bid_when_in_profit(self):
+        # 事故场景:成本 0.21 < 买一 0.27 -> 卖价上移到 0.28,绝不穿价市价清仓
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(size=361.0)]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = [self._buy(price=0.21, size=361.0)]
+        api.get_orderbook.return_value = {
+            "tick_size": "0.01",
+            "bids": [{"price": "0.27", "size": "9999"}],
+            "asks": [{"price": "0.29", "size": "9999"}],
+        }
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_called_once_with(
+            "tok1", pytest.approx(0.28), 361.0, tick_size="0.01"
+        )
+
+    def test_skips_when_cost_unavailable(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = []  # 无买入成交 -> 成本 None
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_not_called()
+        api.cancel_orders.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

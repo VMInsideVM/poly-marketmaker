@@ -230,30 +230,42 @@ class OrderMonitor:
     def _reconcile_take_profit(self, pos: dict, open_orders: list):
         asset_id = pos.get("asset", "")
         size = float(pos.get("size", 0) or 0)
-        avg = float(pos.get("avgPrice", 0) or 0)
         cid = pos.get("conditionId", "")
-        if size <= 0 or avg <= 0:
+        if size <= 0:
             return
-        tick, tick_str, _best_bid = self._sell_book(asset_id)
+        cost = self._cost(asset_id, size)
+        if cost is None or cost <= 0:
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price="-",
+                size=str(size),
+                matched="-",
+                stage="止盈卖单",
+                action="跳过(无成交数据)",
+                detail="get_trades 无买入成交，保持现有卖单不动",
+            )
+            return
+        tick, tick_str, best_bid = self._sell_book(asset_id)
+        want = take_profit_price(cost, best_bid, tick)
         sells = [
             o
             for o in open_orders
             if o.get("asset_id") == asset_id and o.get("side") == "SELL"
         ]
-        plan = plan_take_profit(size, avg, tick, sells)
+        plan = plan_take_profit(size, want, tick, sells)
         if plan["action"] in ("noop", "keep"):
             self._status_add(
                 market=cid,
                 side="卖出",
-                price=f"{avg:.4f}",
+                price=f"{want:.4f}",
                 size=str(size),
                 matched="-",
                 stage="止盈卖单",
-                action="保持(按成本价)",
-                detail=f"成本{avg:.4f} 持仓{size} 已挂一笔",
+                action="保持(成本/护栏价)",
+                detail=f"成本{cost:.4f} 持仓{size} 已挂一笔{want:.4f}",
             )
             return
-        # replace: cancel any mismatched sells, then place exactly one at cost
         if plan["cancel_ids"]:
             try:
                 self.api.cancel_orders(plan["cancel_ids"])
@@ -272,7 +284,6 @@ class OrderMonitor:
             except Exception as e:
                 logger.warning("Cancel stale sells for %s failed: %s", asset_id, e)
                 return
-        want = plan["price"]
         try:
             self.api.place_limit_sell(asset_id, want, size, tick_size=tick_str)
         except Exception as e:
@@ -284,10 +295,10 @@ class OrderMonitor:
             side="卖出",
             price=want,
             size=size,
-            reason="按持仓成本价挂单一笔止盈卖单（原价卖出不亏本金，赚流动性奖励）",
+            reason="按真实成交加权成本挂止盈卖单，并加穿价护栏（不亏本金、不穿价市价清仓、赚流动性奖励）",
             price_basis=(
-                f"卖价=持仓成本价 avgPrice {avg:.4f}→对齐tick {want:.4f}；"
-                f"来源：Polymarket Data API /positions"
+                f"成本=get_trades加权 {cost:.4f}；卖价=max(成本,买一+1tick)={want:.4f}；"
+                f"来源：CLOB get_trades + get_orderbook"
             ),
         )
         self._status_add(
@@ -297,8 +308,8 @@ class OrderMonitor:
             size=str(size),
             matched="-",
             stage="止盈卖单",
-            action="按持仓挂单",
-            detail=f"成本{avg:.4f} 持仓{size} 挂卖{want:.4f}",
+            action="按成本挂单",
+            detail=f"成本{cost:.4f} 持仓{size} 挂卖{want:.4f}",
         )
 
     # --- Step 2: stop-loss via Data API positions ---

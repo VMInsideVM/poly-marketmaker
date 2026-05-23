@@ -44,18 +44,17 @@ def _size_matches(a: float, b: float) -> bool:
 
 
 def plan_take_profit(
-    size: float, avg: float, tick: float, existing_sells: list[dict]
+    size: float, want_price: float, tick: float, existing_sells: list[dict]
 ) -> dict:
-    """Decide how to reconcile resting SELLs for ONE position.
+    """对一个持仓的 SELL 们做对账,使恰好一笔卖单挂在 want_price、覆盖整个 size。
 
-    Returns ``{"action", "price", "size", "cancel_ids"}`` where action is:
-    - ``"noop"``   — nothing to sell (no position / no cost basis)
-    - ``"keep"``   — exactly one resting sell already at the right price & size
-    - ``"replace"``— cancel ``cancel_ids`` and place one sell at ``price`` x ``size``
+    want_price 由调用方用 take_profit_price(cost, best_bid, tick) 预先算好(已对齐
+    tick、已含穿价护栏),本函数不再加工价格。返回 {"action","price","size",
+    "cancel_ids"}:noop / keep / replace。
     """
-    if size <= 0 or avg <= 0 or tick <= 0:
+    if size <= 0 or want_price is None or want_price <= 0 or tick <= 0:
         return {"action": "noop", "price": None, "size": 0.0, "cancel_ids": []}
-    want = ceil_to_tick(avg, tick)
+    want = want_price
     ids = [o.get("id") for o in existing_sells]
     remaining = sum(_remaining(o) for o in existing_sells)
     if (

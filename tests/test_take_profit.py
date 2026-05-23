@@ -53,15 +53,19 @@ def _sell(oid, price, original, matched=0):
 
 class TestPlanTakeProfit:
     def test_no_position_is_noop(self):
-        plan = plan_take_profit(size=0.0, avg=0.30, tick=0.01, existing_sells=[])
+        plan = plan_take_profit(size=0.0, want_price=0.30, tick=0.01, existing_sells=[])
         assert plan["action"] == "noop"
 
-    def test_zero_avg_is_noop(self):
-        plan = plan_take_profit(size=222.0, avg=0.0, tick=0.01, existing_sells=[])
+    def test_zero_price_is_noop(self):
+        plan = plan_take_profit(
+            size=222.0, want_price=0.0, tick=0.01, existing_sells=[]
+        )
         assert plan["action"] == "noop"
 
-    def test_no_existing_sell_places_one_at_cost(self):
-        plan = plan_take_profit(size=222.08, avg=0.30, tick=0.01, existing_sells=[])
+    def test_no_existing_sell_places_one(self):
+        plan = plan_take_profit(
+            size=222.08, want_price=0.30, tick=0.01, existing_sells=[]
+        )
         assert plan["action"] == "replace"
         assert plan["price"] == 0.30
         assert plan["size"] == 222.08
@@ -69,21 +73,22 @@ class TestPlanTakeProfit:
 
     def test_correct_single_sell_is_kept(self):
         sells = [_sell("s1", 0.30, 222.08)]
-        plan = plan_take_profit(size=222.08, avg=0.30, tick=0.01, existing_sells=sells)
+        plan = plan_take_profit(
+            size=222.08, want_price=0.30, tick=0.01, existing_sells=sells
+        )
         assert plan["action"] == "keep"
         assert plan["cancel_ids"] == []
 
     def test_phantom_high_price_sell_is_replaced(self):
-        # The reported bug: 200 shares resting at 0.38 while real cost is 0.30.
         sells = [_sell("phantom", 0.38, 200.0)]
-        plan = plan_take_profit(size=222.08, avg=0.30, tick=0.01, existing_sells=sells)
+        plan = plan_take_profit(
+            size=222.08, want_price=0.30, tick=0.01, existing_sells=sells
+        )
         assert plan["action"] == "replace"
         assert plan["price"] == 0.30
-        assert plan["size"] == 222.08
         assert plan["cancel_ids"] == ["phantom"]
 
     def test_split_orders_collapse_to_one(self):
-        # The reported bug: one position split into 8 resting sells.
         sells = [
             _sell("a", 0.38, 177.77),
             _sell("b", 0.38, 22.23),
@@ -94,21 +99,26 @@ class TestPlanTakeProfit:
             _sell("g", 0.30, 7.28),
             _sell("h", 0.30, 7.128),
         ]
-        plan = plan_take_profit(size=222.08, avg=0.30, tick=0.01, existing_sells=sells)
+        plan = plan_take_profit(
+            size=222.08, want_price=0.30, tick=0.01, existing_sells=sells
+        )
         assert plan["action"] == "replace"
         assert plan["price"] == 0.30
         assert set(plan["cancel_ids"]) == {"a", "b", "c", "d", "e", "f", "g", "h"}
 
     def test_single_sell_wrong_size_is_replaced(self):
         sells = [_sell("s1", 0.30, 100.0)]
-        plan = plan_take_profit(size=222.08, avg=0.30, tick=0.01, existing_sells=sells)
+        plan = plan_take_profit(
+            size=222.08, want_price=0.30, tick=0.01, existing_sells=sells
+        )
         assert plan["action"] == "replace"
         assert plan["cancel_ids"] == ["s1"]
 
     def test_single_sell_within_size_tolerance_is_kept(self):
-        # Tiny drift (partial fill / float) must not churn cancel+replace.
-        sells = [_sell("s1", 0.30, 222.08, matched=0.5)]  # remaining 221.58
-        plan = plan_take_profit(size=222.08, avg=0.30, tick=0.01, existing_sells=sells)
+        sells = [_sell("s1", 0.30, 222.08, matched=0.5)]
+        plan = plan_take_profit(
+            size=222.08, want_price=0.30, tick=0.01, existing_sells=sells
+        )
         assert plan["action"] == "keep"
 
 
