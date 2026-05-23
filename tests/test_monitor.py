@@ -1167,6 +1167,54 @@ class TestStep3EligibilityRecheck:
         api.cancel_orders.assert_not_called()
 
 
+class TestCostHelper:
+    def _buy_trade(self, asset, price, size, ts="100"):
+        return {
+            "id": f"t-{asset}-{ts}",
+            "market": "mkt1",
+            "match_time": ts,
+            "maker_orders": [
+                {
+                    "order_id": f"o-{asset}-{ts}",
+                    "maker_address": "0xFUNDER",
+                    "side": "BUY",
+                    "matched_amount": str(size),
+                    "price": str(price),
+                    "asset_id": asset,
+                }
+            ],
+        }
+
+    def test_cost_from_get_trades_weighted(self):
+        monitor, api, db = _make_monitor()
+        api.get_trades.return_value = [
+            self._buy_trade("tok1", 0.20, 200, ts="1"),
+            self._buy_trade("tok1", 0.28, 200, ts="2"),
+        ]
+        monitor.begin_status_tick()
+        assert monitor._cost("tok1", 400) == pytest.approx(0.24)
+
+    def test_cost_cached_within_tick(self):
+        monitor, api, db = _make_monitor()
+        api.get_trades.return_value = [self._buy_trade("tok1", 0.28, 361)]
+        monitor.begin_status_tick()
+        monitor._cost("tok1", 361)
+        monitor._cost("tok1", 361)
+        assert api.get_trades.call_count == 1  # 同 tick 只取一次
+
+    def test_cost_none_when_get_trades_fails(self):
+        monitor, api, db = _make_monitor()
+        api.get_trades.side_effect = Exception("boom")
+        monitor.begin_status_tick()
+        assert monitor._cost("tok1", 361) is None
+
+    def test_cost_none_when_no_buy_fills(self):
+        monitor, api, db = _make_monitor()
+        api.get_trades.return_value = []
+        monitor.begin_status_tick()
+        assert monitor._cost("tok1", 361) is None
+
+
 class TestStep3Blacklist:
     def test_check_compliance_cancels_blacklisted_buy_no_replace(self):
         monitor, api, db = _make_monitor()

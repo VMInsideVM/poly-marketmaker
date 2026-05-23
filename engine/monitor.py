@@ -3,8 +3,12 @@
 import logging
 import time
 from py_clob_client_v2.clob_types import TradeParams
-from engine.fills import select_new_buy_fills
-from engine.take_profit import plan_take_profit
+from engine.fills import select_new_buy_fills, extract_buy_fills
+from engine.take_profit import (
+    plan_take_profit,
+    cost_basis_from_buy_fills,
+    take_profit_price,
+)
 from engine.strategy_check import needs_replace
 from engine.eligibility import recheck_resting_buy
 from engine.risk import stop_loss_triggered
@@ -29,10 +33,12 @@ class OrderMonitor:
         self._max_spread_cache: dict = {}
         self._status_rows: list = []
         self._tick_ts: float = 0.0
+        self._cost_cache: dict = {}  # asset_id -> 加权成本 or None(每 tick 重置)
 
     def begin_status_tick(self) -> None:
         self._status_rows = []
         self._tick_ts = time.time()
+        self._cost_cache = {}
 
     def _status_add(self, **fields) -> None:
         try:
@@ -86,6 +92,25 @@ class OrderMonitor:
     def _funder(self) -> str:
         """Proxy/funder address — used for get_trades maker filter and Data API."""
         return self.api.get_funder()
+
+    def _cost(self, asset_id: str, size: float):
+        """该持仓的加权成本(本 tick 缓存)。来自 CLOB get_trades 的真实买入成交,
+        替代 Data API avgPrice。取不到 -> None(调用方据此跳过,不在不确定成本上动手)。"""
+        if asset_id in self._cost_cache:
+            return self._cost_cache[asset_id]
+        funder = self._funder()
+        try:
+            trades = self.api.get_trades(
+                TradeParams(maker_address=funder, asset_id=asset_id)
+            )
+        except Exception as e:
+            logger.warning("get_trades(asset=%s) for cost failed: %s", asset_id, e)
+            self._cost_cache[asset_id] = None
+            return None
+        fills = extract_buy_fills(trades, funder, asset_id)
+        cost = cost_basis_from_buy_fills(fills, size)
+        self._cost_cache[asset_id] = cost
+        return cost
 
     # --- Step 1: fills via get_trades (flatten maker_orders) ---
     def check_buy_orders(self):
@@ -185,17 +210,22 @@ class OrderMonitor:
             except Exception as e:
                 logger.error("Take-profit error on %s: %s", pos.get("asset"), e)
 
-    def _sell_tick(self, asset_id: str):
-        """(tick_float, tick_str) for an asset; falls back to 0.01 if unavailable."""
+    def _sell_book(self, asset_id: str):
+        """(tick_float, tick_str, best_bid) for an asset;
+        失败/盘口空时回 (0.01, "0.01", None)。"""
         try:
             ob = self.api.get_orderbook(asset_id)
             tick_str = ob.get("tick_size", "0.01")
-            return float(tick_str), tick_str
+            bids = sorted(
+                ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True
+            )
+            best_bid = float(bids[0]["price"]) if bids else None
+            return float(tick_str), tick_str, best_bid
         except Exception as e:
             logger.warning(
                 "orderbook for %s failed (take-profit tick=0.01): %s", asset_id, e
             )
-            return 0.01, "0.01"
+            return 0.01, "0.01", None
 
     def _reconcile_take_profit(self, pos: dict, open_orders: list):
         asset_id = pos.get("asset", "")
@@ -204,7 +234,7 @@ class OrderMonitor:
         cid = pos.get("conditionId", "")
         if size <= 0 or avg <= 0:
             return
-        tick, tick_str = self._sell_tick(asset_id)
+        tick, tick_str, _best_bid = self._sell_book(asset_id)
         sells = [
             o
             for o in open_orders
