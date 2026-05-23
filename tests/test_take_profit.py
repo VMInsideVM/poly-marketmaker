@@ -1,6 +1,11 @@
 """tests/test_take_profit.py — pure position-driven take-profit planning."""
 
-from engine.take_profit import ceil_to_tick, plan_take_profit
+import pytest
+from engine.take_profit import (
+    ceil_to_tick,
+    plan_take_profit,
+    cost_basis_from_buy_fills,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -104,3 +109,33 @@ class TestPlanTakeProfit:
         sells = [_sell("s1", 0.30, 222.08, matched=0.5)]  # remaining 221.58
         plan = plan_take_profit(size=222.08, avg=0.30, tick=0.01, existing_sells=sells)
         assert plan["action"] == "keep"
+
+
+def _bf(price, size, ts):
+    return {"price": price, "size": size, "ts": ts}
+
+
+class TestCostBasisFromBuyFills:
+    def test_single_buy_equals_buy_price(self):
+        # 事故那单:单独一笔 0.28 全持有 -> 成本就是 0.28(不会再读成 0.21)
+        assert cost_basis_from_buy_fills([_bf(0.28, 361, 100)], 361) == 0.28
+
+    def test_multi_buy_weighted_average(self):
+        # 200@0.20 + 200@0.28,size=400 -> (40+56)/400 = 0.24
+        fills = [_bf(0.20, 200, 1), _bf(0.28, 200, 2)]
+        assert cost_basis_from_buy_fills(fills, 400) == pytest.approx(0.24)
+
+    def test_takes_newest_fills_to_cover_size(self):
+        # 最近一笔 161@0.28(ts2),更早 200@0.20(ts1);size=161 -> 只取最新 -> 0.28
+        fills = [_bf(0.20, 200, 1), _bf(0.28, 161, 2)]
+        assert cost_basis_from_buy_fills(fills, 161) == pytest.approx(0.28)
+
+    def test_partial_coverage_uses_available(self):
+        # 买入总量(100)不足 size(361) -> 按已有的算(优雅降级)
+        assert cost_basis_from_buy_fills([_bf(0.28, 100, 1)], 361) == 0.28
+
+    def test_empty_fills_none(self):
+        assert cost_basis_from_buy_fills([], 361) is None
+
+    def test_zero_size_none(self):
+        assert cost_basis_from_buy_fills([_bf(0.28, 361, 1)], 0) is None

@@ -65,3 +65,31 @@ def plan_take_profit(
     ):
         return {"action": "keep", "price": want, "size": size, "cancel_ids": []}
     return {"action": "replace", "price": want, "size": size, "cancel_ids": ids}
+
+
+def cost_basis_from_buy_fills(buy_fills: list[dict], size: float) -> float | None:
+    """当前持仓的加权成本,来自我们的真实买入成交。
+
+    按 ts 从新到旧累计取份额直至覆盖 size,返回这些份额的加权均价。size<=0 或无成交
+    -> None;买入总量不足 size(部分份额非 maker 买入/历史截断)-> 按已有份额加权。
+    单笔买入全持有时精确等于买入价;多笔时为真实加权(不退化成单笔价)。
+    """
+    if size <= 0 or not buy_fills:
+        return None
+    fills = sorted(buy_fills, key=lambda f: f.get("ts", 0) or 0, reverse=True)
+    remaining = size
+    cost_sum = 0.0
+    qty_sum = 0.0
+    for f in fills:
+        if remaining <= 0:
+            break
+        fsize = float(f.get("size", 0) or 0)
+        if fsize <= 0:
+            continue
+        take = min(fsize, remaining)
+        cost_sum += float(f.get("price", 0) or 0) * take
+        qty_sum += take
+        remaining -= take
+    if qty_sum <= 0:
+        return None
+    return cost_sum / qty_sum
