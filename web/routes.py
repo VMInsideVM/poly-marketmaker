@@ -20,6 +20,7 @@ from engine.manager import EngineManager
 from utils.crypto import derive_key, encrypt, decrypt
 from engine.monitor_status import get_snapshot
 from engine.market_links import enrich_with_market_meta, ensure_market_meta
+from engine.blacklist_ops import buy_order_ids_for_condition
 from config import DB_PATH, HOST, PORT
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,12 @@ def history_page():
 @login_required
 def logs_page():
     return render_template("logs.html")
+
+
+@app.route("/blacklist")
+@login_required
+def blacklist_page():
+    return render_template("blacklist.html")
 
 
 @app.route("/api/monitor-status", methods=["GET"])
@@ -593,6 +600,46 @@ def api_get_actions():
     rows = db.get_actions(wallet, start, end, action_types)
     _enrich_rows(rows, "market_id")
     return jsonify(rows)
+
+
+# --- API: Blacklist ---
+
+
+@app.route("/api/blacklist", methods=["GET"])
+@login_required
+def api_get_blacklist():
+    rows = db.get_blacklist()
+    _enrich_rows(rows, "condition_id")
+    return jsonify(rows)
+
+
+@app.route("/api/blacklist", methods=["POST"])
+@login_required
+def api_add_blacklist():
+    data = request.get_json(silent=True) or {}
+    cid = (data.get("condition_id") or "").strip()
+    note = (data.get("note") or "").strip()
+    if not cid:
+        return jsonify({"error": "condition_id 不能为空"}), 400
+    db.add_to_blacklist(cid, note)
+    # 撤掉所有钱包挂在该 condition_id 的买单(止盈卖单/持仓不动)
+    cancelled = 0
+    for addr, api in _wallet_apis().items():
+        try:
+            ids = buy_order_ids_for_condition(api.get_open_orders(), cid)
+            if ids:
+                api.cancel_orders(ids)
+                cancelled += len(ids)
+        except Exception as e:
+            app.logger.error("blacklist cancel for %s failed: %s", addr, e)
+    return jsonify({"ok": True, "cancelled": cancelled})
+
+
+@app.route("/api/blacklist/<condition_id>", methods=["DELETE"])
+@login_required
+def api_remove_blacklist(condition_id):
+    db.remove_from_blacklist(condition_id)
+    return jsonify({"ok": True})
 
 
 # --- API: Eligible Markets ---
