@@ -122,6 +122,11 @@ class Database:
                 event_slug TEXT NOT NULL DEFAULT '',
                 updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
+            CREATE TABLE IF NOT EXISTS blacklist (
+                condition_id TEXT PRIMARY KEY,
+                note TEXT NOT NULL DEFAULT '',
+                added_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+            );
         """
         )
         self.conn.commit()
@@ -508,3 +513,36 @@ class Database:
             }
             for row in c.fetchall()
         }
+
+    # --- Blacklist (global, by condition_id) ---
+
+    def add_to_blacklist(self, condition_id: str, note: str = ""):
+        """加入(或更新)一个 condition_id 到全局黑名单。空 id 跳过。"""
+        if not condition_id:
+            return
+        c = self.conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO blacklist (condition_id, note, added_at) "
+            "VALUES (?, ?, ?)",
+            (condition_id, note or "", time.time()),
+        )
+        self.conn.commit()
+
+    def remove_from_blacklist(self, condition_id: str):
+        c = self.conn.cursor()
+        c.execute("DELETE FROM blacklist WHERE condition_id = ?", (condition_id,))
+        self.conn.commit()
+
+    def get_blacklist(self) -> list[dict]:
+        """全部黑名单条目(最新在前),供管理界面用。"""
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT condition_id, note, added_at FROM blacklist ORDER BY added_at DESC"
+        )
+        return [dict(row) for row in c.fetchall()]
+
+    def get_blacklist_ids(self) -> set:
+        """黑名单 condition_id 集合,供拦截热路径快速 membership 判断。"""
+        c = self.conn.cursor()
+        c.execute("SELECT condition_id FROM blacklist")
+        return {row["condition_id"] for row in c.fetchall()}

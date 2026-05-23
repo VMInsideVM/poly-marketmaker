@@ -223,3 +223,37 @@ class TestMarketMeta:
         db.upsert_market_meta("0xc1", "A", "", "")
         db.upsert_market_meta("0xc2", "B", "", "")
         assert set(db.get_market_meta().keys()) == {"0xc1", "0xc2"}
+
+
+class TestBlacklist:
+    def test_add_and_get_ids(self, db):
+        db.add_to_blacklist("0xc1", "spam market")
+        assert db.get_blacklist_ids() == {"0xc1"}
+
+    def test_get_blacklist_returns_note_and_time(self, db):
+        db.add_to_blacklist("0xc1", "spam")
+        bl = db.get_blacklist()
+        assert len(bl) == 1
+        assert bl[0]["condition_id"] == "0xc1"
+        assert bl[0]["note"] == "spam"
+        assert "added_at" in bl[0]
+
+    def test_remove(self, db):
+        db.add_to_blacklist("0xc1", "")
+        db.remove_from_blacklist("0xc1")
+        assert db.get_blacklist_ids() == set()
+
+    def test_add_dedups_and_updates_note(self, db):
+        db.add_to_blacklist("0xc1", "first")
+        db.add_to_blacklist("0xc1", "second")
+        bl = db.get_blacklist()
+        assert len(bl) == 1
+        assert bl[0]["note"] == "second"
+
+    def test_empty_condition_id_skipped(self, db):
+        db.add_to_blacklist("", "x")
+        assert db.get_blacklist_ids() == set()
+
+    def test_empty_when_none(self, db):
+        assert db.get_blacklist_ids() == set()
+        assert db.get_blacklist() == []
