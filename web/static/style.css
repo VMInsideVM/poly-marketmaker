@@ -120,7 +120,7 @@ body {
 .table-scroll { max-height: 42vh; overflow: auto; margin-bottom: 24px;
   border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 .table-scroll .data-table { margin-bottom: 0; box-shadow: none; border-radius: 0; }
-.data-table thead th { position: sticky; top: 0; z-index: 1; background: #f8f9fa; }
+.table-scroll .data-table thead th { position: sticky; top: 0; z-index: 1; background: #f8f9fa; }
 .btn-xs { padding: 0 4px; font-size: 13px; line-height: 1; cursor: pointer;
   background: transparent; border: none; color: inherit; }
 .btn-xs:hover { opacity: 0.7; }
