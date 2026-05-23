@@ -11,6 +11,7 @@ def _worker(api, db, cap=5):
         "max_buy_orders_per_wallet": cap,
         "cooldown_minutes": 20,
     }
+    db.get_blacklist_ids.return_value = set()
     return WalletWorker(api, db, "0xWALLET", {"fill_check_interval_sec": 5})
 
 
@@ -68,6 +69,7 @@ def _worker_capped(api, db, cap):
         "max_buy_orders_per_wallet": cap,
         "cooldown_minutes": 20,
     }
+    db.get_blacklist_ids.return_value = set()
     return WalletWorker(
         api,
         db,
@@ -372,3 +374,31 @@ def test_order_size_floors_on_inexact_division():
     assert (
         api.place_limit_buy.call_args.args[2] == 3333
     )  # floor(1000/0.30)=floor(3333.33)
+
+
+def test_skips_blacklisted_market():
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    db.get_blacklist_ids.return_value = {"m0"}  # m0 在黑名单
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders([_market(0)])
+    api.place_limit_buy.assert_not_called()
+
+
+def test_non_blacklisted_market_still_placed():
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    db.get_blacklist_ids.return_value = {"mOTHER"}  # 别的市场在黑名单
+    with patch("engine.strategy.determine_order_price", return_value=0.40):
+        worker.place_orders([_market(0)])
+    api.place_limit_buy.assert_called_once()

@@ -138,7 +138,12 @@ class WalletWorker:
             return
         effective_limit = slots if limit is None else min(limit, slots)
 
+        # 全局黑名单:任何钱包都不再挂这些 condition_id 的买单(一次性加载)。
+        blacklist = self.db.get_blacklist_ids()
+
         for market in eligible_markets:
+            if market["market_id"] in blacklist:
+                continue
             if self.db.is_in_cooldown(self.wallet_address, market["market_id"]):
                 continue
             if market["token_id"] in open_buy_assets:
