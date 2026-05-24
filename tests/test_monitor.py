@@ -376,6 +376,55 @@ class TestCheckTakeProfit:
         api.place_limit_sell.assert_not_called()
         api.cancel_orders.assert_not_called()
 
+    def _taker_buy(self, price=0.33, size=100.0, asset="tok1", ts="200"):
+        # 我们当 taker 的买入:成交在顶层,maker_orders 是对手方
+        return {
+            "id": f"tt-{ts}",
+            "market": "mkt1",
+            "match_time": ts,
+            "trader_side": "TAKER",
+            "side": "BUY",
+            "asset_id": asset,
+            "size": str(size),
+            "price": str(price),
+            "maker_orders": [
+                {
+                    "order_id": f"cp-{ts}",
+                    "maker_address": "0xCOUNTERPARTY",
+                    "side": "SELL",
+                    "matched_amount": str(size),
+                    "price": str(price),
+                    "asset_id": asset,
+                }
+            ],
+        }
+
+    def test_cost_query_omits_maker_address(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = [self._buy()]
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        params = api.get_trades.call_args.args[0]
+        assert params.maker_address is None
+        assert params.asset_id == "tok1"
+
+    def test_places_sell_for_taker_acquired_position(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(size=100.0, avg=0.33)]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = [self._taker_buy(price=0.33, size=100.0)]
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_called_once_with(
+            "tok1", 0.33, 100.0, tick_size="0.01"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Step 2: check_stop_loss — Data API positions

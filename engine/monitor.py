@@ -101,9 +101,9 @@ class OrderMonitor:
             return self._cost_cache[asset_id]
         funder = self._funder()
         try:
-            trades = self.api.get_trades(
-                TradeParams(maker_address=funder, asset_id=asset_id)
-            )
+            # 不传 maker_address:服务端返回本钱包两种角色的成交,使我们当 taker 的
+            # 买入也进入加权成本(extract_buy_fills 内部仍按 funder 过滤 maker_orders)。
+            trades = self.api.get_trades(TradeParams(asset_id=asset_id))
         except Exception as e:
             logger.warning("get_trades(asset=%s) for cost failed: %s", asset_id, e)
             self._cost_cache[asset_id] = None
