@@ -20,6 +20,11 @@ class TestSettings:
         assert settings["min_reward_usd"] == 100.0
         assert settings["stop_loss_pct"] == 15.0
 
+    def test_get_settings_includes_order_size_defaults(self, db):
+        settings = db.get_settings()
+        assert settings["order_size_mode"] == "min"
+        assert settings["order_size_custom_usd"] == 0.0
+
     def test_save_and_load_settings(self, db):
         db.save_settings({"min_reward_usd": 200.0, "stop_loss_pct": 10.0})
         settings = db.get_settings()

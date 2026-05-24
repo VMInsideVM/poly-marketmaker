@@ -15,6 +15,8 @@ DEFAULTS = {
     "cooldown_minutes": 20,
     "rewards_cache_ttl_sec": 600,
     "max_buy_orders_per_wallet": 5,
+    "order_size_mode": "min",
+    "order_size_custom_usd": 0.0,
 }
 
 
