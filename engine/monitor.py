@@ -360,7 +360,10 @@ class OrderMonitor:
         cur = float(pos.get("curPrice", 0) or 0)
         if size <= 0:
             return
-        avg = self._cost(asset_id, size)  # 真实成交加权成本,替代 Data API avgPrice
+        avg_fallback = float(pos.get("avgPrice", 0) or 0)
+        avg, _source = self._cost_with_source(asset_id, size, avg_fallback)
+        # get_trades 加权成本优先;取不到时回落 Data API avgPrice。
+        # 已知风险(已接受):市价平仓无穿价护栏,avgPrice 读高可能误触发。
         if avg is None or avg <= 0:
             return
         if not stop_loss_triggered(cur, avg, settings["stop_loss_pct"]):

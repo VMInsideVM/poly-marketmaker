@@ -577,23 +577,45 @@ class TestStopLoss:
 
         api.place_market_sell.assert_not_called()
 
-    def test_skips_stop_loss_when_cost_unavailable(self):
+    def test_skips_stop_loss_when_both_sources_unavailable(self):
+        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
+        api.get_user_positions.return_value = [
+            {
+                "asset": "tok1",
+                "size": 1000.0,
+                "avgPrice": 0.0,  # 无 avgPrice
+                "curPrice": 0.10,
+                "conditionId": "mkt1",
+            }
+        ]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = []  # get_trades 也空 -> 两源皆空
+
+        monitor.check_stop_loss()
+
+        api.place_market_sell.assert_not_called()
+
+    def test_stop_loss_falls_back_to_avgprice(self):
+        # get_trades 0 笔 + avgPrice=0.30,现价 0.24 -> 用 avgPrice 判定并市价平仓
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
         api.get_user_positions.return_value = [
             {
                 "asset": "tok1",
                 "size": 1000.0,
                 "avgPrice": 0.30,
-                "curPrice": 0.10,
+                "curPrice": 0.24,
                 "conditionId": "mkt1",
             }
         ]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = []  # 成本 None -> 不在不确定成本上市价平仓
+        api.get_open_orders.return_value = [
+            {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
+        ]
+        api.get_trades.return_value = []  # get_trades 取不到 -> 回落 avgPrice
 
         monitor.check_stop_loss()
 
-        api.place_market_sell.assert_not_called()
+        api.cancel_orders.assert_called_with(["sell1"])
+        api.place_market_sell.assert_called_with("tok1", 1000.0)
 
 
 # ---------------------------------------------------------------------------
