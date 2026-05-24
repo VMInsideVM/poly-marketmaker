@@ -190,3 +190,31 @@ def test_extract_buy_fills_maker_and_taker_no_double_count():
     assert extract_buy_fills(
         [TRADE_TWO_OURS_BUY, TRADE_TAKER_BUY], FUNDER, "ASSET_T"
     ) == [{"price": 0.33, "size": 100.0, "ts": 1779040000.0}]
+
+
+def test_extract_buy_fills_no_double_count_when_funder_in_both():
+    # 防御:同一笔 trade 若我们的 funder 同时出现在 maker_orders 且 trader_side=TAKER
+    # (异常/矛盾数据),只能计一次,不能重复计入
+    weird = {
+        "id": "trade-weird",
+        "side": "BUY",
+        "size": "100",
+        "price": "0.33",
+        "asset_id": "ASSET_T",
+        "market": "COND_T",
+        "match_time": "1779050000",
+        "trader_side": "TAKER",
+        "maker_orders": [
+            {
+                "order_id": "ord-ours",
+                "maker_address": FUNDER,
+                "side": "BUY",
+                "matched_amount": "100",
+                "price": "0.33",
+                "asset_id": "ASSET_T",
+            }
+        ],
+    }
+    fills = extract_buy_fills([weird], FUNDER, "ASSET_T")
+    assert len(fills) == 1
+    assert fills[0]["size"] == 100.0

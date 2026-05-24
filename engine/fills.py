@@ -62,9 +62,11 @@ def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[di
     out = []
     for tr in trades:
         ts = float(tr.get("match_time", 0) or 0)
+        we_are_maker = False
         for mo in tr.get("maker_orders", []) or []:
             if str(mo.get("maker_address", "")).lower() != f:
                 continue
+            we_are_maker = True  # 我们在这笔 trade 里是 maker -> 不可能同时是 taker
             if str(mo.get("side", "")).upper() != "BUY":
                 continue
             if str(mo.get("asset_id", "")) != a:
@@ -77,7 +79,8 @@ def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[di
                 }
             )
         if (
-            str(tr.get("trader_side", "")).upper() == "TAKER"
+            not we_are_maker
+            and str(tr.get("trader_side", "")).upper() == "TAKER"
             and str(tr.get("side", "")).upper() == "BUY"
             and str(tr.get("asset_id", "")) == a
         ):
