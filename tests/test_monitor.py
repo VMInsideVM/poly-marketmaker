@@ -364,17 +364,110 @@ class TestCheckTakeProfit:
             "tok1", pytest.approx(0.28), 361.0, tick_size="0.01"
         )
 
-    def test_skips_when_cost_unavailable(self):
+    def test_skips_when_both_sources_unavailable(self):
+        # get_trades 无成交 且 avgPrice<=0 -> 两源皆空 -> 不动卖单
         monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos()]
+        api.get_user_positions.return_value = [self._pos(avg=0.0)]
         api.get_open_orders.return_value = []
-        api.get_trades.return_value = []  # 无买入成交 -> 成本 None
+        api.get_trades.return_value = []
         api.get_orderbook.return_value = {"tick_size": "0.01"}
 
         monitor.check_take_profit()
 
         api.place_limit_sell.assert_not_called()
         api.cancel_orders.assert_not_called()
+
+    def test_falls_back_to_avgprice_when_no_trades(self):
+        # get_trades 0 笔 + avgPrice=0.30 -> 用 avgPrice 经穿价护栏挂卖
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(size=222.08, avg=0.30)]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = []  # get_trades 取不到
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_called_once_with(
+            "tok1", 0.30, 222.08, tick_size="0.01"
+        )
+        tp = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "take_profit_sell"
+        )
+        assert "avgPrice兜底" in tp.kwargs["price_basis"]
+
+    def test_no_fallback_when_get_trades_has_data(self):
+        # get_trades 有成交 -> 用加权成本,不碰 avgPrice(门控验证)
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(size=222.08, avg=0.99)]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = [self._buy(price=0.30, size=222.08)]
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_called_once_with(
+            "tok1",
+            0.30,
+            222.08,
+            tick_size="0.01",  # 0.30 来自 get_trades,非 avgPrice 0.99
+        )
+        tp = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "take_profit_sell"
+        )
+        assert "get_trades加权" in tp.kwargs["price_basis"]
+
+    def _taker_buy(self, price=0.33, size=100.0, asset="tok1", ts="200"):
+        # 我们当 taker 的买入:成交在顶层,maker_orders 是对手方
+        return {
+            "id": f"tt-{ts}",
+            "market": "mkt1",
+            "match_time": ts,
+            "trader_side": "TAKER",
+            "side": "BUY",
+            "asset_id": asset,
+            "size": str(size),
+            "price": str(price),
+            "maker_orders": [
+                {
+                    "order_id": f"cp-{ts}",
+                    "maker_address": "0xCOUNTERPARTY",
+                    "side": "SELL",
+                    "matched_amount": str(size),
+                    "price": str(price),
+                    "asset_id": asset,
+                }
+            ],
+        }
+
+    def test_cost_query_omits_maker_address(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = [self._buy()]
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        params = api.get_trades.call_args.args[0]
+        assert params.maker_address is None
+        assert params.asset_id == "tok1"
+
+    def test_places_sell_for_taker_acquired_position(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(size=100.0, avg=0.33)]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = [self._taker_buy(price=0.33, size=100.0)]
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_called_once_with(
+            "tok1", 0.33, 100.0, tick_size="0.01"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -484,23 +577,51 @@ class TestStopLoss:
 
         api.place_market_sell.assert_not_called()
 
-    def test_skips_stop_loss_when_cost_unavailable(self):
+    def test_skips_stop_loss_when_both_sources_unavailable(self):
+        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
+        api.get_user_positions.return_value = [
+            {
+                "asset": "tok1",
+                "size": 1000.0,
+                "avgPrice": 0.0,  # 无 avgPrice
+                "curPrice": 0.10,
+                "conditionId": "mkt1",
+            }
+        ]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = []  # get_trades 也空 -> 两源皆空
+
+        monitor.check_stop_loss()
+
+        api.place_market_sell.assert_not_called()
+
+    def test_stop_loss_falls_back_to_avgprice(self):
+        # get_trades 0 笔 + avgPrice=0.30,现价 0.24 -> 用 avgPrice 判定并市价平仓
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
         api.get_user_positions.return_value = [
             {
                 "asset": "tok1",
                 "size": 1000.0,
                 "avgPrice": 0.30,
-                "curPrice": 0.10,
+                "curPrice": 0.24,
                 "conditionId": "mkt1",
             }
         ]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = []  # 成本 None -> 不在不确定成本上市价平仓
+        api.get_open_orders.return_value = [
+            {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
+        ]
+        api.get_trades.return_value = []  # get_trades 取不到 -> 回落 avgPrice
 
         monitor.check_stop_loss()
 
-        api.place_market_sell.assert_not_called()
+        api.cancel_orders.assert_called_with(["sell1"])
+        api.place_market_sell.assert_called_with("tok1", 1000.0)
+        sl = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "stoploss_market_sell"
+        )
+        assert "avgPrice兜底" in sl.kwargs["price_basis"]
 
 
 # ---------------------------------------------------------------------------

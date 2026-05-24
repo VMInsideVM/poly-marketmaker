@@ -141,3 +141,80 @@ def test_extract_buy_fills_aggregates_across_trades_same_asset():
     assert {"price": 0.4, "size": 20.0, "ts": 1779030000.0} in fills
     assert {"price": 0.42, "size": 10.0, "ts": 1779031111.0} in fills
     assert len(fills) == 2
+
+
+# 我们当 taker 的买入:成交在 trade 顶层,maker_orders 里是对手方(不是我们)
+TRADE_TAKER_BUY = {
+    "id": "trade-taker-1",
+    "side": "BUY",
+    "size": "100",
+    "price": "0.33",
+    "asset_id": "ASSET_T",
+    "market": "COND_T",
+    "match_time": "1779040000",
+    "trader_side": "TAKER",
+    "maker_orders": [
+        {
+            "order_id": "ord-counterparty",
+            "maker_address": "0x49c40bD313D8599F54B62fff13324a790c4fBf77",
+            "side": "SELL",
+            "matched_amount": "100",
+            "price": "0.33",
+            "asset_id": "ASSET_T",
+        }
+    ],
+}
+
+
+def test_extract_buy_fills_includes_taker_buy():
+    fills = extract_buy_fills([TRADE_TAKER_BUY], FUNDER, "ASSET_T")
+    assert fills == [{"price": 0.33, "size": 100.0, "ts": 1779040000.0}]
+
+
+def test_extract_buy_fills_taker_sell_ignored():
+    t = {**TRADE_TAKER_BUY, "side": "SELL"}
+    assert extract_buy_fills([t], FUNDER, "ASSET_T") == []
+
+
+def test_extract_buy_fills_taker_wrong_asset_ignored():
+    assert extract_buy_fills([TRADE_TAKER_BUY], FUNDER, "OTHER_ASSET") == []
+
+
+def test_extract_buy_fills_maker_and_taker_no_double_count():
+    # 一个 maker 买入(ASSET_B1@0.4x20) + 一个 taker 买入(ASSET_T@0.33x100)
+    maker_fills = extract_buy_fills([TRADE_TWO_OURS_BUY], FUNDER, "ASSET_B1")
+    taker_fills = extract_buy_fills([TRADE_TAKER_BUY], FUNDER, "ASSET_T")
+    assert maker_fills == [{"price": 0.4, "size": 20.0, "ts": 1779030000.0}]
+    assert taker_fills == [{"price": 0.33, "size": 100.0, "ts": 1779040000.0}]
+    # 混在一起按各自 asset 提取,互不串扰
+    assert extract_buy_fills(
+        [TRADE_TWO_OURS_BUY, TRADE_TAKER_BUY], FUNDER, "ASSET_T"
+    ) == [{"price": 0.33, "size": 100.0, "ts": 1779040000.0}]
+
+
+def test_extract_buy_fills_no_double_count_when_funder_in_both():
+    # 防御:同一笔 trade 若我们的 funder 同时出现在 maker_orders 且 trader_side=TAKER
+    # (异常/矛盾数据),只能计一次,不能重复计入
+    weird = {
+        "id": "trade-weird",
+        "side": "BUY",
+        "size": "100",
+        "price": "0.33",
+        "asset_id": "ASSET_T",
+        "market": "COND_T",
+        "match_time": "1779050000",
+        "trader_side": "TAKER",
+        "maker_orders": [
+            {
+                "order_id": "ord-ours",
+                "maker_address": FUNDER,
+                "side": "BUY",
+                "matched_amount": "100",
+                "price": "0.33",
+                "asset_id": "ASSET_T",
+            }
+        ],
+    }
+    fills = extract_buy_fills([weird], FUNDER, "ASSET_T")
+    assert len(fills) == 1
+    assert fills[0]["size"] == 100.0

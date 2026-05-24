@@ -101,9 +101,9 @@ class OrderMonitor:
             return self._cost_cache[asset_id]
         funder = self._funder()
         try:
-            trades = self.api.get_trades(
-                TradeParams(maker_address=funder, asset_id=asset_id)
-            )
+            # 不传 maker_address:服务端返回本钱包两种角色的成交,使我们当 taker 的
+            # 买入也进入加权成本(extract_buy_fills 内部仍按 funder 过滤 maker_orders)。
+            trades = self.api.get_trades(TradeParams(asset_id=asset_id))
         except Exception as e:
             logger.warning("get_trades(asset=%s) for cost failed: %s", asset_id, e)
             self._cost_cache[asset_id] = None
@@ -112,6 +112,19 @@ class OrderMonitor:
         cost = cost_basis_from_buy_fills(fills, size)
         self._cost_cache[asset_id] = cost
         return cost
+
+    def _cost_with_source(self, asset_id: str, size: float, avg_fallback: float):
+        """成本 + 来源。优先 get_trades 加权成本;取不到(None/<=0)且 avg_fallback>0
+        时回落 Data API avgPrice。返回 (cost_or_None, source_str)。
+        门控:get_trades 有成本时永远不碰 avgPrice。
+        注意:止盈调用方有穿价护栏兜底;止损调用方为市价平仓、无护栏,
+        使用 avgPrice 兜底属已接受风险(avgPrice 读高可能误触发)。"""
+        cost = self._cost(asset_id, size)  # get_trades 加权(本 tick 缓存)或 None
+        if cost is not None and cost > 0:
+            return cost, "get_trades加权"
+        if avg_fallback > 0:
+            return float(avg_fallback), "avgPrice兜底"
+        return None, ""
 
     # --- Step 1: fills via get_trades (flatten maker_orders) ---
     def check_buy_orders(self):
@@ -236,7 +249,8 @@ class OrderMonitor:
         cid = pos.get("conditionId", "")
         if size <= 0:
             return
-        cost = self._cost(asset_id, size)
+        avg_fallback = float(pos.get("avgPrice", 0) or 0)
+        cost, source = self._cost_with_source(asset_id, size, avg_fallback)
         if cost is None or cost <= 0:
             self._status_add(
                 market=cid,
@@ -246,7 +260,7 @@ class OrderMonitor:
                 matched="-",
                 stage="止盈卖单",
                 action="跳过(无成交数据)",
-                detail="get_trades 无买入成交，保持现有卖单不动",
+                detail="get_trades 无买入成交且无 avgPrice，保持现有卖单不动",
             )
             return
         tick, tick_str, best_bid = self._sell_book(asset_id)
@@ -300,8 +314,8 @@ class OrderMonitor:
             size=size,
             reason="按真实成交加权成本挂止盈卖单，并加穿价护栏（不亏本金、不穿价市价清仓、赚流动性奖励）",
             price_basis=(
-                f"成本=get_trades加权 {cost:.4f}；卖价=max(成本,买一+1tick)={want:.4f}；"
-                f"来源：CLOB get_trades + get_orderbook"
+                f"成本={source} {cost:.4f}；卖价=max(成本,买一+1tick)={want:.4f}；"
+                f"来源：{'CLOB get_trades' if source == 'get_trades加权' else 'Data API avgPrice(兜底)'} + get_orderbook"
             ),
         )
         self._status_add(
@@ -346,7 +360,10 @@ class OrderMonitor:
         cur = float(pos.get("curPrice", 0) or 0)
         if size <= 0:
             return
-        avg = self._cost(asset_id, size)  # 真实成交加权成本,替代 Data API avgPrice
+        avg_fallback = float(pos.get("avgPrice", 0) or 0)
+        avg, source = self._cost_with_source(asset_id, size, avg_fallback)
+        # get_trades 加权成本优先;取不到时回落 Data API avgPrice。
+        # 已知风险(已接受):市价平仓无穿价护栏,avgPrice 读高可能误触发。
         if avg is None or avg <= 0:
             return
         if not stop_loss_triggered(cur, avg, settings["stop_loss_pct"]):
@@ -388,7 +405,10 @@ class OrderMonitor:
             price=cur,
             size=size,
             reason=f"现价 {cur:.4f} 跌破成本价 {avg:.4f} 的止损阈值 avg×(1-止损比例{settings['stop_loss_pct']}%)，市价平仓止损",
-            price_basis=f"成本价=get_trades加权 {avg:.4f}、现价 curPrice={cur:.4f}；来源：CLOB get_trades + Data API /positions",
+            price_basis=(
+                f"成本价={source} {avg:.4f}、现价 curPrice={cur:.4f}；"
+                f"来源：{'CLOB get_trades' if source == 'get_trades加权' else 'Data API avgPrice(兜底)'} + Data API /positions"
+            ),
         )
         logger.warning(
             "Stop-loss executed: asset=%s size=%s cur=%.4f avg=%.4f",
