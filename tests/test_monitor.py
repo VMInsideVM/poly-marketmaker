@@ -364,17 +364,55 @@ class TestCheckTakeProfit:
             "tok1", pytest.approx(0.28), 361.0, tick_size="0.01"
         )
 
-    def test_skips_when_cost_unavailable(self):
+    def test_skips_when_both_sources_unavailable(self):
+        # get_trades 无成交 且 avgPrice<=0 -> 两源皆空 -> 不动卖单
         monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos()]
+        api.get_user_positions.return_value = [self._pos(avg=0.0)]
         api.get_open_orders.return_value = []
-        api.get_trades.return_value = []  # 无买入成交 -> 成本 None
+        api.get_trades.return_value = []
         api.get_orderbook.return_value = {"tick_size": "0.01"}
 
         monitor.check_take_profit()
 
         api.place_limit_sell.assert_not_called()
         api.cancel_orders.assert_not_called()
+
+    def test_falls_back_to_avgprice_when_no_trades(self):
+        # get_trades 0 笔 + avgPrice=0.30 -> 用 avgPrice 经穿价护栏挂卖
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(size=222.08, avg=0.30)]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = []  # get_trades 取不到
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_called_once_with(
+            "tok1", 0.30, 222.08, tick_size="0.01"
+        )
+        tp = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "take_profit_sell"
+        )
+        assert "avgPrice兜底" in tp.kwargs["price_basis"]
+
+    def test_no_fallback_when_get_trades_has_data(self):
+        # get_trades 有成交 -> 用加权成本,不碰 avgPrice(门控验证)
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos(size=222.08, avg=0.99)]
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = [self._buy(price=0.30, size=222.08)]
+        api.get_orderbook.return_value = {"tick_size": "0.01"}
+
+        monitor.check_take_profit()
+
+        api.place_limit_sell.assert_called_once_with(
+            "tok1",
+            0.30,
+            222.08,
+            tick_size="0.01",  # 0.30 来自 get_trades,非 avgPrice 0.99
+        )
 
     def _taker_buy(self, price=0.33, size=100.0, asset="tok1", ts="200"):
         # 我们当 taker 的买入:成交在顶层,maker_orders 是对手方
