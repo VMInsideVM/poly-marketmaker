@@ -227,14 +227,14 @@ class WalletWorker:
             )
             if order_size is None:
                 logger.info(
-                    "Skip %s: mode=%s balance=%.2f cap=%.2f price=%.4f "
-                    "buys fewer than min reward size %d",
+                    "Skip %s: order_size=None "
+                    "(mode=%s balance=%.2f price=%.4f min_size=%d cap=%.2f)",
                     market["market_name"],
                     order_size_mode,
                     balance,
-                    order_size_custom_usd,
                     order_price,
                     min_size,
+                    order_size_custom_usd,
                 )
                 continue
             try:
