@@ -48,9 +48,14 @@ def select_new_buy_fills(trades: list[dict], funder: str, seen_keys: set) -> lis
 def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[dict]:
     """挑出我们在某 token 上的全部 BUY 成交,用于算加权成本。
 
-    返回 [{price, size, ts}, ...](不去重、不依赖 seen_keys)。只看 maker_orders
-    里 maker_address==funder 且 side==BUY 且 asset_id 匹配的条目;price 取该 maker
-    条目的 price,size 取 matched_amount,ts 取 trade 顶层 match_time。
+    返回 [{price, size, ts}, ...](不去重、不依赖 seen_keys)。两种来源:
+    - maker:我们挂的买单被吃,成交在 trade.maker_orders 里(按 funder 过滤,
+      side==BUY,asset 匹配);price=mo.price,size=mo.matched_amount。
+    - taker:我们的 GTC 买单下单瞬间可成交而以 taker 立即成交,成交在 trade 顶层
+      (maker_orders 里是对手方,不是我们)。当 trade.trader_side==TAKER 且顶层
+      side==BUY 且 asset 匹配:price=trade.price,size=trade.size。
+    一笔 trade 对我们而言要么是 maker 要么是 taker,两分支天然互斥,不会重复计入。
+    ts 取 trade 顶层 match_time。
     """
     f = (funder or "").lower()
     a = str(asset_id)
@@ -68,6 +73,18 @@ def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[di
                 {
                     "price": float(mo.get("price", 0) or 0),
                     "size": float(mo.get("matched_amount", 0) or 0),
+                    "ts": ts,
+                }
+            )
+        if (
+            str(tr.get("trader_side", "")).upper() == "TAKER"
+            and str(tr.get("side", "")).upper() == "BUY"
+            and str(tr.get("asset_id", "")) == a
+        ):
+            out.append(
+                {
+                    "price": float(tr.get("price", 0) or 0),
+                    "size": float(tr.get("size", 0) or 0),
                     "ts": ts,
                 }
             )
