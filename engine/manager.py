@@ -13,6 +13,7 @@ from api.polymarket_api import PolymarketAPI
 from engine.scanner import MarketScanner
 from engine.monitor import OrderMonitor
 from engine.positions import held_condition_ids
+from engine.order_sizing import compute_order_size
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,10 @@ class WalletWorker:
         # Hard per-wallet cap on the TOTAL open buy orders. Read live from
         # settings (not the constructor snapshot) so a config change takes
         # effect on the next placement without restarting the engine.
-        max_buys = int(self.db.get_settings().get("max_buy_orders_per_wallet", 5))
+        settings = self.db.get_settings()
+        max_buys = int(settings.get("max_buy_orders_per_wallet", 5))
+        order_size_mode = settings.get("order_size_mode", "min")
+        order_size_custom_usd = float(settings.get("order_size_custom_usd", 0) or 0)
 
         # If existing buys already exceed the cap (e.g. the user just lowered
         # it), cancel the excess down to the cap. Keep the oldest orders
@@ -208,20 +212,29 @@ class WalletWorker:
                 continue
 
             balance = self.api.get_balance()
-            # 每笔买单按全部可用余额下单。Polymarket maker 买单不锁仓,同一笔
-            # 余额垫付所有挂着的买单,所以这里跨市场循环时刻意 *不* 递减余额。
-            order_size = int(balance / order_price)
-            # 全额都买不够拿奖励的最小合格份额,挂了也吃不到奖励 -> 跳过该市场。
+            # 下单份额按设置的模式决定(min=最小合格份额 / custom=美元上限 /
+            # balance=全额)。maker 买单不锁仓,同一笔余额垫付所有挂着的买单,
+            # 所以跨市场循环时刻意 *不* 递减余额。
             min_size = int(
                 market.get("rewards_min_size", market.get("order_size", 0)) or 0
             )
-            if order_size < min_size:
+            order_size = compute_order_size(
+                order_size_mode,
+                order_price,
+                balance,
+                min_size,
+                order_size_custom_usd,
+            )
+            if order_size is None:
                 logger.info(
-                    "Balance %.2f only buys %d < min reward size %d for %s, skip",
-                    balance,
-                    order_size,
-                    min_size,
+                    "Skip %s: mode=%s balance=%.2f cap=%.2f price=%.4f "
+                    "buys fewer than min reward size %d",
                     market["market_name"],
+                    order_size_mode,
+                    balance,
+                    order_size_custom_usd,
+                    order_price,
+                    min_size,
                 )
                 continue
             try:

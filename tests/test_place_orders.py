@@ -10,6 +10,7 @@ def _worker(api, db, cap=5):
     db.get_settings.return_value = {
         "max_buy_orders_per_wallet": cap,
         "cooldown_minutes": 20,
+        "order_size_mode": "min",
     }
     db.get_blacklist_ids.return_value = set()
     api.get_user_positions.return_value = []  # default: no held positions
@@ -69,6 +70,7 @@ def _worker_capped(api, db, cap):
     db.get_settings.return_value = {
         "max_buy_orders_per_wallet": cap,
         "cooldown_minutes": 20,
+        "order_size_mode": "min",
     }
     db.get_blacklist_ids.return_value = set()
     api.get_user_positions.return_value = []  # default: no held positions
@@ -305,6 +307,7 @@ def test_order_size_uses_full_balance():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
     worker = _worker(api, db)
+    db.get_settings.return_value["order_size_mode"] = "balance"
     with patch("engine.strategy.determine_order_price", return_value=0.50):
         worker.place_orders([_market(0)])
     api.place_limit_buy.assert_called_once()
@@ -320,6 +323,7 @@ def test_balance_not_decremented_across_markets():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
     worker = _worker(api, db)
+    db.get_settings.return_value["order_size_mode"] = "balance"
     markets = [_market(i) for i in range(3)]
     with patch("engine.strategy.determine_order_price", return_value=0.50):
         worker.place_orders(markets)
@@ -336,6 +340,7 @@ def test_skip_when_full_balance_below_min_reward_size():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 3.0  # floor(3.0/0.50)=6 份
     worker = _worker(api, db)
+    db.get_settings.return_value["order_size_mode"] = "balance"
     m = _market(0)
     m["rewards_min_size"] = 10  # 需要 >=10,只买得起 6 -> 跳过
     with patch("engine.strategy.determine_order_price", return_value=0.50):
@@ -352,6 +357,7 @@ def test_place_buy_action_records_full_size():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
     worker = _worker(api, db)
+    db.get_settings.return_value["order_size_mode"] = "balance"
     with patch("engine.strategy.determine_order_price", return_value=0.50):
         worker.place_orders([_market(0)])
     pb = next(
@@ -371,6 +377,7 @@ def test_order_size_floors_on_inexact_division():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
     worker = _worker(api, db)
+    db.get_settings.return_value["order_size_mode"] = "balance"
     with patch("engine.strategy.determine_order_price", return_value=0.30):
         worker.place_orders([_market(0)])
     api.place_limit_buy.assert_called_once()
@@ -440,3 +447,35 @@ def test_no_placement_when_positions_unavailable():
     with patch("engine.strategy.determine_order_price", return_value=0.40):
         worker.place_orders([_market(0)])  # must not raise
     api.place_limit_buy.assert_not_called()
+
+
+def test_min_mode_places_reward_min_size_by_default():
+    # 默认 min 模式:下单份额 = 最小合格份额(_market 的 order_size=10),与余额无关。
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)  # 默认 order_size_mode == "min"
+    with patch("engine.strategy.determine_order_price", return_value=0.50):
+        worker.place_orders([_market(0)])
+    api.place_limit_buy.assert_called_once()
+    assert api.place_limit_buy.call_args.args[2] == 10  # min_size,不是 2000
+
+
+def test_custom_mode_uses_dollar_cap():
+    # custom 模式:每市场单笔按 order_size_custom_usd 美元上限下单。
+    api = MagicMock()
+    db = MagicMock()
+    db.is_in_cooldown.return_value = False
+    api.get_open_orders.return_value = []
+    api.get_orderbook.return_value = _ok_orderbook()
+    api.get_balance.return_value = 1000.0
+    worker = _worker(api, db)
+    db.get_settings.return_value["order_size_mode"] = "custom"
+    db.get_settings.return_value["order_size_custom_usd"] = 50.0
+    with patch("engine.strategy.determine_order_price", return_value=0.50):
+        worker.place_orders([_market(0)])
+    api.place_limit_buy.assert_called_once()
+    assert api.place_limit_buy.call_args.args[2] == 100  # floor(50/0.50)
