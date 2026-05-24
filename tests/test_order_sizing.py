@@ -45,6 +45,7 @@ def test_custom_mode_zero_cap_skips():
 def test_non_positive_price_returns_none():
     assert compute_order_size("balance", 0.0, 1000.0, 10, 0.0) is None
     assert compute_order_size("custom", -0.10, 1000.0, 10, 50.0) is None
+    assert compute_order_size("min", 0.0, 1000.0, 10, 0.0) is None
 
 
 def test_unknown_mode_falls_back_to_min():
