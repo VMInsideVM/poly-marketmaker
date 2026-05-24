@@ -616,6 +616,12 @@ class TestStopLoss:
 
         api.cancel_orders.assert_called_with(["sell1"])
         api.place_market_sell.assert_called_with("tok1", 1000.0)
+        sl = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "stoploss_market_sell"
+        )
+        assert "avgPrice兜底" in sl.kwargs["price_basis"]
 
 
 # ---------------------------------------------------------------------------
