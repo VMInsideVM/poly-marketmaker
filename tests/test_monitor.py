@@ -413,6 +413,12 @@ class TestCheckTakeProfit:
             222.08,
             tick_size="0.01",  # 0.30 来自 get_trades,非 avgPrice 0.99
         )
+        tp = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "take_profit_sell"
+        )
+        assert "get_trades加权" in tp.kwargs["price_basis"]
 
     def _taker_buy(self, price=0.33, size=100.0, asset="tok1", ts="200"):
         # 我们当 taker 的买入:成交在顶层,maker_orders 是对手方

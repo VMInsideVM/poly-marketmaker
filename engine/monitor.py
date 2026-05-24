@@ -116,11 +116,13 @@ class OrderMonitor:
     def _cost_with_source(self, asset_id: str, size: float, avg_fallback: float):
         """成本 + 来源。优先 get_trades 加权成本;取不到(None/<=0)且 avg_fallback>0
         时回落 Data API avgPrice。返回 (cost_or_None, source_str)。
-        门控:get_trades 有成本时永远不碰 avgPrice。"""
+        门控:get_trades 有成本时永远不碰 avgPrice。
+        注意:止盈调用方有穿价护栏兜底;止损调用方为市价平仓、无护栏,
+        使用 avgPrice 兜底属已接受风险(avgPrice 读高可能误触发)。"""
         cost = self._cost(asset_id, size)  # get_trades 加权(本 tick 缓存)或 None
         if cost is not None and cost > 0:
             return cost, "get_trades加权"
-        if avg_fallback and avg_fallback > 0:
+        if avg_fallback > 0:
             return float(avg_fallback), "avgPrice兜底"
         return None, ""
 
@@ -313,7 +315,7 @@ class OrderMonitor:
             reason="按真实成交加权成本挂止盈卖单，并加穿价护栏（不亏本金、不穿价市价清仓、赚流动性奖励）",
             price_basis=(
                 f"成本={source} {cost:.4f}；卖价=max(成本,买一+1tick)={want:.4f}；"
-                f"来源：CLOB get_trades + get_orderbook"
+                f"来源：{'CLOB get_trades' if source == 'get_trades加权' else 'Data API avgPrice(兜底)'} + get_orderbook"
             ),
         )
         self._status_add(
