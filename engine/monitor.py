@@ -7,6 +7,8 @@ from engine.fills import select_new_buy_fills, extract_buy_fills
 from engine.take_profit import (
     plan_take_profit,
     cost_basis_from_buy_fills,
+    cost_basis_with_lots,
+    describe_cost_basis,
     take_profit_price,
 )
 from engine.strategy_check import needs_replace
@@ -125,6 +127,24 @@ class OrderMonitor:
         if avg_fallback > 0:
             return float(avg_fallback), "avgPrice兜底"
         return None, ""
+
+    def _cost_lots(self, asset_id: str, size: float):
+        """该持仓的加权成本 + 逐笔构成(本 tick 缓存)。只来自 CLOB get_trades 的真实
+        买入成交(maker∪taker),绝不回落 Data API avgPrice。取不到 -> (None, [])。"""
+        key = ("lots", asset_id)
+        if key in self._cost_cache:
+            return self._cost_cache[key]
+        funder = self._funder()
+        try:
+            trades = self.api.get_trades(TradeParams(asset_id=asset_id))
+        except Exception as e:
+            logger.warning("get_trades(asset=%s) for cost failed: %s", asset_id, e)
+            self._cost_cache[key] = (None, [])
+            return None, []
+        fills = extract_buy_fills(trades, funder, asset_id)
+        result = cost_basis_with_lots(fills, size)
+        self._cost_cache[key] = result
+        return result
 
     # --- Step 1: fills via get_trades (flatten maker_orders) ---
     def check_buy_orders(self):
@@ -249,9 +269,13 @@ class OrderMonitor:
         cid = pos.get("conditionId", "")
         if size <= 0:
             return
-        avg_fallback = float(pos.get("avgPrice", 0) or 0)
-        cost, source = self._cost_with_source(asset_id, size, avg_fallback)
+        cost, lots = self._cost_lots(asset_id, size)
         if cost is None or cost <= 0:
+            logger.warning(
+                "Take-profit skipped (no buy fills) asset=%s size=%s — UNPROTECTED",
+                asset_id,
+                size,
+            )
             self._status_add(
                 market=cid,
                 side="卖出",
@@ -259,8 +283,8 @@ class OrderMonitor:
                 size=str(size),
                 matched="-",
                 stage="止盈卖单",
-                action="跳过(无成交数据)",
-                detail="get_trades 无买入成交且无 avgPrice，保持现有卖单不动",
+                action="⚠️跳过·裸奔",
+                detail="get_trades 无买入成交、无法算成本，未挂止盈（绝不用 avgPrice 兜底），该持仓未受保护",
             )
             return
         tick, tick_str, best_bid = self._sell_book(asset_id)
@@ -314,8 +338,8 @@ class OrderMonitor:
             size=size,
             reason="按真实成交加权成本挂止盈卖单，并加穿价护栏（不亏本金、不穿价市价清仓、赚流动性奖励）",
             price_basis=(
-                f"成本={source} {cost:.4f}；卖价=max(成本,买一+1tick)={want:.4f}；"
-                f"来源：{'CLOB get_trades' if source == 'get_trades加权' else 'Data API avgPrice(兜底)'} + get_orderbook"
+                f"{describe_cost_basis(cost, lots)}；"
+                f"卖价=max(成本,买一+1tick)={want:.4f}；来源：CLOB get_trades + get_orderbook"
             ),
         )
         self._status_add(

@@ -364,8 +364,8 @@ class TestCheckTakeProfit:
             "tok1", pytest.approx(0.28), 361.0, tick_size="0.01"
         )
 
-    def test_skips_when_both_sources_unavailable(self):
-        # get_trades 无成交 且 avgPrice<=0 -> 两源皆空 -> 不动卖单
+    def test_skips_when_no_buy_fills_and_no_avg(self):
+        # get_trades 无成交 -> 跳过(不动卖单)。avgPrice 已不参与,此处 avg=0 仅占位
         monitor, api, db = _make_monitor()
         api.get_user_positions.return_value = [self._pos(avg=0.0)]
         api.get_open_orders.return_value = []
@@ -377,28 +377,25 @@ class TestCheckTakeProfit:
         api.place_limit_sell.assert_not_called()
         api.cancel_orders.assert_not_called()
 
-    def test_falls_back_to_avgprice_when_no_trades(self):
-        # get_trades 0 笔 + avgPrice=0.30 -> 用 avgPrice 经穿价护栏挂卖
+    def test_skips_and_warns_when_no_buy_fills(self):
+        # get_trades 取不到买入成交 -> 不挂卖单,写 ⚠️裸奔 状态行(avgPrice 不再兜底)
         monitor, api, db = _make_monitor()
         api.get_user_positions.return_value = [self._pos(size=222.08, avg=0.30)]
         api.get_open_orders.return_value = []
-        api.get_trades.return_value = []  # get_trades 取不到
+        api.get_trades.return_value = []  # 无成交
         api.get_orderbook.return_value = {"tick_size": "0.01"}
 
+        monitor.begin_status_tick()
         monitor.check_take_profit()
+        monitor.publish_status()
 
-        api.place_limit_sell.assert_called_once_with(
-            "tok1", 0.30, 222.08, tick_size="0.01"
-        )
-        tp = next(
-            c
-            for c in db.record_action.call_args_list
-            if c.kwargs["action_type"] == "take_profit_sell"
-        )
-        assert "avgPrice兜底" in tp.kwargs["price_basis"]
+        api.place_limit_sell.assert_not_called()
+        api.cancel_orders.assert_not_called()
+        rows = get_snapshot()["rows"]
+        assert any("裸奔" in r.get("action", "") for r in rows)
 
-    def test_no_fallback_when_get_trades_has_data(self):
-        # get_trades 有成交 -> 用加权成本,不碰 avgPrice(门控验证)
+    def test_uses_get_trades_cost_with_composition_in_basis(self):
+        # get_trades 有成交 -> 用加权成本(0.30),理由含逐笔构成,绝不出现 avgPrice
         monitor, api, db = _make_monitor()
         api.get_user_positions.return_value = [self._pos(size=222.08, avg=0.99)]
         api.get_open_orders.return_value = []
@@ -408,17 +405,17 @@ class TestCheckTakeProfit:
         monitor.check_take_profit()
 
         api.place_limit_sell.assert_called_once_with(
-            "tok1",
-            0.30,
-            222.08,
-            tick_size="0.01",  # 0.30 来自 get_trades,非 avgPrice 0.99
+            "tok1", 0.30, 222.08, tick_size="0.01"  # 0.30 来自 get_trades,非 avg 0.99
         )
         tp = next(
             c
             for c in db.record_action.call_args_list
             if c.kwargs["action_type"] == "take_profit_sell"
         )
-        assert "get_trades加权" in tp.kwargs["price_basis"]
+        basis = tp.kwargs["price_basis"]
+        assert "加权自1笔买入成交" in basis
+        assert "×" in basis and "trade" in basis and "共取" in basis
+        assert "avgPrice" not in basis
 
     def _taker_buy(self, price=0.33, size=100.0, asset="tok1", ts="200"):
         # 我们当 taker 的买入:成交在顶层,maker_orders 是对手方
