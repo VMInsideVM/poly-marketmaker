@@ -1370,6 +1370,104 @@ class TestStep3ActionLog:
         assert ats == ["step3_cancel_old"]
 
 
+class TestStep3PriceBand:
+    """调单算出的目标价超出配置「单价区间」[min,max]美分时，撤买单不重挂。"""
+
+    SETTINGS = {"min_price_cents": 10.0, "max_price_cents": 50.0}
+
+    def _ob(self, best_bid="0.48", best_ask="0.52", tick="0.01"):
+        return {
+            "bids": [{"price": best_bid, "size": "1000"}],
+            "asks": [{"price": best_ask, "size": "1000"}],
+            "tick_size": tick,
+        }
+
+    def _order(self, price="0.48"):
+        return {
+            "id": "o1",
+            "side": "BUY",
+            "asset_id": "tok1",
+            "market": "cid1",
+            "size_matched": "0",
+            "price": price,
+            "original_size": "500",
+            "neg_risk": False,
+        }
+
+    def test_cancels_when_want_above_band(self):
+        # 目标价 0.55 = 55c > 50c 上限：撤单不重挂，即便策略判定 replace。
+        monitor, api, db = _make_monitor(self.SETTINGS)
+        api.get_open_orders.return_value = [self._order(price="0.48")]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
+            "engine.monitor.determine_order_price", return_value=0.55
+        ):
+            monitor.check_sell_orders()
+        api.cancel_orders.assert_called_once_with(["o1"])
+        api.place_limit_buy.assert_not_called()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["price_band_cancel"]
+        call = db.record_action.call_args_list[0]
+        assert call.kwargs["side"] == "-"
+        assert call.kwargs["price"] == -1
+        assert "单价区间" in call.kwargs["reason"]
+
+    def test_cancels_when_want_below_band(self):
+        # 目标价 0.08 = 8c < 10c 下限：撤单不重挂。
+        monitor, api, db = _make_monitor(self.SETTINGS)
+        api.get_open_orders.return_value = [self._order(price="0.12")]
+        api.get_orderbook.return_value = self._ob(best_bid="0.09", best_ask="0.11")
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
+            "engine.monitor.determine_order_price", return_value=0.08
+        ):
+            monitor.check_sell_orders()
+        api.cancel_orders.assert_called_once_with(["o1"])
+        api.place_limit_buy.assert_not_called()
+
+    def test_keeps_when_want_at_band_edge(self):
+        # 含端点：目标价 0.50 = 50c 恰在上限，合规，按 keep 不撤单。
+        monitor, api, db = _make_monitor(self.SETTINGS)
+        api.get_open_orders.return_value = [self._order(price="0.50")]
+        api.get_orderbook.return_value = self._ob(best_bid="0.50", best_ask="0.51")
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        with patch("engine.monitor.needs_replace", return_value="keep"), patch(
+            "engine.monitor.determine_order_price", return_value=0.50
+        ):
+            monitor.check_sell_orders()
+        api.cancel_orders.assert_not_called()
+
+    def test_within_band_replaces_normally(self):
+        # 目标价 0.48 在区间内：维持原有 replace 行为。
+        monitor, api, db = _make_monitor(self.SETTINGS)
+        api.get_open_orders.return_value = [self._order(price="0.40")]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        api.place_limit_buy.return_value = {"orderID": "o2"}
+        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
+            "engine.monitor.determine_order_price", return_value=0.48
+        ):
+            monitor.check_sell_orders()
+        api.cancel_orders.assert_called_once_with(["o1"])
+        api.place_limit_buy.assert_called_once()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["step3_cancel_old", "step3_replace_new"]
+
+    def test_no_band_keys_is_noop(self):
+        # 默认 settings 不含价格区间键：闸门为 no-op，目标价 0.55 仍按 replace。
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._order(price="0.40")]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        api.place_limit_buy.return_value = {"orderID": "o2"}
+        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
+            "engine.monitor.determine_order_price", return_value=0.55
+        ):
+            monitor.check_sell_orders()
+        api.place_limit_buy.assert_called_once()
+
+
 class TestStep3EligibilityRecheck:
     SETTINGS = {"max_spread_cents": 3.0}
 

@@ -627,6 +627,49 @@ class OrderMonitor:
         except Exception as e:
             logger.warning("determine_order_price failed for %s: %s", o.get("id"), e)
             return
+        # 价格区间护栏:调单算出的目标价若超出配置「单价区间」[min,max]美分,撤该
+        # 买单不重挂(与 scanner 价格区间初筛口径一致,含端点)。缺失阈值时安全默认
+        # 0/100,使该闸门成为 no-op(不影响未设区间的旧测试与场景)。
+        min_pc = float(settings.get("min_price_cents", 0.0))
+        max_pc = float(settings.get("max_price_cents", 100.0))
+        if want is not None and (want * 100 < min_pc or want * 100 > max_pc):
+            old_price = float(o.get("price", 0) or 0)
+            osize = int(float(o.get("original_size", 0) or 0))
+            reason = (
+                f"调单目标价 {want * 100:.1f}c 不在单价区间 "
+                f"[{min_pc:.0f}c, {max_pc:.0f}c]，撤买单不重挂"
+            )
+            try:
+                self.api.cancel_orders([o.get("id")])
+            except Exception as e:
+                logger.warning("Price-band cancel %s failed: %s", o.get("id"), e)
+                return
+            self._record_action(
+                market_id=cid,
+                action_type="price_band_cancel",
+                side="-",
+                price=-1,
+                size=osize,
+                reason=reason,
+                price_basis=(
+                    f"调单目标价={want:.4f}；单价区间[{min_pc:.0f}c,{max_pc:.0f}c]；"
+                    f"来源：CLOB get_orderbook + get_rewards_for_market + 设置"
+                ),
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price=f"{old_price:.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="撤单(目标价超区间)",
+                detail=reason,
+            )
+            logger.info(
+                "[Step3] price-band cancel %s market %s: %s", o.get("id"), cid, reason
+            )
+            return
         action = needs_replace(float(o.get("price", 0)), want, tick)
         want_str = "无" if want is None else f"{want:.4f}"
         action_zh = {
