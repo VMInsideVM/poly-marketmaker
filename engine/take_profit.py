@@ -22,8 +22,8 @@ def ceil_to_tick(price: float, tick: float) -> float:
     """Smallest tick-aligned price >= ``price`` (sells never go below cost).
 
     A price already sitting on a tick (within float noise) stays put rather
-    than bumping a whole tick up — the Data API avgPrice carries dirt like
-    0.30000002 that must be treated as 0.30, not 0.31.
+    than bumping a whole tick up — a get_trades weighted cost carries float
+    dirt like 0.30000002 that must be treated as 0.30, not 0.31.
     """
     if tick <= 0:
         return price
