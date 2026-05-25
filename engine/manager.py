@@ -86,7 +86,7 @@ class WalletWorker:
         If ``limit`` is set, stop after that many *successful* placements
         (a placement counts only when ``place_limit_buy`` succeeds).
         """
-        from engine.strategy import determine_order_price
+        from engine.strategy import determine_order_price, reward_price_range
 
         placed = 0
         try:
@@ -194,13 +194,16 @@ class WalletWorker:
             midpoint = (best_bid + best_ask) / 2
             tick = float(ob.get("tick_size", "0.01"))
             tick_str = ob.get("tick_size", "0.01")
-            max_spread = int(market.get("rewards_max_spread", 2))
-            rmin = midpoint - max_spread * tick
-            rmax = midpoint + max_spread * tick
+            # max_spread is in CENTS (e.g. 3, 4.5); the reward band is that many
+            # cents around the midpoint, NOT that many ticks. Keep it a float.
+            max_spread = float(market.get("rewards_max_spread", 2))
+            rmin, rmax = reward_price_range(midpoint, max_spread)
             try:
                 order_price = determine_order_price(
                     bids=bids,
-                    max_spread=max_spread,
+                    # int tick-count drives the 1-cent coarse-path choice
+                    # (1 cent == 1 tick); the band above carries full cents.
+                    max_spread=int(max_spread),
                     tick_size=tick,
                     reward_range_min=rmin,
                     reward_range_max=rmax,

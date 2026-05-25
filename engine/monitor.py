@@ -12,7 +12,7 @@ from engine.take_profit import (
 from engine.strategy_check import needs_replace
 from engine.eligibility import recheck_resting_buy
 from engine.risk import stop_loss_triggered
-from engine.strategy import determine_order_price
+from engine.strategy import determine_order_price, reward_price_range
 from engine.rewards import extract_max_spread
 from engine import monitor_status
 
@@ -469,8 +469,12 @@ class OrderMonitor:
             except Exception as e:
                 logger.error("Compliance error on %s: %s", o.get("id"), e)
 
-    def _market_max_spread(self, condition_id: str) -> int | None:
-        """Real rewards_max_spread for a market, TTL-cached. None if unknown."""
+    def _market_max_spread(self, condition_id: str) -> float | None:
+        """Real rewards_max_spread (in cents) for a market, TTL-cached.
+
+        None if unknown. Kept as a float — fractional cents (e.g. 4.5) must
+        survive so the reward band isn't narrowed.
+        """
         if not condition_id:
             return None
         ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
@@ -614,12 +618,15 @@ class OrderMonitor:
                 detail="取不到 rewards_max_spread",
             )
             return
-        rmin = midpoint - max_spread * tick
-        rmax = midpoint + max_spread * tick
+        # Reward band is max_spread CENTS around the midpoint, NOT max_spread
+        # ticks (the tick form is ~10x too narrow on 0.1-cent markets).
+        rmin, rmax = reward_price_range(midpoint, max_spread)
         try:
             want = determine_order_price(
                 bids=bids,
-                max_spread=max_spread,
+                # int tick-count drives the 1-cent coarse-path choice
+                # (1 cent == 1 tick); the band above carries full cents.
+                max_spread=int(max_spread),
                 tick_size=tick,
                 reward_range_min=rmin,
                 reward_range_max=rmax,
@@ -679,7 +686,7 @@ class OrderMonitor:
         }.get(action, action)
         logger.info(
             "[Step3] 单 %s 市场 %s 现价 %.4f | 盘口 bid %.4f ask %.4f mid %.4f "
-            "tick %.4f | max_spread=%d 区间[%.4f,%.4f] | 应挂价 %s | 判定 %s",
+            "tick %.4f | max_spread=%s 区间[%.4f,%.4f] | 应挂价 %s | 判定 %s",
             o.get("id"),
             cid,
             float(o.get("price", 0) or 0),

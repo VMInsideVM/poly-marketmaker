@@ -14,7 +14,7 @@ import re
 import time
 import logging
 from datetime import datetime
-from engine.strategy import determine_order_price
+from engine.strategy import determine_order_price, reward_price_range
 from engine.take_profit import ceil_to_tick
 
 logger = logging.getLogger(__name__)
@@ -159,7 +159,9 @@ class MarketScanner:
                 continue
 
             # Step 6 & 7: Check each valid token
-            max_spread_reward = int(market.get("rewards_max_spread", 2))
+            # max_spread is in CENTS (e.g. 3, 4.5) — keep it as a float; do not
+            # int()-truncate (4.5 -> 4 would narrow the reward band).
+            max_spread_reward = float(market.get("rewards_max_spread", 2))
             min_size = int(market.get("rewards_min_size", 0))
             neg_risk = market.get("neg_risk", False)
 
@@ -211,8 +213,12 @@ class MarketScanner:
                 tick_size_str = orderbook.get("tick_size", "0.01")
                 tick_size = float(tick_size_str)
                 midpoint = (best_bid + best_ask) / 2
-                reward_range_min = midpoint - max_spread_reward * tick_size
-                reward_range_max = midpoint + max_spread_reward * tick_size
+                # Reward band is max_spread CENTS around the midpoint, NOT
+                # max_spread ticks (the latter is ~10x too narrow on 0.1-cent
+                # markets, which then never produce an order price).
+                reward_range_min, reward_range_max = reward_price_range(
+                    midpoint, max_spread_reward
+                )
 
                 # Minimum capital to place a reward-qualifying order here:
                 # rewards_min_size x the lowest tradable tick inside the reward
@@ -224,7 +230,10 @@ class MarketScanner:
                 try:
                     order_price = determine_order_price(
                         bids=bids,
-                        max_spread=max_spread_reward,
+                        # int tick-count drives the 1-cent coarse-path choice
+                        # (1 cent == 1 tick); unchanged from before. The band
+                        # above already carries the full (fractional) cents.
+                        max_spread=int(max_spread_reward),
                         tick_size=tick_size,
                         reward_range_min=reward_range_min,
                         reward_range_max=reward_range_max,

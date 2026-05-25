@@ -1,9 +1,28 @@
 """engine/strategy.py — Order placement strategy based on orderbook depth."""
 
 
+def reward_price_range(midpoint: float, max_spread_cents: float) -> tuple[float, float]:
+    """Reward-eligible price band ``[midpoint - d, midpoint + d]``.
+
+    Polymarket's rewards ``max_spread`` is expressed in CENTS (e.g. 3, 4.5):
+    the maximum distance from the midpoint, in cents, for an order to earn
+    rewards. It is NOT a count of ticks. ``d = max_spread_cents * 0.01`` keeps
+    the band correct for both 1-cent (tick 0.01) and 0.1-cent (tick 0.001)
+    markets.
+
+    The old ``max_spread * tick_size`` form only happened to be right when
+    tick == 1 cent; on 0.1-cent markets it produced a band ~10x too narrow, so
+    determine_order_price almost always returned None and those markets never
+    got an order. Keep callers using this helper instead of multiplying by the
+    tick size.
+    """
+    d = max_spread_cents * 0.01
+    return midpoint - d, midpoint + d
+
+
 def determine_order_price(
     bids: list[dict],
-    max_spread: int,
+    max_spread: float,
     tick_size: float,
     reward_range_min: float,
     reward_range_max: float,
@@ -12,7 +31,10 @@ def determine_order_price(
 
     Args:
         bids: Sorted list of bid levels [{price, size}, ...], highest price first.
-        max_spread: Reward max spread parameter (number of ticks).
+        max_spread: Reward max spread in cents. Only the coarse (1-cent) paths
+            use it directly, where 1 cent == 1 tick; the 0.1-cent path relies
+            solely on the reward range. Compute the range with
+            ``reward_price_range``, not ``max_spread * tick_size``.
         tick_size: Price tick size (0.01 for 1-cent, 0.001 for 0.1-cent).
         reward_range_min: Minimum price in reward range.
         reward_range_max: Maximum price in reward range.
@@ -83,7 +105,7 @@ def _strategy_spread2_coarse(
 
 def _strategy_spread_ge3_coarse(
     bids: list[dict],
-    max_spread: int,
+    max_spread: float,
     tick_size: float,
     reward_range_min: float,
     reward_range_max: float,

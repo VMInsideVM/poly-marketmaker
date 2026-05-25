@@ -1,7 +1,7 @@
 """tests/test_strategy.py"""
 
 import pytest
-from engine.strategy import determine_order_price
+from engine.strategy import determine_order_price, reward_price_range
 
 
 def _make_bids(price_size_pairs):
@@ -166,3 +166,58 @@ class TestMaxSpreadGE3_TickSize01Cent:
             reward_range_max=0.310,
         )
         assert result == 0.297
+
+
+class TestRewardPriceRange:
+    """reward_price_range: the reward band is max_spread CENTS around the
+    midpoint, independent of tick size.
+
+    Regression: callers used to compute the band as ``max_spread * tick_size``,
+    treating Polymarket's cents-valued max_spread as a tick count. That happens
+    to be correct only for 1-cent markets (tick == 1 cent); on 0.1-cent markets
+    (tick 0.001) it produced a band ~10x too narrow, so determine_order_price
+    almost always returned None and 0.1-cent markets never got an order.
+    """
+
+    def test_band_is_cents_not_ticks(self):
+        lo, hi = reward_price_range(0.6375, 4.5)
+        assert lo == pytest.approx(0.5925)
+        assert hi == pytest.approx(0.6825)
+
+    def test_fractional_cents_not_truncated(self):
+        # 3.5 cents must NOT be truncated to 3.
+        lo, hi = reward_price_range(0.50, 3.5)
+        assert lo == pytest.approx(0.465)
+        assert hi == pytest.approx(0.535)
+
+    def test_band_independent_of_tick_size(self):
+        # Same max_spread cents -> same band regardless of market tick size.
+        assert reward_price_range(0.30, 3) == pytest.approx((0.27, 0.33))
+
+    def test_fine_tick_market_prices_with_correct_band(self):
+        # 0.1-cent book whose cumulative depth crosses 6000 several levels
+        # below the midpoint. The old (buggy) band excluded that level; the
+        # correct cents-based band includes it.
+        bids = _make_bids(
+            [
+                (0.637, 3200),
+                (0.636, 1500),
+                (0.635, 800),
+                (0.634, 900),
+                (0.628, 400),
+                (0.625, 300),
+                (0.619, 500),
+            ]
+        )
+        midpoint = 0.6375
+        max_spread_cents = 4.5  # real Polymarket value for such a market
+
+        # Old buggy band: int(4.5) * 0.001 = +-0.004 -> excludes 0.628 -> None.
+        old_int = int(max_spread_cents)
+        old_lo = midpoint - old_int * 0.001
+        old_hi = midpoint + old_int * 0.001
+        assert determine_order_price(bids, old_int, 0.001, old_lo, old_hi) is None
+
+        # Correct band: 4.5 cents = +-0.045 -> includes 0.628.
+        lo, hi = reward_price_range(midpoint, max_spread_cents)
+        assert determine_order_price(bids, old_int, 0.001, lo, hi) == 0.628
