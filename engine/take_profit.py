@@ -69,19 +69,20 @@ def plan_take_profit(
     return {"action": "replace", "price": want, "size": size, "cancel_ids": ids}
 
 
-def cost_basis_from_buy_fills(buy_fills: list[dict], size: float) -> float | None:
-    """当前持仓的加权成本,来自我们的真实买入成交。
+def cost_basis_with_lots(buy_fills: list[dict], size: float):
+    """当前持仓的加权成本 + 被消耗的逐笔买入明细,来自我们的真实买入成交。
 
-    按 ts 从新到旧累计取份额直至覆盖 size,返回这些份额的加权均价。size<=0 或无成交
-    -> None;买入总量不足 size(部分份额非 maker 买入/历史截断)-> 按已有份额加权。
-    单笔买入全持有时精确等于买入价;多笔时为真实加权(不退化成单笔价)。
+    算法同 cost_basis_from_buy_fills:按 ts 从新到旧累计取份额直至覆盖 size。额外
+    返回每笔被消耗份额 {price, take(本笔实取量), ts, trade_id},供卖单理由溯源。
+    返回 (cost_or_None, lots)。size<=0 或无成交 -> (None, [])。
     """
     if size <= 0 or not buy_fills:
-        return None
+        return None, []
     fills = sorted(buy_fills, key=lambda f: f.get("ts", 0) or 0, reverse=True)
     remaining = size
     cost_sum = 0.0
     qty_sum = 0.0
+    lots: list[dict] = []
     for f in fills:
         if remaining <= 0:
             break
@@ -89,12 +90,26 @@ def cost_basis_from_buy_fills(buy_fills: list[dict], size: float) -> float | Non
         if fsize <= 0:
             continue
         take = min(fsize, remaining)
-        cost_sum += float(f.get("price", 0) or 0) * take
+        price = float(f.get("price", 0) or 0)
+        cost_sum += price * take
         qty_sum += take
         remaining -= take
+        lots.append(
+            {
+                "price": price,
+                "take": take,
+                "ts": float(f.get("ts", 0) or 0),
+                "trade_id": f.get("trade_id", ""),
+            }
+        )
     if qty_sum <= 0:
-        return None
-    return cost_sum / qty_sum
+        return None, []
+    return cost_sum / qty_sum, lots
+
+
+def cost_basis_from_buy_fills(buy_fills: list[dict], size: float) -> float | None:
+    """当前持仓的加权成本(仅成本,不含明细)。见 cost_basis_with_lots。"""
+    return cost_basis_with_lots(buy_fills, size)[0]
 
 
 def take_profit_price(cost: float, best_bid: float | None, tick: float) -> float:

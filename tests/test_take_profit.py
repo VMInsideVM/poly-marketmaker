@@ -5,6 +5,7 @@ from engine.take_profit import (
     ceil_to_tick,
     plan_take_profit,
     cost_basis_from_buy_fills,
+    cost_basis_with_lots,
     take_profit_price,
 )
 
@@ -150,6 +151,44 @@ class TestCostBasisFromBuyFills:
 
     def test_zero_size_none(self):
         assert cost_basis_from_buy_fills([_bf(0.28, 361, 1)], 0) is None
+
+
+def _bft(price, size, ts, tid):
+    return {"price": price, "size": size, "ts": ts, "trade_id": tid}
+
+
+class TestCostBasisWithLots:
+    def test_single_buy_one_lot(self):
+        cost, lots = cost_basis_with_lots([_bft(0.28, 361, 100, "T1")], 361)
+        assert cost == pytest.approx(0.28)
+        assert lots == [{"price": 0.28, "take": 361.0, "ts": 100.0, "trade_id": "T1"}]
+
+    def test_multi_buy_weighted_and_lots(self):
+        fills = [_bft(0.20, 200, 1, "A"), _bft(0.28, 200, 2, "B")]
+        cost, lots = cost_basis_with_lots(fills, 400)
+        assert cost == pytest.approx(0.24)
+        assert len(lots) == 2
+        assert sum(l["take"] for l in lots) == pytest.approx(400.0)
+
+    def test_partial_lot_take_is_consumed_amount(self):
+        # 最新 161@0.28(ts2) 全取,更早 200@0.20(ts1) 只取 39 凑满 200
+        fills = [_bft(0.20, 200, 1, "OLD"), _bft(0.28, 161, 2, "NEW")]
+        cost, lots = cost_basis_with_lots(fills, 200)
+        takes = {l["trade_id"]: l["take"] for l in lots}
+        assert takes["NEW"] == pytest.approx(161.0)
+        assert takes["OLD"] == pytest.approx(39.0)
+        assert cost == pytest.approx((161 * 0.28 + 39 * 0.20) / 200)
+
+    def test_insufficient_fills_graceful(self):
+        cost, lots = cost_basis_with_lots([_bft(0.28, 100, 1, "X")], 361)
+        assert cost == pytest.approx(0.28)
+        assert lots[0]["take"] == pytest.approx(100.0)
+
+    def test_empty_fills(self):
+        assert cost_basis_with_lots([], 361) == (None, [])
+
+    def test_zero_size(self):
+        assert cost_basis_with_lots([_bft(0.28, 361, 1, "X")], 0) == (None, [])
 
 
 class TestTakeProfitPrice:
