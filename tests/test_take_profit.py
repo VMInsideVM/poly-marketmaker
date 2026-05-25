@@ -6,6 +6,7 @@ from engine.take_profit import (
     plan_take_profit,
     cost_basis_from_buy_fills,
     cost_basis_with_lots,
+    describe_cost_basis,
     take_profit_price,
 )
 
@@ -205,3 +206,43 @@ class TestTakeProfitPrice:
 
     def test_off_tick_cost_ceiled(self):
         assert take_profit_price(0.3023, 0.10, 0.01) == 0.31
+
+
+class TestDescribeCostBasis:
+    def _lot(self, price, take, ts, tid):
+        return {"price": price, "take": take, "ts": ts, "trade_id": tid}
+
+    def test_lists_each_buy_with_price_share_and_trade_id(self):
+        lots = [
+            self._lot(0.27, 200.0, 1779030000, "0xabcdef1234567890ff"),
+            self._lot(0.29, 161.0, 1779031111, "0x9c00000000000000d1"),
+        ]
+        s = describe_cost_basis(0.28, lots)
+        assert s.startswith("成本=0.2800")
+        assert "加权自2笔买入成交" in s
+        assert "0.2700×200股" in s
+        assert "0.2900×161股" in s
+        assert "共取361股" in s
+        # trade_id 缩写为 首6+'..'+末4
+        assert "[trade 0xabcd..90ff]" in s
+        assert "[trade 0x9c00..00d1]" in s
+        # 时间被格式化(含分隔符),不校验具体时区数值
+        assert "-" in s and ":" in s
+
+    def test_short_trade_id_kept_as_is(self):
+        s = describe_cost_basis(0.30, [self._lot(0.30, 1000.0, 1, "t")])
+        assert "[trade t]" in s
+
+    def test_fractional_share_two_decimals(self):
+        s = describe_cost_basis(0.30, [self._lot(0.30, 222.08, 1, "t")])
+        assert "×222.08股" in s
+        assert "共取222.08股" in s
+
+    def test_caps_lots_and_summarizes_overflow(self):
+        lots = [self._lot(0.20 + i * 0.01, 10.0, i, f"t{i}") for i in range(8)]
+        s = describe_cost_basis(0.235, lots)
+        assert "…等共8笔" in s
+        assert "共取80股" in s
+
+    def test_none_cost(self):
+        assert "无买入成交" in describe_cost_basis(None, [])

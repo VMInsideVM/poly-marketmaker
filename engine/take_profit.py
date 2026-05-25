@@ -15,6 +15,7 @@ one position into many orders priced off divergent per-fill data.
 """
 
 import math
+import time
 
 
 def ceil_to_tick(price: float, tick: float) -> float:
@@ -122,3 +123,44 @@ def take_profit_price(cost: float, best_bid: float | None, tick: float) -> float
     if best_bid is not None:
         base = max(base, round(best_bid + tick, 10))
     return base
+
+
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
+
+
+def _fmt_share(x: float) -> str:
+    """份额去掉无意义的 .0;非整数保留两位小数。"""
+    return str(int(round(x))) if abs(x - round(x)) < 1e-9 else f"{x:.2f}"
+
+
+def _short_tid(tid) -> str:
+    tid = str(tid or "")
+    return tid if len(tid) <= 12 else f"{tid[:6]}..{tid[-4:]}"
+
+
+def describe_cost_basis(cost, lots: list[dict], max_lots: int = 6) -> str:
+    """成本构成的中文片段(纯函数),供止盈/止损卖单理由引用。
+
+    lots 来自 cost_basis_with_lots,按 ts 正序(最早->最新)逐笔列:
+    "①时间 价格×份额股 [trade 缩写id]"。超过 max_lots 笔时列前 max_lots 笔
+    + "…等共N笔"。时间用本地时区 MM-DD HH:MM。cost 为 None 时给降级文案。
+    """
+    n = len(lots)
+    if cost is None or n == 0:
+        return "成本=无（无买入成交）"
+    ordered = sorted(lots, key=lambda l: l.get("ts", 0) or 0)
+    total_take = sum(float(l.get("take", 0) or 0) for l in ordered)
+    parts = []
+    for i, l in enumerate(ordered[:max_lots]):
+        mark = _CIRCLED[i] if i < len(_CIRCLED) else f"{i + 1}."
+        t = time.strftime("%m-%d %H:%M", time.localtime(float(l.get("ts", 0) or 0)))
+        parts.append(
+            f"{mark}{t} {float(l.get('price', 0) or 0):.4f}"
+            f"×{_fmt_share(float(l.get('take', 0) or 0))}股 "
+            f"[trade {_short_tid(l.get('trade_id', ''))}]"
+        )
+    more = f" …等共{n}笔" if n > max_lots else ""
+    return (
+        f"成本={cost:.4f}（加权自{n}笔买入成交："
+        f"{' '.join(parts)}{more} 共取{_fmt_share(total_take)}股）"
+    )
