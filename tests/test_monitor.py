@@ -512,6 +512,13 @@ class TestStopLoss:
         api.cancel_orders.assert_called_with(["sell1"])
         api.place_market_sell.assert_called_with("tok1", 1000.0)
         db.record_trade.assert_called_once()
+        sl = next(
+            c
+            for c in db.record_action.call_args_list
+            if c.kwargs["action_type"] == "stoploss_market_sell"
+        )
+        assert "加权自1笔买入成交" in sl.kwargs["price_basis"]
+        assert "avgPrice" not in sl.kwargs["price_basis"]
 
     def test_no_stop_loss_when_price_stable(self):
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
@@ -574,26 +581,27 @@ class TestStopLoss:
 
         api.place_market_sell.assert_not_called()
 
-    def test_skips_stop_loss_when_both_sources_unavailable(self):
+    def test_skips_stop_loss_when_no_buy_fills(self):
+        # get_trades 无成交 -> 不止损(avgPrice 不再参与)
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
         api.get_user_positions.return_value = [
             {
                 "asset": "tok1",
                 "size": 1000.0,
-                "avgPrice": 0.0,  # 无 avgPrice
+                "avgPrice": 0.0,
                 "curPrice": 0.10,
                 "conditionId": "mkt1",
             }
         ]
         api.get_open_orders.return_value = []
-        api.get_trades.return_value = []  # get_trades 也空 -> 两源皆空
+        api.get_trades.return_value = []
 
         monitor.check_stop_loss()
 
         api.place_market_sell.assert_not_called()
 
-    def test_stop_loss_falls_back_to_avgprice(self):
-        # get_trades 0 笔 + avgPrice=0.30,现价 0.24 -> 用 avgPrice 判定并市价平仓
+    def test_stop_loss_skips_and_warns_when_no_buy_fills(self):
+        # get_trades 取不到买入成交 -> 不止损(不撤单/不市价平仓),写 ⚠️ 状态行
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
         api.get_user_positions.return_value = [
             {
@@ -607,18 +615,16 @@ class TestStopLoss:
         api.get_open_orders.return_value = [
             {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
         ]
-        api.get_trades.return_value = []  # get_trades 取不到 -> 回落 avgPrice
+        api.get_trades.return_value = []  # 无成交 -> 不再回落 avgPrice
 
+        monitor.begin_status_tick()
         monitor.check_stop_loss()
+        monitor.publish_status()
 
-        api.cancel_orders.assert_called_with(["sell1"])
-        api.place_market_sell.assert_called_with("tok1", 1000.0)
-        sl = next(
-            c
-            for c in db.record_action.call_args_list
-            if c.kwargs["action_type"] == "stoploss_market_sell"
-        )
-        assert "avgPrice兜底" in sl.kwargs["price_basis"]
+        api.place_market_sell.assert_not_called()
+        api.cancel_orders.assert_not_called()
+        rows = get_snapshot()["rows"]
+        assert any("无成本" in r.get("action", "") for r in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1194,8 +1200,8 @@ class TestStep2ActionLog:
         )
         assert ms.kwargs["side"] == "卖出"
         assert ms.kwargs["price"] == 0.24
-        assert "get_trades加权 0.3000" in ms.kwargs["price_basis"]
-        assert "Data API" in ms.kwargs["price_basis"]
+        assert "加权自1笔买入成交" in ms.kwargs["price_basis"]
+        assert "avgPrice" not in ms.kwargs["price_basis"]
         assert "止损阈值" in ms.kwargs["reason"]
 
     def test_no_cancel_action_when_no_sell_orders(self):
@@ -1568,27 +1574,30 @@ class TestCostHelper:
             self._buy_trade("tok1", 0.28, 200, ts="2"),
         ]
         monitor.begin_status_tick()
-        assert monitor._cost("tok1", 400) == pytest.approx(0.24)
+        cost, lots = monitor._cost_lots("tok1", 400)
+        assert cost == pytest.approx(0.24)
 
     def test_cost_cached_within_tick(self):
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = [self._buy_trade("tok1", 0.28, 361)]
         monitor.begin_status_tick()
-        monitor._cost("tok1", 361)
-        monitor._cost("tok1", 361)
+        monitor._cost_lots("tok1", 361)
+        monitor._cost_lots("tok1", 361)
         assert api.get_trades.call_count == 1  # 同 tick 只取一次
 
     def test_cost_none_when_get_trades_fails(self):
         monitor, api, db = _make_monitor()
         api.get_trades.side_effect = Exception("boom")
         monitor.begin_status_tick()
-        assert monitor._cost("tok1", 361) is None
+        cost, lots = monitor._cost_lots("tok1", 361)
+        assert cost is None
 
     def test_cost_none_when_no_buy_fills(self):
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = []
         monitor.begin_status_tick()
-        assert monitor._cost("tok1", 361) is None
+        cost, lots = monitor._cost_lots("tok1", 361)
+        assert cost is None
 
 
 class TestStep3Blacklist:

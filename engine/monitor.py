@@ -6,7 +6,6 @@ from py_clob_client_v2.clob_types import TradeParams
 from engine.fills import select_new_buy_fills, extract_buy_fills
 from engine.take_profit import (
     plan_take_profit,
-    cost_basis_from_buy_fills,
     cost_basis_with_lots,
     describe_cost_basis,
     take_profit_price,
@@ -95,55 +94,21 @@ class OrderMonitor:
         """Proxy/funder address — used for get_trades maker filter and Data API."""
         return self.api.get_funder()
 
-    def _cost(self, asset_id: str, size: float):
-        """该持仓的加权成本(本 tick 缓存)。来自 CLOB get_trades 的真实买入成交,
-        替代 Data API avgPrice。取不到 -> None(调用方据此跳过,不在不确定成本上动手)。
-        结果按 asset_id 缓存至本 tick 结束(size 在 tick 内视为稳定,止盈与止损作用于同一持仓快照)。"""
+    def _cost_lots(self, asset_id: str, size: float):
+        """该持仓的加权成本 + 逐笔构成(本 tick 缓存)。只来自 CLOB get_trades 的真实
+        买入成交(maker∪taker)。取不到 -> (None, [])。"""
         if asset_id in self._cost_cache:
             return self._cost_cache[asset_id]
         funder = self._funder()
         try:
-            # 不传 maker_address:服务端返回本钱包两种角色的成交,使我们当 taker 的
-            # 买入也进入加权成本(extract_buy_fills 内部仍按 funder 过滤 maker_orders)。
             trades = self.api.get_trades(TradeParams(asset_id=asset_id))
         except Exception as e:
             logger.warning("get_trades(asset=%s) for cost failed: %s", asset_id, e)
-            self._cost_cache[asset_id] = None
-            return None
-        fills = extract_buy_fills(trades, funder, asset_id)
-        cost = cost_basis_from_buy_fills(fills, size)
-        self._cost_cache[asset_id] = cost
-        return cost
-
-    def _cost_with_source(self, asset_id: str, size: float, avg_fallback: float):
-        """成本 + 来源。优先 get_trades 加权成本;取不到(None/<=0)且 avg_fallback>0
-        时回落 Data API avgPrice。返回 (cost_or_None, source_str)。
-        门控:get_trades 有成本时永远不碰 avgPrice。
-        注意:止盈调用方有穿价护栏兜底;止损调用方为市价平仓、无护栏,
-        使用 avgPrice 兜底属已接受风险(avgPrice 读高可能误触发)。"""
-        cost = self._cost(asset_id, size)  # get_trades 加权(本 tick 缓存)或 None
-        if cost is not None and cost > 0:
-            return cost, "get_trades加权"
-        if avg_fallback > 0:
-            return float(avg_fallback), "avgPrice兜底"
-        return None, ""
-
-    def _cost_lots(self, asset_id: str, size: float):
-        """该持仓的加权成本 + 逐笔构成(本 tick 缓存)。只来自 CLOB get_trades 的真实
-        买入成交(maker∪taker),绝不回落 Data API avgPrice。取不到 -> (None, [])。"""
-        key = ("lots", asset_id)
-        if key in self._cost_cache:
-            return self._cost_cache[key]
-        funder = self._funder()
-        try:
-            trades = self.api.get_trades(TradeParams(asset_id=asset_id))
-        except Exception as e:
-            logger.warning("get_trades(asset=%s) for cost failed: %s", asset_id, e)
-            self._cost_cache[key] = (None, [])
+            self._cost_cache[asset_id] = (None, [])
             return None, []
         fills = extract_buy_fills(trades, funder, asset_id)
         result = cost_basis_with_lots(fills, size)
-        self._cost_cache[key] = result
+        self._cost_cache[asset_id] = result
         return result
 
     # --- Step 1: fills via get_trades (flatten maker_orders) ---
@@ -181,11 +146,10 @@ class OrderMonitor:
         order_id = ev.get("order_id")
         if size <= 0:
             return
-        # No trades-table write: buy "history" is now the live Data API position
-        # (avgPrice), because per-fill maker_orders prices were unreliable. The
-        # take-profit SELL is maintained by check_take_profit() priced off the
-        # get_trades weighted cost with a 穿价护栏 (max(cost, best_bid+tick)),
-        # not avgPrice. Step 1 only sets the cooldown and cancels the buy's remainder.
+        # No trades-table write: buy "history" is the live Data API position.
+        # The take-profit SELL is maintained by check_take_profit() priced off the
+        # get_trades weighted cost with a 穿价护栏 (max(cost, best_bid+tick)).
+        # Step 1 only sets the cooldown and cancels the buy's remainder.
         self.db.set_cooldown(
             self.wallet_address, market_id, self.db.get_settings()["cooldown_minutes"]
         )
@@ -219,11 +183,10 @@ class OrderMonitor:
     def check_take_profit(self):
         """Maintain exactly one resting SELL per position at a cost-based price.
 
-        Cost is the weighted average of our real CLOB get_trades buy fills (via
-        _cost); the Data API position is used only for size. The sell price adds
-        a 穿价护栏 (max(cost, best_bid+tick)) so it always rests as a maker and
-        never crosses the book. Replaces both the old per-fill sells and the
-        later Data-API-avgPrice approach (avgPrice glitched on fresh positions).
+        Cost is the weighted average of our real CLOB get_trades buy fills; the
+        Data API position is used only for size. The sell price adds a 穿价护栏
+        (max(cost, best_bid+tick)) so it always rests as a maker and never
+        crosses the book.
         """
         funder = self._funder()
         try:
@@ -284,7 +247,7 @@ class OrderMonitor:
                 matched="-",
                 stage="止盈卖单",
                 action="⚠️跳过·裸奔",
-                detail="get_trades 无买入成交、无法算成本，未挂止盈（绝不用 avgPrice 兜底），该持仓未受保护",
+                detail="get_trades 无买入成交、无法算成本，未挂止盈，该持仓未受保护",
             )
             return
         tick, tick_str, best_bid = self._sell_book(asset_id)
@@ -377,27 +340,39 @@ class OrderMonitor:
                 logger.error("Stop-loss error on %s: %s", pos.get("asset"), e)
 
     def _check_pos_sl(self, pos: dict, open_orders: list, settings: dict):
-        # Confirmed Data API position fields: asset / size / avgPrice /
-        # curPrice / conditionId.
+        # Confirmed Data API position fields: asset / size / curPrice / conditionId.
         asset_id = pos.get("asset", "")
         size = float(pos.get("size", 0) or 0)
         cur = float(pos.get("curPrice", 0) or 0)
+        cid = pos.get("conditionId", "")
         if size <= 0:
             return
-        avg_fallback = float(pos.get("avgPrice", 0) or 0)
-        avg, source = self._cost_with_source(asset_id, size, avg_fallback)
-        # get_trades 加权成本优先;取不到时回落 Data API avgPrice。
-        # 已知风险(已接受):市价平仓无穿价护栏,avgPrice 读高可能误触发。
-        if avg is None or avg <= 0:
+        cost, lots = self._cost_lots(asset_id, size)
+        # 成本只认 get_trades 加权;取不到 -> 不做止损。
+        if cost is None or cost <= 0:
+            logger.warning(
+                "Stop-loss skipped (no buy fills) asset=%s size=%s — no cost basis",
+                asset_id,
+                size,
+            )
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price="-",
+                size=str(size),
+                matched="-",
+                stage="Step2",
+                action="⚠️跳过·无成本",
+                detail="get_trades 无买入成交、无法算成本，未做止损保护",
+            )
             return
-        if not stop_loss_triggered(cur, avg, settings["stop_loss_pct"]):
+        if not stop_loss_triggered(cur, cost, settings["stop_loss_pct"]):
             return
         sell_ids = [
             o["id"]
             for o in open_orders
             if o.get("asset_id") == asset_id and o.get("side") == "SELL"
         ]
-        cid = pos.get("conditionId", "")
         if sell_ids:
             try:
                 self.api.cancel_orders(sell_ids)
@@ -420,7 +395,7 @@ class OrderMonitor:
             side="stop_loss",
             price=cur,
             size=size,
-            pnl=(cur - avg) * size,
+            pnl=(cur - cost) * size,
         )
         self._record_action(
             market_id=cid,
@@ -428,18 +403,18 @@ class OrderMonitor:
             side="卖出",
             price=cur,
             size=size,
-            reason=f"现价 {cur:.4f} 跌破成本价 {avg:.4f} 的止损阈值 avg×(1-止损比例{settings['stop_loss_pct']}%)，市价平仓止损",
+            reason=f"现价 {cur:.4f} 跌破成本价 {cost:.4f} 的止损阈值 成本×(1-止损比例{settings['stop_loss_pct']}%)，市价平仓止损",
             price_basis=(
-                f"成本价={source} {avg:.4f}、现价 curPrice={cur:.4f}；"
-                f"来源：{'CLOB get_trades' if source == 'get_trades加权' else 'Data API avgPrice(兜底)'} + Data API /positions"
+                f"{describe_cost_basis(cost, lots)}、现价 curPrice={cur:.4f}；"
+                f"来源：CLOB get_trades + Data API /positions"
             ),
         )
         logger.warning(
-            "Stop-loss executed: asset=%s size=%s cur=%.4f avg=%.4f",
+            "Stop-loss executed: asset=%s size=%s cur=%.4f cost=%.4f",
             asset_id,
             size,
             cur,
-            avg,
+            cost,
         )
         self._status_add(
             market=cid,
@@ -449,7 +424,7 @@ class OrderMonitor:
             matched="-",
             stage="Step2",
             action="止损→市价平仓",
-            detail=f"cur{cur:.4f}<avg{avg:.4f} 触发",
+            detail=f"cur{cur:.4f}<成本{cost:.4f} 触发",
         )
 
     # --- Step 3: strategy compliance on resting buy orders ---
