@@ -48,7 +48,7 @@ def select_new_buy_fills(trades: list[dict], funder: str, seen_keys: set) -> lis
 def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[dict]:
     """挑出我们在某 token 上的全部 BUY 成交,用于算加权成本。
 
-    返回 [{price, size, ts}, ...](不去重、不依赖 seen_keys)。两种来源:
+    返回 [{price, size, ts, trade_id}, ...](不去重、不依赖 seen_keys)。两种来源:
     - maker:我们挂的买单被吃,成交在 trade.maker_orders 里(按 funder 过滤,
       side==BUY,asset 匹配);price=mo.price,size=mo.matched_amount。
     - taker:我们的 GTC 买单下单瞬间可成交而以 taker 立即成交,成交在 trade 顶层
@@ -61,6 +61,7 @@ def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[di
     a = str(asset_id)
     out = []
     for tr in trades:
+        trade_id = tr.get("id")
         ts = float(tr.get("match_time", 0) or 0)
         we_are_maker = False
         for mo in tr.get("maker_orders", []) or []:
@@ -76,6 +77,7 @@ def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[di
                     "price": float(mo.get("price", 0) or 0),
                     "size": float(mo.get("matched_amount", 0) or 0),
                     "ts": ts,
+                    "trade_id": trade_id,
                 }
             )
         if (
@@ -89,6 +91,7 @@ def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[di
                     "price": float(tr.get("price", 0) or 0),
                     "size": float(tr.get("size", 0) or 0),
                     "ts": ts,
+                    "trade_id": trade_id,
                 }
             )
     return out

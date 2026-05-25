@@ -107,7 +107,9 @@ def test_funder_match_is_case_insensitive():
 def test_extract_buy_fills_only_our_buys_on_asset():
     # TRADE_TWO_OURS_BUY 有我们两笔 BUY:ASSET_B1@0.4x20、ASSET_B2@0.41x30
     fills = extract_buy_fills([TRADE_TWO_OURS_BUY], FUNDER, "ASSET_B1")
-    assert fills == [{"price": 0.4, "size": 20.0, "ts": 1779030000.0}]
+    assert fills == [
+        {"price": 0.4, "size": 20.0, "ts": 1779030000.0, "trade_id": "trade-2"}
+    ]
 
 
 def test_extract_buy_fills_skips_our_sell_and_others():
@@ -118,7 +120,9 @@ def test_extract_buy_fills_skips_our_sell_and_others():
 
 def test_extract_buy_fills_case_insensitive_funder():
     fills = extract_buy_fills([TRADE_TWO_OURS_BUY], FUNDER.lower(), "ASSET_B2")
-    assert fills == [{"price": 0.41, "size": 30.0, "ts": 1779030000.0}]
+    assert fills == [
+        {"price": 0.41, "size": 30.0, "ts": 1779030000.0, "trade_id": "trade-2"}
+    ]
 
 
 def test_extract_buy_fills_aggregates_across_trades_same_asset():
@@ -138,8 +142,18 @@ def test_extract_buy_fills_aggregates_across_trades_same_asset():
         ],
     }
     fills = extract_buy_fills([TRADE_TWO_OURS_BUY, t2], FUNDER, "ASSET_B1")
-    assert {"price": 0.4, "size": 20.0, "ts": 1779030000.0} in fills
-    assert {"price": 0.42, "size": 10.0, "ts": 1779031111.0} in fills
+    assert {
+        "price": 0.4,
+        "size": 20.0,
+        "ts": 1779030000.0,
+        "trade_id": "trade-2",
+    } in fills
+    assert {
+        "price": 0.42,
+        "size": 10.0,
+        "ts": 1779031111.0,
+        "trade_id": "trade-3",
+    } in fills
     assert len(fills) == 2
 
 
@@ -168,7 +182,9 @@ TRADE_TAKER_BUY = {
 
 def test_extract_buy_fills_includes_taker_buy():
     fills = extract_buy_fills([TRADE_TAKER_BUY], FUNDER, "ASSET_T")
-    assert fills == [{"price": 0.33, "size": 100.0, "ts": 1779040000.0}]
+    assert fills == [
+        {"price": 0.33, "size": 100.0, "ts": 1779040000.0, "trade_id": "trade-taker-1"}
+    ]
 
 
 def test_extract_buy_fills_taker_sell_ignored():
@@ -184,12 +200,18 @@ def test_extract_buy_fills_maker_and_taker_no_double_count():
     # 一个 maker 买入(ASSET_B1@0.4x20) + 一个 taker 买入(ASSET_T@0.33x100)
     maker_fills = extract_buy_fills([TRADE_TWO_OURS_BUY], FUNDER, "ASSET_B1")
     taker_fills = extract_buy_fills([TRADE_TAKER_BUY], FUNDER, "ASSET_T")
-    assert maker_fills == [{"price": 0.4, "size": 20.0, "ts": 1779030000.0}]
-    assert taker_fills == [{"price": 0.33, "size": 100.0, "ts": 1779040000.0}]
+    assert maker_fills == [
+        {"price": 0.4, "size": 20.0, "ts": 1779030000.0, "trade_id": "trade-2"}
+    ]
+    assert taker_fills == [
+        {"price": 0.33, "size": 100.0, "ts": 1779040000.0, "trade_id": "trade-taker-1"}
+    ]
     # 混在一起按各自 asset 提取,互不串扰
     assert extract_buy_fills(
         [TRADE_TWO_OURS_BUY, TRADE_TAKER_BUY], FUNDER, "ASSET_T"
-    ) == [{"price": 0.33, "size": 100.0, "ts": 1779040000.0}]
+    ) == [
+        {"price": 0.33, "size": 100.0, "ts": 1779040000.0, "trade_id": "trade-taker-1"}
+    ]
 
 
 def test_extract_buy_fills_no_double_count_when_funder_in_both():
@@ -218,3 +240,10 @@ def test_extract_buy_fills_no_double_count_when_funder_in_both():
     fills = extract_buy_fills([weird], FUNDER, "ASSET_T")
     assert len(fills) == 1
     assert fills[0]["size"] == 100.0
+
+
+def test_extract_buy_fills_carries_trade_id_maker_and_taker():
+    maker = extract_buy_fills([TRADE_TWO_OURS_BUY], FUNDER, "ASSET_B1")
+    assert maker[0]["trade_id"] == "trade-2"
+    taker = extract_buy_fills([TRADE_TAKER_BUY], FUNDER, "ASSET_T")
+    assert taker[0]["trade_id"] == "trade-taker-1"
