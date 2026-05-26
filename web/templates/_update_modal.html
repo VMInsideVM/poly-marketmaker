@@ -64,6 +64,7 @@
       else if (s.state === 'verifying') setProgress(100, '正在校验…');
       else if (s.state === 'installing') setProgress(100, INSTALL_MSG);
       else if (s.state === 'error') { showError(s.message || '更新失败'); return; }
+      else if (s.state === 'idle') { return; }  // 非预期空闲态:停止轮询,避免空转
       setTimeout(poll, 800);
     }).catch(function () {
       // 连接断开 = 服务端已退出、进入安装阶段(预期现象)
