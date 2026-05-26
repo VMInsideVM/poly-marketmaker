@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 import urllib.request
 
 from config import DATA_DIR
@@ -76,25 +77,51 @@ def _fetch_latest_release():
     return json.loads(_http_get(LATEST_URL, timeout=5).decode("utf-8"))
 
 
-def check_update(current=__version__, fetch=None):
+# 检测结果带 TTL 缓存,避开 GitHub 未认证 API 限额(60 次/小时/IP)。弹窗 JS 在每个
+# 页面加载都会打 /api/update/check,无缓存时翻几页就会触发 403;缓存后每个进程每 30
+# 分钟最多请求一次,页面间导航全部命中缓存。缓存存原始 release 信息(非最终结果),
+# 每次按当前版本重算 update_available。
+_CHECK_TTL_SEC = 1800  # 成功后 30 分钟内复用缓存
+_FAIL_TTL_SEC = 60  # 失败后至少隔 60 秒再试,避免限流/断网时疯狂重试
+_cache = {"ts": None, "info": None, "ok": False}
+
+
+def _reset_cache():
+    """清空检测缓存(测试用)。"""
+    _cache.update(ts=None, info=None, ok=False)
+
+
+def check_update(current=__version__, fetch=None, now=None):
     """检测最新版本。永不抛异常:任何失败都返回 update_available=False。
 
+    结果带 TTL 缓存(成功 _CHECK_TTL_SEC 秒、失败 _FAIL_TTL_SEC 秒),期间复用、不再请求
+    GitHub,以避开未认证 API 限额。
     fetch: 无参函数,返回 GitHub release JSON dict(测试可注入)。
+    now: 当前时间戳,默认 time.time()(测试可注入以控制 TTL)。
     """
     fetch = fetch or _fetch_latest_release
-    try:
-        info = parse_release(fetch())
-        available = bool(info["exe_url"]) and is_newer(info["version"], current)
-        return {
-            "update_available": available,
-            "current": current,
-            "latest": info["version"],
-            "notes": info["notes"],
-            "size": info["exe_size"],
-        }
-    except Exception as e:  # noqa: BLE001 — 检测必须非阻塞
-        logger.warning("更新检测失败: %s", e)
+    now = time.time() if now is None else now
+    ttl = _CHECK_TTL_SEC if _cache["ok"] else _FAIL_TTL_SEC
+    if _cache["ts"] is not None and (now - _cache["ts"]) < ttl:
+        info = _cache["info"]
+    else:
+        try:
+            info = parse_release(fetch())
+            _cache.update(ts=now, info=info, ok=True)
+        except Exception as e:  # noqa: BLE001 — 检测必须非阻塞
+            logger.warning("更新检测失败: %s", e)
+            _cache.update(ts=now, info=None, ok=False)
+            info = None
+    if info is None:
         return {"update_available": False, "current": current}
+    available = bool(info["exe_url"]) and is_newer(info["version"], current)
+    return {
+        "update_available": available,
+        "current": current,
+        "latest": info["version"],
+        "notes": info["notes"],
+        "size": info["exe_size"],
+    }
 
 
 def verify_sha256(path, expected):

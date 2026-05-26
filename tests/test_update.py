@@ -106,6 +106,9 @@ class TestParseRelease:
 
 
 class TestCheckUpdate:
+    def setup_method(self):
+        updater._reset_cache()  # 模块级缓存会跨用例残留,每个用例前清空
+
     def test_update_available(self):
         out = check_update(current="1.0.7", fetch=lambda: _fake_release("v1.0.8"))
         assert out["update_available"] is True
@@ -131,6 +134,57 @@ class TestCheckUpdate:
         out = check_update(current="1.0.7", fetch=boom)
         assert out["update_available"] is False
         assert out["current"] == "1.0.7"
+
+
+class TestCheckUpdateCache:
+    def setup_method(self):
+        updater._reset_cache()
+
+    def _counting_fetch(self):
+        calls = {"n": 0}
+
+        def fetch():
+            calls["n"] += 1
+            return _fake_release("v1.0.8")
+
+        return calls, fetch
+
+    def test_second_call_within_ttl_uses_cache(self):
+        calls, fetch = self._counting_fetch()
+        a = check_update(current="1.0.7", fetch=fetch, now=0)
+        b = check_update(current="1.0.7", fetch=fetch, now=100)  # < 1800s TTL
+        assert a["update_available"] is True
+        assert b["update_available"] is True
+        assert calls["n"] == 1  # 第二次命中缓存,未再请求
+
+    def test_refetch_after_ttl(self):
+        calls, fetch = self._counting_fetch()
+        check_update(current="1.0.7", fetch=fetch, now=0)
+        check_update(current="1.0.7", fetch=fetch, now=1801)  # > 1800s TTL
+        assert calls["n"] == 2
+
+    def test_current_recomputed_from_cached_info(self):
+        # 缓存的是原始 release 信息,update_available 按当次 current 重算
+        calls, fetch = self._counting_fetch()
+        a = check_update(current="1.0.7", fetch=fetch, now=0)
+        b = check_update(current="1.0.8", fetch=fetch, now=10)  # 命中缓存
+        assert a["update_available"] is True
+        assert b["update_available"] is False  # 同为缓存信息,但当前已是最新
+        assert calls["n"] == 1
+
+    def test_failure_short_ttl_then_retries(self):
+        calls = {"n": 0}
+
+        def boom():
+            calls["n"] += 1
+            raise OSError("rate limit")
+
+        check_update(current="1.0.7", fetch=boom, now=0)
+        check_update(current="1.0.7", fetch=boom, now=30)  # < 60s 失败 TTL,不重试
+        assert calls["n"] == 1
+        out = check_update(current="1.0.7", fetch=boom, now=61)  # > 60s,重试
+        assert calls["n"] == 2
+        assert out["update_available"] is False
 
 
 class TestVerifySha256:
