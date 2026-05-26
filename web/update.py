@@ -173,3 +173,68 @@ def _run_update(
         logger.exception("更新失败")
         state.state = "error"
         state.message = f"更新失败:{e}"
+
+
+def _download(url, dest, total, progress_cb):
+    """流式下载到 dest,按已下载/总字节回调百分比(0-100)。"""
+    req = urllib.request.Request(url, headers=_UA)
+    with urllib.request.urlopen(req, timeout=30) as r, open(dest, "wb") as f:
+        size = total or int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            if size:
+                progress_cb(min(100, int(done * 100 / size)))
+
+
+def _launch_installer(path):
+    """以 detached 方式静默启动安装包,使其在本进程退出后存活。"""
+    flags = 0
+    if os.name == "nt":
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen(
+        [path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+        creationflags=flags,
+        close_fds=True,
+    )
+
+
+def _shutdown_self():
+    """立即退出进程,释放 exe 文件锁,交由安装包覆盖并重启。"""
+    logger.info("为安装更新而退出进程")
+    os._exit(0)
+
+
+def start_update(mgr, *, info_provider=None, **deps):
+    """供路由调用的入口:做安全闸/并发检查,然后后台线程执行 _run_update。"""
+    if engine_active(mgr):
+        return {
+            "ok": False,
+            "message": "引擎正在运行,更新会中断做市并使持仓失去止损保护,"
+            "请先停止引擎再更新。",
+        }
+    if STATE.state in ("downloading", "verifying", "installing"):
+        return {"ok": True, "message": "更新已在进行中"}
+
+    info = (info_provider or (lambda: parse_release(_fetch_latest_release())))()
+    if not info or not info.get("exe_url") or not info.get("sha256_url"):
+        return {"ok": False, "message": "未找到可用的更新包(缺少 exe 或 sha256 资源)"}
+
+    deps.setdefault("download", _download)
+    deps.setdefault("verify", verify_sha256)
+    deps.setdefault("fetch_sha", _http_get)
+    deps.setdefault("launch", _launch_installer)
+    deps.setdefault("shutdown", _shutdown_self)
+
+    STATE.state, STATE.percent, STATE.message = "downloading", 0, ""
+    threading.Thread(
+        target=_run_update,
+        args=(STATE, info, _UPDATE_DIR),
+        kwargs=deps,
+        daemon=True,
+    ).start()
+    return {"ok": True}

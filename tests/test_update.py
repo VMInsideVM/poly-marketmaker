@@ -13,7 +13,9 @@ from web.update import (
     engine_active,
     _State,
     _run_update,
+    start_update,
 )
+import web.update as updater
 
 
 def test_version_is_semver_string():
@@ -265,3 +267,69 @@ class TestRunUpdate:
             shutdown=lambda: None,
         )
         assert state.state == "error"
+
+
+class TestStartUpdate:
+    def test_blocked_when_engine_active(self):
+        mgr = _FakeManager(engines={"a": _FakeWorker(True)})
+        out = start_update(
+            mgr,
+            info_provider=lambda: {
+                "version": "1.0.8",
+                "exe_url": "u",
+                "sha256_url": "s",
+            },
+        )
+        assert out["ok"] is False
+        assert "引擎" in out["message"]
+
+    def test_no_assets_reports_error(self):
+        updater.STATE.state = "idle"  # 复位,避免前序测试遗留状态干扰并发闸
+        out = start_update(
+            None,
+            info_provider=lambda: {
+                "version": "1.0.8",
+                "exe_url": None,
+                "sha256_url": None,
+            },
+        )
+        assert out["ok"] is False
+
+    def test_starts_background_and_sets_downloading(self, monkeypatch):
+        # 用同步桩替换线程实际执行体,断言入口把状态置为 downloading 并真正调度
+        called = {}
+
+        def fake_run(state, info, dest_dir, **deps):
+            called["ran"] = True
+            called["info"] = info
+
+        monkeypatch.setattr(updater, "_run_update", fake_run)
+        # 让线程同步执行,避免竞态
+        monkeypatch.setattr(
+            updater.threading, "Thread", lambda *a, **k: _ImmediateThread(*a, **k)
+        )
+        # 复位单例
+        updater.STATE.state = "idle"
+        out = start_update(
+            None,
+            info_provider=lambda: {
+                "version": "1.0.8",
+                "exe_url": "u",
+                "sha256_url": "s",
+                "exe_size": 1,
+            },
+        )
+        assert out["ok"] is True
+        assert called.get("ran") is True
+
+
+class _ImmediateThread:
+    """假线程:start() 即同步调用 target。"""
+
+    def __init__(self, *a, **k):
+        self._target = k.get("target")
+        self._args = k.get("args", ())
+        self._kwargs = k.get("kwargs", {})
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
