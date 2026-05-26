@@ -20,8 +20,8 @@ $tag = "v$ver"
 Write-Host "准备发布 $tag" -ForegroundColor Cyan
 
 # 3) tag 不能已存在(避免覆盖已发布版本)
-& git rev-parse $tag 2>$null
-if ($LASTEXITCODE -eq 0) {
+$existing = & git tag --list $tag
+if ($existing) {
   throw "tag $tag 已存在。请先在 version.py 提升版本号再发布。"
 }
 
@@ -40,6 +40,7 @@ Write-Host "SHA-256: $hash" -ForegroundColor DarkGray
 
 # 6) 打 tag 并推送
 & git tag $tag
+if ($LASTEXITCODE -ne 0) { throw "git tag 失败" }
 & git push origin $tag
 if ($LASTEXITCODE -ne 0) { throw "git push tag 失败" }
 
