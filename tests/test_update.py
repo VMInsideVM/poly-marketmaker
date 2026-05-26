@@ -2,7 +2,15 @@
 
 import re
 from version import __version__
-from web.update import parse_version, is_newer, parse_release, check_update
+import hashlib
+
+from web.update import (
+    parse_version,
+    is_newer,
+    parse_release,
+    check_update,
+    verify_sha256,
+)
 
 
 def test_version_is_semver_string():
@@ -118,3 +126,24 @@ class TestCheckUpdate:
         out = check_update(current="1.0.7", fetch=boom)
         assert out["update_available"] is False
         assert out["current"] == "1.0.7"
+
+
+class TestVerifySha256:
+    def test_match(self, tmp_path):
+        f = tmp_path / "blob.bin"
+        data = b"hello polymarket"
+        f.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        assert verify_sha256(str(f), digest) is True
+
+    def test_match_case_insensitive_and_whitespace(self, tmp_path):
+        f = tmp_path / "blob.bin"
+        data = b"abc"
+        f.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest().upper()
+        assert verify_sha256(str(f), "  " + digest + "  ") is True
+
+    def test_mismatch(self, tmp_path):
+        f = tmp_path / "blob.bin"
+        f.write_bytes(b"abc")
+        assert verify_sha256(str(f), "0" * 64) is False

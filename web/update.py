@@ -95,3 +95,12 @@ def check_update(current=__version__, fetch=None):
     except Exception as e:  # noqa: BLE001 — 检测必须非阻塞
         logger.warning("更新检测失败: %s", e)
         return {"update_available": False, "current": current}
+
+
+def verify_sha256(path, expected):
+    """文件实算 SHA-256 是否等于 expected(忽略大小写与首尾空白)。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest().lower() == (expected or "").strip().lower()
