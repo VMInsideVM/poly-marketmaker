@@ -154,4 +154,11 @@ body {
 }
 #update-progress-text { font-size: 13px; color: #374151; margin: 8px 0 0; }
 .update-error { color: #b91c1c; font-size: 13px; margin: 8px 0 0; }
-#update-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 16px; }
+.update-msg { font-size: 14px; color: #374151; margin: 0 0 16px; }
+.update-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 16px; }
+
+/* 导航栏当前版本号 */
+.nav-version { color: #888; font-size: 12px; margin-left: 24px; }
+/* 登录/初始设置页的版本行 */
+.auth-version { margin-top: 20px; font-size: 13px; color: #888; }
+.auth-version a { color: #4361ee; text-decoration: none; }

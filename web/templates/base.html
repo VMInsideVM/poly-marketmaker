@@ -16,6 +16,8 @@
             <a href="{{ url_for('history_page') }}" class="{% if request.endpoint == 'history_page' %}active{% endif %}">历史记录</a>
             <a href="{{ url_for('logs_page') }}" class="{% if request.endpoint == 'logs_page' %}active{% endif %}">监控状态</a>
             <a href="{{ url_for('blacklist_page') }}" class="{% if request.endpoint == 'blacklist_page' %}active{% endif %}">黑名单</a>
+            <a href="#" onclick="checkForUpdate(this); return false;" title="检查是否有新版本">检查更新</a>
+            <span class="nav-version">v{{ app_version }}</span>
             <a href="{{ url_for('logout') }}">退出</a>
         </div>
     </nav>

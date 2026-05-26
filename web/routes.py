@@ -23,6 +23,7 @@ from engine.market_links import enrich_with_market_meta, ensure_market_meta
 from engine.blacklist_ops import buy_order_ids_for_condition
 from config import DB_PATH, HOST, PORT
 from web import update as updater
+from version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,13 @@ app = Flask(
     static_folder=os.path.join(_BASE, "web", "static"),
 )
 app.secret_key = os.urandom(32)
+
+
+@app.context_processor
+def _inject_version():
+    """让所有模板都能用 {{ app_version }} 显示当前版本(不触网)。"""
+    return {"app_version": __version__}
+
 
 db: Database = None
 manager: EngineManager = None
