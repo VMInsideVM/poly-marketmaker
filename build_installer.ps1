@@ -1,4 +1,4 @@
-# build_installer.ps1 — One-click rebuild: PyInstaller -> Inno Setup installer.
+﻿# build_installer.ps1 — One-click rebuild: PyInstaller -> Inno Setup installer.
 # Run from the project folder:  powershell -ExecutionPolicy Bypass -File build_installer.ps1
 # Output: installer\PolymarketMarketMaker_Setup.exe
 
