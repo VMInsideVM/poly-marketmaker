@@ -22,6 +22,7 @@ from engine.monitor_status import get_snapshot
 from engine.market_links import enrich_with_market_meta, ensure_market_meta
 from engine.blacklist_ops import buy_order_ids_for_condition
 from config import DB_PATH, HOST, PORT
+from web import update as updater
 
 logger = logging.getLogger(__name__)
 
@@ -752,3 +753,22 @@ def api_dashboard():
             "wallets": wallet_summaries,
         }
     )
+
+
+# --- API: 自动更新(免登录:启动时弹窗在登录前出现) ---
+
+
+@app.route("/api/update/check", methods=["GET"])
+def api_update_check():
+    return jsonify(updater.check_update())
+
+
+@app.route("/api/update/apply", methods=["POST"])
+def api_update_apply():
+    result = updater.start_update(manager)
+    return jsonify(result), (200 if result.get("ok") else 409)
+
+
+@app.route("/api/update/status", methods=["GET"])
+def api_update_status():
+    return jsonify(updater.STATE.snapshot())
