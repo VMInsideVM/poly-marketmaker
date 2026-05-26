@@ -295,6 +295,31 @@ class TestStartUpdate:
         )
         assert out["ok"] is False
 
+    def test_blocked_when_already_in_progress(self, monkeypatch):
+        # 已有更新在进行中时,应立即返回 ok=True+"已在进行中",且不再启动新线程
+        run_calls = []
+        monkeypatch.setattr(updater, "_run_update", lambda *a, **k: run_calls.append(1))
+        monkeypatch.setattr(
+            updater.threading, "Thread", lambda *a, **k: _ImmediateThread(*a, **k)
+        )
+        for busy_state in ("downloading", "verifying", "installing"):
+            updater.STATE.state = busy_state
+            out = start_update(
+                None,
+                info_provider=lambda: {
+                    "version": "1.0.8",
+                    "exe_url": "u",
+                    "sha256_url": "s",
+                },
+            )
+            assert out["ok"] is True, f"expected ok=True when state={busy_state}"
+            assert out.get("message"), f"expected a message when state={busy_state}"
+            assert (
+                run_calls == []
+            ), f"_run_update must NOT be called when state={busy_state}"
+        # 复位,避免泄漏到后续测试
+        updater.STATE.state = "idle"
+
     def test_starts_background_and_sets_downloading(self, monkeypatch):
         # 用同步桩替换线程实际执行体,断言入口把状态置为 downloading 并真正调度
         called = {}

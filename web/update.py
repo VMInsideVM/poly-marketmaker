@@ -120,7 +120,12 @@ def engine_active(mgr):
 
 
 class _State:
-    """更新进度状态(单进程单用户,模块级单例即可)。"""
+    """更新进度状态(单进程单用户,模块级单例即可)。
+
+    线程安全说明:本应用单进程单用户,依赖 CPython GIL 保证单属性读写的原子性
+    (后台更新线程写,Flask 请求线程经 snapshot() 读);若将来需要多属性原子快照,
+    应加 threading.Lock。
+    """
 
     def __init__(self):
         self.state = "idle"  # idle|downloading|verifying|installing|error
@@ -147,7 +152,9 @@ def _run_update(
             dest_dir, f"PolymarketMarketMaker_Setup_{info['version']}.exe"
         )
 
-        state.state, state.percent, state.message = "downloading", 0, ""
+        # state is already "downloading" — set by start_update (the sole owner of the
+        # initial state) before the thread is spawned, so polling can observe it
+        # immediately after start_update returns without waiting for the thread to run.
         download(
             info["exe_url"],
             dest,
@@ -230,6 +237,8 @@ def start_update(mgr, *, info_provider=None, **deps):
     deps.setdefault("launch", _launch_installer)
     deps.setdefault("shutdown", _shutdown_self)
 
+    # Single owner of the initial "downloading" state — set here (not inside
+    # _run_update) so the state is visible to the next poll before the thread starts.
     STATE.state, STATE.percent, STATE.message = "downloading", 0, ""
     threading.Thread(
         target=_run_update,
