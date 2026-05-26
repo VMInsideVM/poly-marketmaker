@@ -11,6 +11,8 @@ from web.update import (
     check_update,
     verify_sha256,
     engine_active,
+    _State,
+    _run_update,
 )
 
 
@@ -181,3 +183,85 @@ class TestEngineActive:
     def test_scanning_status(self):
         mgr = _FakeManager(scan_status="scanning")
         assert engine_active(mgr) is True
+
+
+class TestRunUpdate:
+    def _info(self):
+        return {
+            "version": "1.0.8",
+            "exe_url": "https://example.com/Setup.exe",
+            "sha256_url": "https://example.com/Setup.exe.sha256",
+            "exe_size": 100,
+        }
+
+    def test_happy_path(self, tmp_path):
+        state = _State()
+        seen = []
+        launched = []
+        shut = []
+
+        def download(url, dest, total, cb):
+            cb(50)
+            cb(100)
+            with open(dest, "wb") as f:
+                f.write(b"installer-bytes")
+            seen.append(("download", dest))
+
+        def run():
+            _run_update(
+                state,
+                self._info(),
+                str(tmp_path),
+                download=download,
+                verify=lambda p, exp: True,
+                fetch_sha=lambda url: b"deadbeef  Setup.exe",
+                launch=lambda p: launched.append(p),
+                shutdown=lambda: shut.append(True),
+            )
+
+        run()
+        assert state.state == "installing"
+        assert launched and launched[0].endswith(
+            "PolymarketMarketMaker_Setup_1.0.8.exe"
+        )
+        assert shut == [True]
+
+    def test_sha_mismatch_aborts(self, tmp_path):
+        state = _State()
+        launched = []
+
+        def download(url, dest, total, cb):
+            with open(dest, "wb") as f:
+                f.write(b"x")
+
+        _run_update(
+            state,
+            self._info(),
+            str(tmp_path),
+            download=download,
+            verify=lambda p, exp: False,  # 校验失败
+            fetch_sha=lambda url: b"deadbeef",
+            launch=lambda p: launched.append(p),
+            shutdown=lambda: launched.append("SHUTDOWN"),
+        )
+        assert state.state == "error"
+        assert "校验" in state.message
+        assert launched == []  # 绝不启动安装包、绝不退出进程
+
+    def test_download_exception_sets_error(self, tmp_path):
+        state = _State()
+
+        def download(url, dest, total, cb):
+            raise OSError("disk full")
+
+        _run_update(
+            state,
+            self._info(),
+            str(tmp_path),
+            download=download,
+            verify=lambda p, exp: True,
+            fetch_sha=lambda url: b"x",
+            launch=lambda p: None,
+            shutdown=lambda: None,
+        )
+        assert state.state == "error"

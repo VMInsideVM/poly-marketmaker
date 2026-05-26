@@ -117,3 +117,59 @@ def engine_active(mgr):
     return any(
         getattr(w, "running", False) for w in getattr(mgr, "engines", {}).values()
     )
+
+
+class _State:
+    """更新进度状态(单进程单用户,模块级单例即可)。"""
+
+    def __init__(self):
+        self.state = "idle"  # idle|downloading|verifying|installing|error
+        self.percent = 0
+        self.message = ""
+
+    def snapshot(self):
+        return {"state": self.state, "percent": self.percent, "message": self.message}
+
+
+STATE = _State()
+
+
+def _run_update(
+    state, info, dest_dir, *, download, verify, fetch_sha, launch, shutdown
+):
+    """下载→校验→静默安装→退出。所有副作用经参数注入,便于测试。
+
+    校验失败或任何异常 -> state=error,且绝不启动安装包、绝不退出进程。
+    """
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(
+            dest_dir, f"PolymarketMarketMaker_Setup_{info['version']}.exe"
+        )
+
+        state.state, state.percent, state.message = "downloading", 0, ""
+        download(
+            info["exe_url"],
+            dest,
+            info.get("exe_size"),
+            lambda p: setattr(state, "percent", p),
+        )
+
+        state.state = "verifying"
+        expected = fetch_sha(info["sha256_url"]).decode("utf-8").strip().split()[0]
+        if not verify(dest, expected):
+            state.state = "error"
+            state.message = "校验失败(SHA-256 不匹配),已取消更新"
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            return
+
+        state.state = "installing"
+        launch(dest)
+        shutdown()
+    except Exception as e:  # noqa: BLE001
+        logger.exception("更新失败")
+        state.state = "error"
+        state.message = f"更新失败:{e}"
