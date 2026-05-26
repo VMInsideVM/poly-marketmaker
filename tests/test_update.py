@@ -10,6 +10,7 @@ from web.update import (
     parse_release,
     check_update,
     verify_sha256,
+    engine_active,
 )
 
 
@@ -147,3 +148,36 @@ class TestVerifySha256:
         f = tmp_path / "blob.bin"
         f.write_bytes(b"abc")
         assert verify_sha256(str(f), "0" * 64) is False
+
+
+class _FakeWorker:
+    def __init__(self, running):
+        self.running = running
+
+
+class _FakeManager:
+    def __init__(self, engines=None, scanner_thread=None, scan_status="idle"):
+        self.engines = engines or {}
+        self._scanner_thread = scanner_thread
+        self.scan_status = scan_status
+
+
+class TestEngineActive:
+    def test_no_manager(self):
+        assert engine_active(None) is False
+
+    def test_all_idle(self):
+        mgr = _FakeManager(engines={"a": _FakeWorker(False)})
+        assert engine_active(mgr) is False
+
+    def test_worker_running(self):
+        mgr = _FakeManager(engines={"a": _FakeWorker(False), "b": _FakeWorker(True)})
+        assert engine_active(mgr) is True
+
+    def test_scanner_thread_alive(self):
+        mgr = _FakeManager(scanner_thread=object())
+        assert engine_active(mgr) is True
+
+    def test_scanning_status(self):
+        mgr = _FakeManager(scan_status="scanning")
+        assert engine_active(mgr) is True

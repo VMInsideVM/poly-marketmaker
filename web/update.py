@@ -104,3 +104,16 @@ def verify_sha256(path, expected):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest().lower() == (expected or "").strip().lower()
+
+
+def engine_active(mgr):
+    """是否有引擎/扫描在跑 —— 更新会中断做市并使持仓失去止损保护,故此时拒绝更新。"""
+    if mgr is None:
+        return False
+    if getattr(mgr, "_scanner_thread", None) is not None:
+        return True
+    if getattr(mgr, "scan_status", "") == "scanning":
+        return True
+    return any(
+        getattr(w, "running", False) for w in getattr(mgr, "engines", {}).values()
+    )
