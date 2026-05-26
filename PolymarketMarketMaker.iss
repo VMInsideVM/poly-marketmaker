@@ -7,7 +7,9 @@
 ;       不在安装目录内，因此卸载不会动用户数据，安装包里也绝不含任何私钥或历史。
 
 #define MyAppName "Polymarket 做市助手"
-#define MyAppVersion "1.0.7"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0"
+#endif
 #define MyAppPublisher "Polymarket 做市助手"
 #define MyAppExeName "MarketMaker.exe"
 
@@ -30,6 +32,7 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
+CloseApplications=yes
 
 [Languages]
 Name: "default"; MessagesFile: "compiler:Default.isl"
@@ -46,4 +49,7 @@ Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; 交互式首装:勾选框"立即启动"
 Filename: "{app}\{#MyAppExeName}"; Description: "立即启动程序"; Flags: nowait postinstall skipifsilent
+; 静默(自动更新)安装:装完自动拉起程序
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: WizardSilent
