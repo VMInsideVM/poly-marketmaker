@@ -2,7 +2,7 @@
 
 import re
 from version import __version__
-from web.update import parse_version, is_newer, parse_release
+from web.update import parse_version, is_newer, parse_release, check_update
 
 
 def test_version_is_semver_string():
@@ -90,3 +90,31 @@ class TestParseRelease:
         assert info["exe_url"] is None
         assert info["sha256_url"] is None
         assert info["notes"] == ""
+
+
+class TestCheckUpdate:
+    def test_update_available(self):
+        out = check_update(current="1.0.7", fetch=lambda: _fake_release("v1.0.8"))
+        assert out["update_available"] is True
+        assert out["current"] == "1.0.7"
+        assert out["latest"] == "1.0.8"
+        assert out["notes"] == "修复若干问题"
+        assert out["size"] == 12345678
+
+    def test_same_version_no_update(self):
+        out = check_update(current="1.0.8", fetch=lambda: _fake_release("v1.0.8"))
+        assert out["update_available"] is False
+
+    def test_no_exe_asset_no_update(self):
+        out = check_update(
+            current="1.0.7", fetch=lambda: _fake_release("v1.0.8", with_exe=False)
+        )
+        assert out["update_available"] is False
+
+    def test_network_error_is_swallowed(self):
+        def boom():
+            raise OSError("network down")
+
+        out = check_update(current="1.0.7", fetch=boom)
+        assert out["update_available"] is False
+        assert out["current"] == "1.0.7"

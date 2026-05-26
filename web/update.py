@@ -62,3 +62,36 @@ def parse_release(rel):
         "exe_size": exe.get("size") if exe else None,
         "sha256_url": sha.get("browser_download_url") if sha else None,
     }
+
+
+def _http_get(url, timeout=30):
+    """GET 原始字节;带 UA。供下载 .sha256 与 fetch JSON 复用。"""
+    req = urllib.request.Request(url, headers=_UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def _fetch_latest_release():
+    """拉取并解析 GitHub releases/latest 为 dict;5 秒超时。"""
+    return json.loads(_http_get(LATEST_URL, timeout=5).decode("utf-8"))
+
+
+def check_update(current=__version__, fetch=None):
+    """检测最新版本。永不抛异常:任何失败都返回 update_available=False。
+
+    fetch: 无参函数,返回 GitHub release JSON dict(测试可注入)。
+    """
+    fetch = fetch or _fetch_latest_release
+    try:
+        info = parse_release(fetch())
+        available = bool(info["exe_url"]) and is_newer(info["version"], current)
+        return {
+            "update_available": available,
+            "current": current,
+            "latest": info["version"],
+            "notes": info["notes"],
+            "size": info["exe_size"],
+        }
+    except Exception as e:  # noqa: BLE001 — 检测必须非阻塞
+        logger.warning("更新检测失败: %s", e)
+        return {"update_available": False, "current": current}
