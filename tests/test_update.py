@@ -2,7 +2,7 @@
 
 import re
 from version import __version__
-from web.update import parse_version, is_newer
+from web.update import parse_version, is_newer, parse_release
 
 
 def test_version_is_semver_string():
@@ -43,3 +43,50 @@ class TestIsNewer:
     def test_unparseable_is_not_newer(self):
         assert is_newer("latest", "1.0.7") is False
         assert is_newer("1.0.8", "garbage") is False
+
+
+def _fake_release(tag="v1.0.8", with_exe=True, with_sha=True, body="修复若干问题"):
+    assets = []
+    if with_exe:
+        assets.append(
+            {
+                "name": "PolymarketMarketMaker_Setup.exe",
+                "browser_download_url": "https://example.com/Setup.exe",
+                "size": 12345678,
+            }
+        )
+    if with_sha:
+        assets.append(
+            {
+                "name": "PolymarketMarketMaker_Setup.exe.sha256",
+                "browser_download_url": "https://example.com/Setup.exe.sha256",
+                "size": 70,
+            }
+        )
+    return {"tag_name": tag, "body": body, "assets": assets}
+
+
+class TestParseRelease:
+    def test_full(self):
+        info = parse_release(_fake_release())
+        assert info["tag"] == "v1.0.8"
+        assert info["version"] == "1.0.8"
+        assert info["notes"] == "修复若干问题"
+        assert info["exe_url"] == "https://example.com/Setup.exe"
+        assert info["exe_size"] == 12345678
+        assert info["sha256_url"] == "https://example.com/Setup.exe.sha256"
+
+    def test_missing_exe(self):
+        info = parse_release(_fake_release(with_exe=False))
+        assert info["exe_url"] is None
+        assert info["exe_size"] is None
+
+    def test_missing_sha(self):
+        info = parse_release(_fake_release(with_sha=False))
+        assert info["sha256_url"] is None
+
+    def test_empty_release(self):
+        info = parse_release({})
+        assert info["exe_url"] is None
+        assert info["sha256_url"] is None
+        assert info["notes"] == ""

@@ -39,3 +39,26 @@ def is_newer(latest, current):
     if lv is None or cv is None:
         return False
     return lv > cv
+
+
+def parse_release(rel):
+    """从 GitHub release JSON 取出更新所需字段。资源缺失则对应字段为 None。"""
+    tag = rel.get("tag_name", "") or ""
+    assets = rel.get("assets", []) or []
+
+    def _find(suffix):
+        for a in assets:
+            if (a.get("name", "") or "").lower().endswith(suffix):
+                return a
+        return None
+
+    exe = _find(".exe")
+    sha = _find(".sha256")
+    return {
+        "tag": tag,
+        "version": tag.lstrip("vV"),
+        "notes": rel.get("body", "") or "",
+        "exe_url": exe.get("browser_download_url") if exe else None,
+        "exe_size": exe.get("size") if exe else None,
+        "sha256_url": sha.get("browser_download_url") if sha else None,
+    }
