@@ -70,7 +70,11 @@ class PolymarketAPI:
             key=private_key,
             chain_id=CHAIN_ID,
         )
-        api_creds = temp_client.derive_api_key()
+        # create_or_derive (not derive-only): a freshly imported wallet has no
+        # CLOB API creds yet, so derive_api_key alone fails with "Could not
+        # derive api key!". create_api_key first (new wallet), fall back to
+        # derive (already-onboarded wallet) — safe for both.
+        api_creds = temp_client.create_or_derive_api_key()
         # The deposit wallet (where funds live) is the Polymarket Gnosis Safe
         # deterministically derived from the EOA — NOT the EOA itself. Derive
         # it when no funder is supplied.
