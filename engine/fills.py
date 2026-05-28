@@ -45,15 +45,15 @@ def select_new_buy_fills(trades: list[dict], funder: str, seen_keys: set) -> lis
     return events
 
 
-def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[dict]:
-    """挑出我们在某 token 上的全部 BUY 成交,用于算加权成本。
+def extract_fills(trades: list[dict], funder: str, asset_id: str) -> list[dict]:
+    """挑出我们在某 token 上的全部成交(BUY 和 SELL),用于按时间回放重建持仓成本。
 
-    返回 [{price, size, ts, trade_id}, ...](不去重、不依赖 seen_keys)。两种来源:
-    - maker:我们挂的买单被吃,成交在 trade.maker_orders 里(按 funder 过滤,
-      side==BUY,asset 匹配);price=mo.price,size=mo.matched_amount。
-    - taker:我们的 GTC 买单下单瞬间可成交而以 taker 立即成交,成交在 trade 顶层
-      (maker_orders 里是对手方,不是我们)。当 trade.trader_side==TAKER 且顶层
-      side==BUY 且 asset 匹配:price=trade.price,size=trade.size。
+    返回 [{side, price, size, ts, trade_id}, ...](不去重、不依赖 seen_keys)。两种来源:
+    - maker:我们挂的单被吃,成交在 trade.maker_orders 里(按 funder 过滤,asset 匹配);
+      side=mo.side,price=mo.price,size=mo.matched_amount。
+    - taker:我们的单下单瞬间以 taker 立即成交(含止损市价平仓),成交在 trade 顶层
+      (maker_orders 里是对手方,不是我们)。当 trade.trader_side==TAKER 且 asset 匹配:
+      side=trade.side,price=trade.price,size=trade.size。
     一笔 trade 对我们而言要么是 maker 要么是 taker,两分支天然互斥,不会重复计入。
     ts 取 trade 顶层 match_time。
     """
@@ -68,12 +68,11 @@ def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[di
             if str(mo.get("maker_address", "")).lower() != f:
                 continue
             we_are_maker = True  # 我们在这笔 trade 里是 maker -> 不可能同时是 taker
-            if str(mo.get("side", "")).upper() != "BUY":
-                continue
             if str(mo.get("asset_id", "")) != a:
                 continue
             out.append(
                 {
+                    "side": str(mo.get("side", "")).upper(),
                     "price": float(mo.get("price", 0) or 0),
                     "size": float(mo.get("matched_amount", 0) or 0),
                     "ts": ts,
@@ -83,11 +82,11 @@ def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[di
         if (
             not we_are_maker
             and str(tr.get("trader_side", "")).upper() == "TAKER"
-            and str(tr.get("side", "")).upper() == "BUY"
             and str(tr.get("asset_id", "")) == a
         ):
             out.append(
                 {
+                    "side": str(tr.get("side", "")).upper(),
                     "price": float(tr.get("price", 0) or 0),
                     "size": float(tr.get("size", 0) or 0),
                     "ts": ts,
@@ -95,3 +94,12 @@ def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[di
                 }
             )
     return out
+
+
+def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[dict]:
+    """我们在某 token 上的全部 BUY 成交(extract_fills 的 BUY 视图,去掉 side 键)。"""
+    return [
+        {k: v for k, v in f.items() if k != "side"}
+        for f in extract_fills(trades, funder, asset_id)
+        if f["side"] == "BUY"
+    ]

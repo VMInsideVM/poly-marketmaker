@@ -4,8 +4,7 @@ import pytest
 from engine.take_profit import (
     ceil_to_tick,
     plan_take_profit,
-    cost_basis_from_buy_fills,
-    cost_basis_with_lots,
+    position_cost_with_lots,
     describe_cost_basis,
     take_profit_price,
 )
@@ -124,72 +123,87 @@ class TestPlanTakeProfit:
         assert plan["action"] == "keep"
 
 
-def _bf(price, size, ts):
-    return {"price": price, "size": size, "ts": ts}
+def _f(side, price, size, ts, tid):
+    return {"side": side, "price": price, "size": size, "ts": ts, "trade_id": tid}
 
 
-class TestCostBasisFromBuyFills:
-    def test_single_buy_equals_buy_price(self):
-        # 事故那单:单独一笔 0.28 全持有 -> 成本就是 0.28(不会再读成 0.21)
-        assert cost_basis_from_buy_fills([_bf(0.28, 361, 100)], 361) == 0.28
+class TestPositionCostWithLots:
+    """成本=对成交流(买入∪卖出)按时间回放、FIFO 对冲后剩余持仓的加权均价。
 
-    def test_multi_buy_weighted_average(self):
-        # 200@0.20 + 200@0.28,size=400 -> (40+56)/400 = 0.24
-        fills = [_bf(0.20, 200, 1), _bf(0.28, 200, 2)]
-        assert cost_basis_from_buy_fills(fills, 400) == pytest.approx(0.24)
+    剩余持仓数量必须与 Data API 持仓 size 对得上(容差内),否则成本不可信→None。
+    """
 
-    def test_takes_newest_fills_to_cover_size(self):
-        # 最近一笔 161@0.28(ts2),更早 200@0.20(ts1);size=161 -> 只取最新 -> 0.28
-        fills = [_bf(0.20, 200, 1), _bf(0.28, 161, 2)]
-        assert cost_basis_from_buy_fills(fills, 161) == pytest.approx(0.28)
-
-    def test_partial_coverage_uses_available(self):
-        # 买入总量(100)不足 size(361) -> 按已有的算(优雅降级)
-        assert cost_basis_from_buy_fills([_bf(0.28, 100, 1)], 361) == 0.28
-
-    def test_empty_fills_none(self):
-        assert cost_basis_from_buy_fills([], 361) is None
-
-    def test_zero_size_none(self):
-        assert cost_basis_from_buy_fills([_bf(0.28, 361, 1)], 0) is None
-
-
-def _bft(price, size, ts, tid):
-    return {"price": price, "size": size, "ts": ts, "trade_id": tid}
-
-
-class TestCostBasisWithLots:
-    def test_single_buy_one_lot(self):
-        cost, lots = cost_basis_with_lots([_bft(0.28, 361, 100, "T1")], 361)
+    def test_single_buy_full_position(self):
+        cost, lots = position_cost_with_lots([_f("BUY", 0.28, 361, 100, "T1")], 361)
         assert cost == pytest.approx(0.28)
         assert lots == [{"price": 0.28, "take": 361.0, "ts": 100.0, "trade_id": "T1"}]
 
-    def test_multi_buy_weighted_and_lots(self):
-        fills = [_bft(0.20, 200, 1, "A"), _bft(0.28, 200, 2, "B")]
-        cost, lots = cost_basis_with_lots(fills, 400)
+    def test_old_sold_lot_excluded_uses_recent_buy(self):
+        # 事故场景:20 天前 256.41@0.36 买入后已全部卖出,最近 294@0.38 买入。
+        # 旧买单被旧卖出消耗,绝不污染成本 -> 成本=最近的 0.38。
+        fills = [
+            _f("BUY", 0.36, 256.41, 1, "OLD"),
+            _f("SELL", 0.37, 256.41, 2, "OLDSELL"),
+            _f("BUY", 0.38, 294, 3, "NEW"),
+        ]
+        cost, lots = position_cost_with_lots(fills, 294)
+        assert cost == pytest.approx(0.38)
+        assert [l["trade_id"] for l in lots] == ["NEW"]
+        assert lots[0]["take"] == pytest.approx(294.0)
+
+    def test_lag_window_missing_recent_buy_returns_none(self):
+        # 延迟窗口:Data API 持仓已 294,但成交流只回来旧的 256.41@0.36。
+        # 重建持仓(256.41)对不上 294 -> 成本不可信 -> None(跳过、不乱卖)。
+        cost, lots = position_cost_with_lots([_f("BUY", 0.36, 256.41, 1, "OLD")], 294)
+        assert cost is None
+
+    def test_old_round_qty_equals_new_size_not_fooled(self):
+        # 关键:旧一轮买入数量恰好==新持仓数量,且新买入还没到。
+        # 不做对冲会被旧买单凑满骗过去;做对冲后旧仓已清空、新仓缺席 -> None。
+        fills = [
+            _f("BUY", 0.36, 294, 1, "OLD"),
+            _f("SELL", 0.37, 294, 2, "OLDSELL"),
+        ]
+        cost, lots = position_cost_with_lots(fills, 294)
+        assert cost is None
+
+    def test_partial_sell_of_current_position(self):
+        # 当前持仓买 294@0.38,卖掉 100,持仓 194 -> 成本仍 0.38。
+        fills = [
+            _f("BUY", 0.38, 294, 1, "B"),
+            _f("SELL", 0.40, 100, 2, "S"),
+        ]
+        cost, lots = position_cost_with_lots(fills, 194)
+        assert cost == pytest.approx(0.38)
+        assert lots[0]["take"] == pytest.approx(194.0)
+
+    def test_fifo_consumes_oldest_lot_first(self):
+        # 100@0.30(早) + 100@0.40(晚),卖 100 -> FIFO 先消耗 0.30,剩 100@0.40。
+        fills = [
+            _f("BUY", 0.30, 100, 1, "OLD"),
+            _f("BUY", 0.40, 100, 2, "NEW"),
+            _f("SELL", 0.45, 100, 3, "S"),
+        ]
+        cost, lots = position_cost_with_lots(fills, 100)
+        assert cost == pytest.approx(0.40)
+        assert [l["trade_id"] for l in lots] == ["NEW"]
+
+    def test_multi_lot_weighted_average(self):
+        fills = [_f("BUY", 0.20, 200, 1, "A"), _f("BUY", 0.28, 200, 2, "B")]
+        cost, lots = position_cost_with_lots(fills, 400)
         assert cost == pytest.approx(0.24)
-        assert len(lots) == 2
         assert sum(l["take"] for l in lots) == pytest.approx(400.0)
 
-    def test_partial_lot_take_is_consumed_amount(self):
-        # 最新 161@0.28(ts2) 全取,更早 200@0.20(ts1) 只取 39 凑满 200
-        fills = [_bft(0.20, 200, 1, "OLD"), _bft(0.28, 161, 2, "NEW")]
-        cost, lots = cost_basis_with_lots(fills, 200)
-        takes = {l["trade_id"]: l["take"] for l in lots}
-        assert takes["NEW"] == pytest.approx(161.0)
-        assert takes["OLD"] == pytest.approx(39.0)
-        assert cost == pytest.approx((161 * 0.28 + 39 * 0.20) / 200)
-
-    def test_insufficient_fills_graceful(self):
-        cost, lots = cost_basis_with_lots([_bft(0.28, 100, 1, "X")], 361)
-        assert cost == pytest.approx(0.28)
-        assert lots[0]["take"] == pytest.approx(100.0)
+    def test_size_within_tolerance_trusted(self):
+        # 亚股浮点/部分成交漂移:重建 293 对 size 294,差 1 <= 容差 -> 信。
+        cost, _ = position_cost_with_lots([_f("BUY", 0.38, 293, 1, "B")], 294)
+        assert cost == pytest.approx(0.38)
 
     def test_empty_fills(self):
-        assert cost_basis_with_lots([], 361) == (None, [])
+        assert position_cost_with_lots([], 361) == (None, [])
 
     def test_zero_size(self):
-        assert cost_basis_with_lots([_bft(0.28, 361, 1, "X")], 0) == (None, [])
+        assert position_cost_with_lots([_f("BUY", 0.28, 361, 1, "X")], 0) == (None, [])
 
 
 class TestTakeProfitPrice:

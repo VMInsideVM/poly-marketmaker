@@ -1,5 +1,5 @@
 # tests/test_fills.py
-from engine.fills import select_new_buy_fills, extract_buy_fills
+from engine.fills import select_new_buy_fills, extract_buy_fills, extract_fills
 
 FUNDER = "0x98d67a03a5AFf272Dc02016c06EF9c18aec4ae75"
 
@@ -247,3 +247,95 @@ def test_extract_buy_fills_carries_trade_id_maker_and_taker():
     assert maker[0]["trade_id"] == "trade-2"
     taker = extract_buy_fills([TRADE_TAKER_BUY], FUNDER, "ASSET_T")
     assert taker[0]["trade_id"] == "trade-taker-1"
+
+
+# 我们当 taker 的卖出(止损市价平仓):成交在 trade 顶层,我们不在 maker_orders 里
+TRADE_TAKER_SELL = {
+    "id": "trade-taker-sell",
+    "side": "SELL",
+    "size": "80",
+    "price": "0.29",
+    "asset_id": "ASSET_T",
+    "market": "COND_T",
+    "match_time": "1779060000",
+    "trader_side": "TAKER",
+    "maker_orders": [
+        {
+            "order_id": "ord-cp",
+            "maker_address": "0x49c40bD313D8599F54B62fff13324a790c4fBf77",
+            "side": "BUY",
+            "matched_amount": "80",
+            "price": "0.29",
+            "asset_id": "ASSET_T",
+        }
+    ],
+}
+
+
+def test_extract_fills_includes_our_maker_buy_with_side():
+    fills = extract_fills([TRADE_TWO_OURS_BUY], FUNDER, "ASSET_B1")
+    assert fills == [
+        {
+            "side": "BUY",
+            "price": 0.4,
+            "size": 20.0,
+            "ts": 1779030000.0,
+            "trade_id": "trade-2",
+        }
+    ]
+
+
+def test_extract_fills_includes_our_maker_sell():
+    # TRADE_SELL_MIX:我们挂的卖单被吃(ASSET_YES,190.31@0.3)
+    fills = extract_fills([TRADE_SELL_MIX], FUNDER, "ASSET_YES")
+    assert fills == [
+        {
+            "side": "SELL",
+            "price": 0.3,
+            "size": 190.31,
+            "ts": 1779035234.0,
+            "trade_id": "trade-1",
+        }
+    ]
+
+
+def test_extract_fills_includes_our_taker_buy():
+    fills = extract_fills([TRADE_TAKER_BUY], FUNDER, "ASSET_T")
+    assert fills == [
+        {
+            "side": "BUY",
+            "price": 0.33,
+            "size": 100.0,
+            "ts": 1779040000.0,
+            "trade_id": "trade-taker-1",
+        }
+    ]
+
+
+def test_extract_fills_includes_our_taker_sell():
+    fills = extract_fills([TRADE_TAKER_SELL], FUNDER, "ASSET_T")
+    assert fills == [
+        {
+            "side": "SELL",
+            "price": 0.29,
+            "size": 80.0,
+            "ts": 1779060000.0,
+            "trade_id": "trade-taker-sell",
+        }
+    ]
+
+
+def test_extract_fills_skips_other_traders_and_wrong_asset():
+    # ASSET_NO 那笔是别人的 BUY;ASSET_YES 才是我们的
+    assert extract_fills([TRADE_SELL_MIX], FUNDER, "ASSET_NO") == []
+    assert extract_fills([TRADE_TAKER_BUY], FUNDER, "OTHER") == []
+
+
+def test_extract_fills_buy_then_sell_across_trades_same_asset():
+    fills = extract_fills(
+        [TRADE_TAKER_BUY, TRADE_TAKER_SELL], FUNDER.lower(), "ASSET_T"
+    )
+    sides = [(f["side"], f["size"]) for f in fills]
+    assert ("BUY", 100.0) in sides
+    assert ("SELL", 80.0) in sides
+    assert len(fills) == 2

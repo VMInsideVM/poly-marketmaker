@@ -3,10 +3,10 @@
 import logging
 import time
 from py_clob_client_v2.clob_types import TradeParams
-from engine.fills import select_new_buy_fills, extract_buy_fills
+from engine.fills import select_new_buy_fills, extract_fills
 from engine.take_profit import (
     plan_take_profit,
-    cost_basis_with_lots,
+    position_cost_with_lots,
     describe_cost_basis,
     take_profit_price,
 )
@@ -95,8 +95,9 @@ class OrderMonitor:
         return self.api.get_funder()
 
     def _cost_lots(self, asset_id: str, size: float):
-        """该持仓的加权成本 + 逐笔构成(本 tick 缓存)。只来自 CLOB get_trades 的真实
-        买入成交(maker∪taker)。取不到 -> (None, [])。"""
+        """该持仓的加权成本 + 剩余逐笔构成(本 tick 缓存)。由 CLOB get_trades 的真实
+        成交(买入∪卖出,maker∪taker)按时间回放、FIFO 对冲重建;重建持仓与 size 对不
+        上(成交流滞后/外部转入)-> (None, [])。"""
         if asset_id in self._cost_cache:
             return self._cost_cache[asset_id]
         funder = self._funder()
@@ -106,8 +107,8 @@ class OrderMonitor:
             logger.warning("get_trades(asset=%s) for cost failed: %s", asset_id, e)
             self._cost_cache[asset_id] = (None, [])
             return None, []
-        fills = extract_buy_fills(trades, funder, asset_id)
-        result = cost_basis_with_lots(fills, size)
+        fills = extract_fills(trades, funder, asset_id)
+        result = position_cost_with_lots(fills, size)
         self._cost_cache[asset_id] = result
         return result
 

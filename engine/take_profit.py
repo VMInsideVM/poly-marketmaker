@@ -6,8 +6,9 @@ The monitor maintains exactly ONE resting SELL per position. The sell price is
 the best bid so the order always rests as a maker and never crosses the book
 (原价不亏本金、不穿价市价清仓、赚流动性奖励).
 
-``cost`` is the position's weighted-average cost computed from our real CLOB
-``get_trades`` buy fills (``cost_basis_from_buy_fills``), NOT the Polymarket Data
+``cost`` is the position's weighted-average cost reconstructed from our real CLOB
+``get_trades`` fills (``position_cost_with_lots``: replay buys/sells, FIFO-net,
+remaining lots = current position), NOT the Polymarket Data
 API ``avgPrice`` — the Data API avgPrice was observed to glitch on freshly
 opened positions (a real 0.28 buy read as ~0.21, dumping the position at
 market). A single resting sell also replaces the older per-fill sells that split
@@ -70,47 +71,60 @@ def plan_take_profit(
     return {"action": "replace", "price": want, "size": size, "cancel_ids": ids}
 
 
-def cost_basis_with_lots(buy_fills: list[dict], size: float):
-    """当前持仓的加权成本 + 被消耗的逐笔买入明细,来自我们的真实买入成交。
+def position_cost_with_lots(fills: list[dict], size: float):
+    """当前持仓的加权成本 + 剩余逐笔持仓明细,严格由成交流(买入∪卖出)重建。
 
-    算法同 cost_basis_from_buy_fills:按 ts 从新到旧累计取份额直至覆盖 size。额外
-    返回每笔被消耗份额 {price, take(本笔实取量), ts, trade_id},供卖单理由溯源。
-    返回 (cost_or_None, lots)。size<=0 或无成交 -> (None, [])。
+    按 ts 正序回放我们在该 token 的全部成交:买入入 FIFO 队列,卖出从最早一笔开始
+    抵消;回放完后队列里剩下的就是当前真实持仓,其加权均价即成本。已卖出的旧买单会被
+    抵消、移出队列,绝不污染成本(老 bug:不看卖出、从新到旧凑 size,会把早已平掉的
+    旧买入当成本,导致按错价亏本市价卖)。重建出的剩余持仓数量必须与 Data API 持仓
+    size 吻合(容差 max(1.0, 0.01*size)),否则成本不可信(成交流相对 Data API 滞后、
+    或外部转入的仓)-> (None, []),由调用方走"跳过+⚠️告警"、下个 tick 自愈。
+    返回 (cost_or_None, lots);lots 形如 {price, take(剩余持仓量), ts, trade_id}。
     """
-    if size <= 0 or not buy_fills:
+    if size <= 0 or not fills:
         return None, []
-    fills = sorted(buy_fills, key=lambda f: f.get("ts", 0) or 0, reverse=True)
-    remaining = size
-    cost_sum = 0.0
-    qty_sum = 0.0
-    lots: list[dict] = []
-    for f in fills:
-        if remaining <= 0:
-            break
+    ordered = sorted(fills, key=lambda f: f.get("ts", 0) or 0)
+    lots: list[dict] = []  # FIFO 存货队列,最早的在前
+    for f in ordered:
         fsize = float(f.get("size", 0) or 0)
         if fsize <= 0:
             continue
-        take = min(fsize, remaining)
-        price = float(f.get("price", 0) or 0)
-        cost_sum += price * take
-        qty_sum += take
-        remaining -= take
-        lots.append(
-            {
-                "price": price,
-                "take": take,
-                "ts": float(f.get("ts", 0) or 0),
-                "trade_id": f.get("trade_id", ""),
-            }
-        )
-    if qty_sum <= 0:
+        side = str(f.get("side", "")).upper()
+        if side == "BUY":
+            lots.append(
+                {
+                    "price": float(f.get("price", 0) or 0),
+                    "remaining": fsize,
+                    "ts": float(f.get("ts", 0) or 0),
+                    "trade_id": f.get("trade_id", ""),
+                }
+            )
+        elif side == "SELL":
+            qty = fsize
+            while qty > 1e-9 and lots:
+                lot = lots[0]
+                take = min(lot["remaining"], qty)
+                lot["remaining"] -= take
+                qty -= take
+                if lot["remaining"] <= 1e-9:
+                    lots.pop(0)
+    recon = sum(l["remaining"] for l in lots)
+    if recon <= 0:
         return None, []
-    return cost_sum / qty_sum, lots
-
-
-def cost_basis_from_buy_fills(buy_fills: list[dict], size: float) -> float | None:
-    """当前持仓的加权成本(仅成本,不含明细)。见 cost_basis_with_lots。"""
-    return cost_basis_with_lots(buy_fills, size)[0]
+    if abs(recon - size) > max(1.0, 0.01 * size):
+        return None, []
+    cost_sum = sum(l["price"] * l["remaining"] for l in lots)
+    result_lots = [
+        {
+            "price": l["price"],
+            "take": l["remaining"],
+            "ts": l["ts"],
+            "trade_id": l["trade_id"],
+        }
+        for l in lots
+    ]
+    return cost_sum / recon, result_lots
 
 
 def take_profit_price(cost: float, best_bid: float | None, tick: float) -> float:
@@ -141,7 +155,7 @@ def _short_tid(tid) -> str:
 def describe_cost_basis(cost, lots: list[dict], max_lots: int = 6) -> str:
     """成本构成的中文片段(纯函数),供止盈/止损卖单理由引用。
 
-    lots 来自 cost_basis_with_lots,按 ts 正序(最早->最新)逐笔列:
+    lots 来自 position_cost_with_lots,按 ts 正序(最早->最新)逐笔列:
     "①时间 价格×份额股 [trade 缩写id]"。超过 max_lots 笔时列前 max_lots 笔
     + "…等共N笔"。时间用本地时区 MM-DD HH:MM。cost 为 None 时给降级文案。
     """
