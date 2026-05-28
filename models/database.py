@@ -37,6 +37,7 @@ class Database:
                 address TEXT PRIMARY KEY,
                 encrypted_key TEXT NOT NULL,
                 funder TEXT NOT NULL DEFAULT '',
+                signature_type INTEGER NOT NULL DEFAULT 2,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
@@ -140,6 +141,11 @@ class Database:
         if "funder" not in cols:
             c.execute("ALTER TABLE wallets ADD COLUMN funder TEXT NOT NULL DEFAULT ''")
             self.conn.commit()
+        if "signature_type" not in cols:
+            c.execute(
+                "ALTER TABLE wallets ADD COLUMN signature_type INTEGER NOT NULL DEFAULT 2"
+            )
+            self.conn.commit()
         c.execute("PRAGMA table_info(eligible_markets)")
         em_cols = {row[1] for row in c.fetchall()}
         if em_cols and "min_cost" not in em_cols:
@@ -185,11 +191,18 @@ class Database:
 
     # --- Wallets ---
 
-    def add_wallet(self, address: str, encrypted_key: str, funder: str = ""):
+    def add_wallet(
+        self,
+        address: str,
+        encrypted_key: str,
+        funder: str = "",
+        signature_type: int = 2,
+    ):
         c = self.conn.cursor()
         c.execute(
-            "INSERT INTO wallets (address, encrypted_key, funder) VALUES (?, ?, ?)",
-            (address, encrypted_key, funder),
+            "INSERT INTO wallets (address, encrypted_key, funder, signature_type) "
+            "VALUES (?, ?, ?, ?)",
+            (address, encrypted_key, funder, signature_type),
         )
         self.conn.commit()
 
@@ -209,7 +222,8 @@ class Database:
     def list_wallets(self) -> list[dict]:
         c = self.conn.cursor()
         c.execute(
-            "SELECT address, encrypted_key, funder, enabled, created_at FROM wallets"
+            "SELECT address, encrypted_key, funder, signature_type, enabled, created_at "
+            "FROM wallets"
         )
         return [dict(row) for row in c.fetchall()]
 

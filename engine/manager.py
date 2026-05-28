@@ -405,7 +405,9 @@ class EngineManager:
                     return
                 pk = decrypt(enabled[0]["encrypted_key"], self.encryption_key)
                 self._scanner_api = PolymarketAPI(
-                    pk, funder=enabled[0].get("funder") or None
+                    pk,
+                    signature_type=enabled[0].get("signature_type", 2),
+                    funder=enabled[0].get("funder") or None,
                 )
                 logger.info("Created scanner API from wallet %s", enabled[0]["address"])
 
@@ -470,7 +472,11 @@ class EngineManager:
             try:
                 private_key = decrypt(wallet["encrypted_key"], self.encryption_key)
                 funder = wallet.get("funder", "")
-                api = PolymarketAPI(private_key, funder=funder or None)
+                api = PolymarketAPI(
+                    private_key,
+                    signature_type=wallet.get("signature_type", 2),
+                    funder=funder or None,
+                )
                 settings = self.db.get_settings()
                 worker = WalletWorker(api, self.db, address, settings)
             except Exception as e:
@@ -499,7 +505,11 @@ class EngineManager:
         funder = wallet.get("funder", "")
 
         private_key = decrypt(encrypted_key, self.encryption_key)
-        api = PolymarketAPI(private_key, funder=funder or None)
+        api = PolymarketAPI(
+            private_key,
+            signature_type=wallet.get("signature_type", 2),
+            funder=funder or None,
+        )
         settings = self.db.get_settings()
         worker = WalletWorker(api, self.db, address, settings)
         self.engines[address] = worker

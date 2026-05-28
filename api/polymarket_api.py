@@ -15,6 +15,7 @@ from py_clob_client_v2.clob_types import (
     TradeParams,
     OrdersScoringParams,
 )
+from eth_account import Account
 from py_builder_relayer_client.builder.derive import derive as _derive_safe
 from py_builder_relayer_client.config import get_contract_config
 
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 POLYMARKET_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
+SIG_POLY_PROXY = 1  # Email/embedded-login Polymarket Proxy Wallet
 SIG_GNOSIS_SAFE = 2  # Browser-wallet proxy signature type
 
 # Rewards API is part of the CLOB API
@@ -40,6 +42,44 @@ def derive_deposit_address(eoa_address: str) -> str:
     """
     cfg = get_contract_config(CHAIN_ID)
     return _derive_safe(eoa_address, cfg.safe_factory)
+
+
+def eoa_from_key(private_key: str) -> str:
+    """Signer EOA (checksummed) for a private key — no network call."""
+    return Account.from_key(private_key).address
+
+
+def resolve_signature_type(derived_safe: str, funder: str) -> int:
+    """Pick the Polymarket signature type for an imported wallet.
+
+    A blank funder, or one equal to the EOA's derived Gnosis Safe, means a
+    browser-wallet/Safe account (type 2 — the default we can derive). A funder
+    that differs is the user's Polymarket Proxy deposit wallet (type 1, used by
+    email/embedded-login accounts); we can't derive that address, so the user
+    supplies it and we must sign/query as a proxy, not a Safe.
+    """
+    if funder and funder.lower() != derived_safe.lower():
+        return SIG_POLY_PROXY
+    return SIG_GNOSIS_SAFE
+
+
+def pick_funded_sig_type(by_sig: dict) -> int | None:
+    """Given {sig_type: collateral_balance_str}, return the sig type holding
+    the most collateral, or None if all are zero/unreadable.
+
+    The CLOB derives the wallet server-side from EOA + signature_type, so the
+    type whose derived wallet actually holds pUSD is the account's real type
+    (EOA=0 / proxy=1 / safe=2 / EIP-1271 smart wallet=3). This auto-detects it.
+    """
+    best, best_bal = None, 0
+    for st, val in by_sig.items():
+        try:
+            bal = int(val)
+        except (TypeError, ValueError):
+            continue
+        if bal > best_bal:
+            best, best_bal = int(st), bal
+    return best
 
 
 class PolymarketAPI:
@@ -64,6 +104,7 @@ class PolymarketAPI:
                 user only needs to provide a private key.
         """
         self.private_key = private_key
+        self.signature_type = signature_type
         # Step 1: Create temp client to derive API creds + the signer EOA.
         temp_client = ClobClient(
             host=POLYMARKET_HOST,
@@ -131,14 +172,47 @@ class PolymarketAPI:
     # --- Balance ---
 
     def get_balance(self) -> float:
-        """Get pUSD (collateral) balance of the GNOSIS_SAFE proxy, in human-readable units."""
+        """Get pUSD (collateral) balance of the proxy/safe, in human-readable units."""
         params = BalanceAllowanceParams(
             asset_type=AssetType.COLLATERAL,
-            signature_type=SIG_GNOSIS_SAFE,
+            signature_type=self.signature_type,
         )
-        bal = self.client.get_balance_allowance(params)
+        try:
+            bal = self.client.get_balance_allowance(params)
+        except Exception as e:
+            logger.warning(
+                "get_balance failed eoa=%s funder=%s sig=%s: %s",
+                self.get_address(),
+                self.get_funder(),
+                self.signature_type,
+                e,
+            )
+            raise
         raw = float(bal.get("balance", 0)) if isinstance(bal, dict) else 0.0
         return raw / 1e6  # pUSD has 6 decimals
+
+    def balance_by_sig_types(self) -> dict:
+        """Diagnostic: COLLATERAL(pUSD) balance under each signature type.
+
+        get_balance_allowance derives the wallet server-side from EOA +
+        builder.signature_type (the funder we set is NOT sent), so probing all
+        types tells us which one the CLOB maps to the address holding funds.
+        """
+        out = {}
+        orig = self.client.builder.signature_type
+        try:
+            for st in (0, 1, 2, 3):
+                try:
+                    self.client.builder.signature_type = st
+                    bal = self.client.get_balance_allowance(
+                        BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+                    )
+                    out[st] = bal.get("balance") if isinstance(bal, dict) else str(bal)
+                except Exception as e:
+                    out[st] = f"ERR {e}"
+        finally:
+            self.client.builder.signature_type = orig
+        return out
 
     # --- Order Placement ---
 

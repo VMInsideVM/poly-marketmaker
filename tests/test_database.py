@@ -57,6 +57,42 @@ class TestWallets:
         wallet = db.list_wallets()[0]
         assert wallet["enabled"] == 0
 
+    def test_signature_type_defaults_to_2(self, db):
+        db.add_wallet("0xABC", "encrypted_key_1")
+        assert db.list_wallets()[0]["signature_type"] == 2
+
+    def test_signature_type_round_trips(self, db):
+        db.add_wallet("0xPROXY", "enc", funder="0xfund", signature_type=1)
+        w = db.list_wallets()[0]
+        assert w["signature_type"] == 1
+        assert w["funder"] == "0xfund"
+
+    def test_migration_adds_signature_type_to_old_db(self, tmp_path):
+        import sqlite3
+
+        db_path = str(tmp_path / "old.db")
+        # 模拟老库:wallets 表没有 signature_type 列
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE wallets (address TEXT PRIMARY KEY, encrypted_key TEXT NOT NULL,"
+            " funder TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,"
+            " created_at REAL NOT NULL DEFAULT (strftime('%s','now')))"
+        )
+        conn.execute(
+            "INSERT INTO wallets (address, encrypted_key) VALUES ('0xOLD', 'enc')"
+        )
+        conn.commit()
+        conn.close()
+
+        database = Database(db_path)
+        database.init()  # 应迁移补列,默认 2
+        try:
+            w = database.list_wallets()[0]
+            assert w["address"] == "0xOLD"
+            assert w["signature_type"] == 2
+        finally:
+            database.close()
+
 
 class TestOrders:
     def test_record_and_get_buy_order(self, db):

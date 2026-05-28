@@ -90,6 +90,21 @@
         <button type="submit" class="btn btn-primary">保存设置</button>
     </form>
 </section>
+
+<div id="wallet-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+        <h2>确认存款钱包地址</h2>
+        <p class="modal-hint">根据私钥自动识别出的存款地址如下，请与你在 <b>polymarket.com</b> 看到的存款（资金）地址<b>逐字比对</b>：</p>
+        <div id="wm-derived" class="addr-big"></div>
+        <p class="modal-hint">若一致，直接点「确定」即可。<br>若不一致（例如智能合约 / 邮箱钱包，地址通常不同），请把你在 Polymarket 上的<b>正确存款地址</b>粘贴到下面：</p>
+        <input id="wm-funder-input" class="addr-input" type="text" spellcheck="false" placeholder="0x… 正确的存款钱包地址">
+        <p id="wm-error" class="modal-error" style="display:none"></p>
+        <div class="modal-actions">
+            <button id="wm-confirm" class="btn btn-primary" type="button">确定</button>
+            <button id="wm-cancel" class="btn" type="button">取消</button>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -131,27 +146,71 @@ function loadWallets() {
     });
 }
 
+const ACCT_TYPES = {0: 'EOA（直接用钱包地址）', 1: 'Proxy（邮箱/嵌入式登录）', 2: 'Safe（浏览器钱包登录）', 3: '智能合约钱包（POLY_1271）'};
+let _pendingKey = null;
+
 function addWallet() {
-    const input = document.getElementById('new-private-key');
-    const funderInput = document.getElementById('new-funder');
-    const key = input.value.trim();
-    const funder = funderInput.value.trim();
+    const key = document.getElementById('new-private-key').value.trim();
+    const funder = document.getElementById('new-funder').value.trim();
     if (!key) { alert('请输入私钥'); return; }
+    if (funder) {
+        // 已手填存款地址，直接导入
+        finalizeImport(key, funder);
+        return;
+    }
+    // 未填：先预览自动识别的地址，弹浮窗让用户比对/修改
+    fetch('/api/wallets/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({private_key: key}),
+    }).then(r => r.json()).then(d => {
+        if (d.error) { alert(d.error); return; }
+        openWalletModal(key, d.derived_funder);
+    });
+}
+
+function openWalletModal(key, derived) {
+    _pendingKey = key;
+    document.getElementById('wm-derived').textContent = derived;
+    document.getElementById('wm-funder-input').value = derived;
+    document.getElementById('wm-error').style.display = 'none';
+    document.getElementById('wallet-modal').style.display = 'flex';
+}
+
+function closeWalletModal() {
+    document.getElementById('wallet-modal').style.display = 'none';
+    _pendingKey = null;
+}
+
+function finalizeImport(key, funder) {
     const body = funder ? {private_key: key, funder: funder} : {private_key: key};
     fetch('/api/wallets', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body),
     }).then(r => r.json()).then(data => {
-        if (data.error) { alert(data.error); return; }
-        input.value = '';
-        funderInput.value = '';
-        alert('钱包添加成功。\n\n存款钱包地址：\n' + data.funder +
-              '\n\n请到 polymarket.com/settings 核对：此地址应与你看到的存款（资金）地址一致。' +
-              '\n若不一致，请删除该钱包，并在“存款钱包地址”框手动填写正确地址后重新添加。');
+        if (data.error) {
+            const wm = document.getElementById('wallet-modal');
+            if (wm.style.display !== 'none') {
+                const e = document.getElementById('wm-error');
+                e.textContent = data.error; e.style.display = 'block';
+            } else { alert(data.error); }
+            return;
+        }
+        closeWalletModal();
+        document.getElementById('new-private-key').value = '';
+        document.getElementById('new-funder').value = '';
+        showToast('钱包已添加 · 账户类型：' + (ACCT_TYPES[data.signature_type] || ('sig=' + data.signature_type)));
         loadWallets();
     });
 }
+
+document.getElementById('wm-confirm').onclick = function() {
+    const f = document.getElementById('wm-funder-input').value.trim();
+    if (!f) { const e = document.getElementById('wm-error'); e.textContent = '请填写或确认存款钱包地址'; e.style.display = 'block'; return; }
+    finalizeImport(_pendingKey, f);
+};
+document.getElementById('wm-cancel').onclick = closeWalletModal;
 
 function removeWallet(address) {
     if (!confirm('确定删除该钱包？相关订单数据将保留在历史记录中。')) return;

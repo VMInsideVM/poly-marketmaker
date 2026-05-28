@@ -1,6 +1,7 @@
 """web/routes.py — Flask routes and API endpoints."""
 
 import os
+import re
 import sys
 import hashlib
 import logging
@@ -68,14 +69,16 @@ def set_encryption_key(key: bytes):
     encryption_key = key
 
 
-def _get_cached_api(address: str, encrypted_key: str, funder: str = ""):
+def _get_cached_api(
+    address: str, encrypted_key: str, funder: str = "", signature_type: int = 2
+):
     """Get or create a cached PolymarketAPI instance for balance queries."""
     if address in _api_cache:
         return _api_cache[address]
     from api.polymarket_api import PolymarketAPI
 
     pk = decrypt(encrypted_key, encryption_key)
-    api = PolymarketAPI(pk, funder=funder or None)
+    api = PolymarketAPI(pk, signature_type=signature_type, funder=funder or None)
     _api_cache[address] = api
     return api
 
@@ -97,7 +100,11 @@ def _wallet_apis(only: str = None) -> dict:
                 from api.polymarket_api import PolymarketAPI
 
                 pk = decrypt(w["encrypted_key"], encryption_key)
-                out[addr] = PolymarketAPI(pk, funder=w.get("funder") or None)
+                out[addr] = PolymarketAPI(
+                    pk,
+                    signature_type=w.get("signature_type", 2),
+                    funder=w.get("funder") or None,
+                )
             except Exception as e:
                 app.logger.error("API build failed for %s: %s", addr, e)
     return out
@@ -275,7 +282,10 @@ def api_list_wallets():
             elif encrypted_key and encryption_key:
                 try:
                     api = _get_cached_api(
-                        w["address"], encrypted_key, w.get("funder", "")
+                        w["address"],
+                        encrypted_key,
+                        w.get("funder", ""),
+                        w.get("signature_type", 2),
                     )
                     w["balance"] = api.get_balance()
                 except Exception:
@@ -283,60 +293,101 @@ def api_list_wallets():
     return jsonify(wallets)
 
 
+def _clean_private_key(raw: str):
+    """Sanitize a hex private key. Returns (key_with_0x, None) or (None, error)."""
+    pk = re.sub(r"[^0-9a-fA-Fx]", "", raw or "")
+    if pk.startswith("0x") or pk.startswith("0X"):
+        pk = pk[2:]
+    pk = re.sub(r"[^0-9a-fA-F]", "", pk)  # strip any remaining x
+    if not pk or len(pk) != 64:
+        return None, f"私钥格式错误：需要64位十六进制字符，当前{len(pk)}位"
+    return "0x" + pk, None
+
+
+def _clean_funder(raw: str):
+    """Sanitize an optional deposit-wallet address. Returns (funder, None) or (None, error)."""
+    f = re.sub(r"[^0-9a-fA-Fx]", "", (raw or "").strip())
+    if f and not f.startswith("0x"):
+        f = "0x" + f
+    if f and len(f) != 42:
+        return None, "存款钱包地址格式错误：需要42位、0x开头"
+    return f, None
+
+
+@app.route("/api/wallets/preview", methods=["POST"])
+@login_required
+def api_preview_wallet():
+    """Compute the EOA + auto-derived deposit (Safe) address WITHOUT storing.
+
+    Lets the import UI show the auto-derived address for the user to compare
+    against polymarket.com before committing. Pure derivation, no network.
+    """
+    data = request.get_json()
+    private_key, err = _clean_private_key(data.get("private_key", ""))
+    if err:
+        return jsonify({"error": err}), 400
+    from api.polymarket_api import derive_deposit_address, eoa_from_key
+
+    try:
+        eoa = eoa_from_key(private_key)
+        derived_funder = derive_deposit_address(eoa)
+    except Exception as e:
+        return jsonify({"error": f"私钥无效: {e}"}), 400
+    return jsonify({"address": eoa, "derived_funder": derived_funder})
+
+
 @app.route("/api/wallets", methods=["POST"])
 @login_required
 def api_add_wallet():
     data = request.get_json()
-    raw_key = data.get("private_key", "")
-    # Only keep hex characters (0-9, a-f, A-F) and 'x' for 0x prefix
-    import re
-
-    private_key = re.sub(r"[^0-9a-fA-Fx]", "", raw_key)
-    # Remove any 0x prefix, then re-add it
-    private_key = (
-        private_key.lstrip("0x")
-        if private_key.startswith("0x") or private_key.startswith("0X")
-        else private_key
-    )
-    private_key = re.sub(r"[^0-9a-fA-F]", "", private_key)  # strip any remaining x
-    if not private_key or len(private_key) != 64:
-        return (
-            jsonify(
-                {
-                    "error": f"私钥格式错误：需要64位十六进制字符，当前{len(private_key)}位"
-                }
-            ),
-            400,
-        )
-    private_key = "0x" + private_key
+    private_key, err = _clean_private_key(data.get("private_key", ""))
+    if err:
+        return jsonify({"error": err}), 400
 
     # Optional deposit-wallet (funder) override. Normally left blank and
     # auto-derived from the private key; the user may supply one when the
     # auto-derived address doesn't match polymarket.com/settings.
-    funder = re.sub(r"[^0-9a-fA-Fx]", "", data.get("funder", "").strip())
-    if funder and not funder.startswith("0x"):
-        funder = "0x" + funder
-    if funder and len(funder) != 42:
-        return jsonify({"error": "存款钱包地址格式错误：需要42位、0x开头"}), 400
+    funder, err = _clean_funder(data.get("funder", ""))
+    if err:
+        return jsonify({"error": err}), 400
 
-    from api.polymarket_api import PolymarketAPI
+    from api.polymarket_api import (
+        PolymarketAPI,
+        derive_deposit_address,
+        eoa_from_key,
+        pick_funded_sig_type,
+        resolve_signature_type,
+    )
 
-    # PolymarketAPI derives the funder from the EOA when none is supplied;
-    # get_funder() then returns whichever address (override or derived) is used.
+    # Detect the account type by asking the CLOB which signature type's derived
+    # wallet actually holds collateral (EOA=0 / proxy=1 / safe=2 / EIP-1271
+    # smart wallet=3). The balance query ignores the funder and derives the
+    # address server-side, so the funded type IS the real account type. Fall
+    # back to the funder-vs-derived-Safe heuristic only when nothing is funded
+    # yet (empty account — re-import after depositing to re-detect).
     try:
-        api = PolymarketAPI(private_key, funder=funder or None)
+        derived_safe = derive_deposit_address(eoa_from_key(private_key))
+        provisional = resolve_signature_type(derived_safe, funder)
+        api = PolymarketAPI(
+            private_key, signature_type=provisional, funder=funder or None
+        )
         address = api.get_address()
         funder = api.get_funder()
+        detected = pick_funded_sig_type(api.balance_by_sig_types())
+        sig_type = detected if detected is not None else provisional
     except Exception as e:
         return jsonify({"error": f"私钥无效: {e}"}), 400
 
     encrypted = encrypt(private_key, encryption_key)
     try:
-        db.add_wallet(address, encrypted, funder)
+        db.add_wallet(address, encrypted, funder, sig_type)
     except Exception:
         return jsonify({"error": "该钱包已存在"}), 400
 
-    return jsonify({"ok": True, "address": address, "funder": funder})
+    _api_cache.pop(address, None)  # 重新导入可能改了 sig/funder,清掉旧缓存
+    return jsonify(
+        {"ok": True, "address": address, "funder": funder, "signature_type": sig_type}
+    )
 
 
 @app.route("/api/wallets/<address>", methods=["DELETE"])
@@ -345,6 +396,9 @@ def api_remove_wallet(address):
     if manager:
         manager.stop_wallet(address)
     db.remove_wallet(address)
+    _api_cache.pop(
+        address, None
+    )  # 丢弃旧的余额查询客户端,防止重导入后命中旧 sig/funder
     return jsonify({"ok": True})
 
 
@@ -355,6 +409,23 @@ def api_toggle_wallet(address):
     enabled = data.get("enabled", True)
     db.toggle_wallet(address, enabled)
     return jsonify({"ok": True})
+
+
+@app.route("/api/debug/balance-sigs")
+@login_required
+def api_debug_balance_sigs():
+    """诊断:每个钱包在 sig 0/1/2/3 下的 COLLATERAL 余额,定位正确签名类型。"""
+    out = {}
+    for addr, api in _wallet_apis().items():
+        try:
+            out[addr] = {
+                "eoa": api.get_address(),
+                "funder": api.get_funder(),
+                "balance_by_sig": api.balance_by_sig_types(),
+            }
+        except Exception as e:
+            out[addr] = {"error": str(e)}
+    return jsonify(out)
 
 
 # --- API: Engine Control ---
@@ -738,7 +809,10 @@ def api_dashboard():
             elif not running and encryption_key:
                 try:
                     balance = _get_cached_api(
-                        w["address"], w["encrypted_key"], w.get("funder", "")
+                        w["address"],
+                        w["encrypted_key"],
+                        w.get("funder", ""),
+                        w.get("signature_type", 2),
                     ).get_balance()
                 except Exception:
                     pass
