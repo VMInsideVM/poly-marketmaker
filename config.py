@@ -41,5 +41,5 @@ DATA_DIR = _data_dir()
 DB_PATH = os.path.join(DATA_DIR, "market_maker.db")
 LOG_PATH = os.path.join(DATA_DIR, "market_maker.log")
 HOST = "127.0.0.1"
-PORT = 8000
+PORT = 8765
 SECRET_KEY = None  # Set at runtime from user password

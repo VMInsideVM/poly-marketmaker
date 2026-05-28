@@ -9,6 +9,7 @@ from models.database import Database
 from engine.manager import EngineManager
 from web.routes import app, init_app, init_manager, set_encryption_key
 from config import DB_PATH, LOG_PATH, HOST, PORT
+from utils.net import pick_port
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,20 +49,26 @@ def main():
     signal.signal(signal.SIGINT, on_shutdown)
     signal.signal(signal.SIGTERM, on_shutdown)
 
+    # Windows (Hyper-V/WSL) may reserve the configured port; fall back to a
+    # free one so the app still starts, and open the browser to the real port.
+    port = pick_port(HOST, PORT)
+    if port != PORT:
+        logger.warning("端口 %d 不可用（可能被系统保留），改用 %d", PORT, port)
+
     # Open browser after a short delay
     def open_browser():
         import time
 
         time.sleep(1.5)
-        url = f"http://{HOST}:{PORT}"
+        url = f"http://{HOST}:{port}"
         if pw_hash is None:
             url += "/setup"
         webbrowser.open(url)
 
     threading.Thread(target=open_browser, daemon=True).start()
 
-    logger.info("Starting Polymarket Market Maker on http://%s:%d", HOST, PORT)
-    app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
+    logger.info("Starting Polymarket Market Maker on http://%s:%d", HOST, port)
+    app.run(host=HOST, port=port, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
