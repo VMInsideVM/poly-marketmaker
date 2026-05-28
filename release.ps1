@@ -44,8 +44,15 @@ if ($LASTEXITCODE -ne 0) { throw "git tag 失败" }
 & git push origin $tag
 if ($LASTEXITCODE -ne 0) { throw "git push tag 失败" }
 
-# 7) 创建 Release 并上传 setup.exe + .sha256(发布说明自动生成)
-& gh release create $tag $setup $shaFile --title $tag --generate-notes
+# 7) 创建 Release 并上传 setup.exe + .sha256
+#    根目录有 RELEASE_NOTES.md 则用它作发布说明,否则回退自动生成
+$notesPath = "$root\RELEASE_NOTES.md"
+if (Test-Path $notesPath) {
+  Write-Host "使用 RELEASE_NOTES.md 作为发布说明" -ForegroundColor DarkGray
+  & gh release create $tag $setup $shaFile --title $tag --notes-file $notesPath
+} else {
+  & gh release create $tag $setup $shaFile --title $tag --generate-notes
+}
 if ($LASTEXITCODE -ne 0) { throw "gh release create 失败" }
 
 Write-Host ""
