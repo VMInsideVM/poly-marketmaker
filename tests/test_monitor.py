@@ -21,6 +21,8 @@ def _make_monitor(settings=None):
     db.get_blacklist_ids.return_value = set()
     # funder address via api.get_funder()
     api.get_funder.return_value = "0xFUNDER"
+    # sane default so methods that read get_trades don't iterate a MagicMock
+    api.get_trades.return_value = []
     monitor = OrderMonitor(api, db, "0xABC")
     return monitor, api, db
 
@@ -172,6 +174,66 @@ class TestInitWatermark:
         db.get_actions.return_value = []
         monitor.init_watermark()
         assert monitor._after_ts == 0.0
+
+    def _buy_trade(self, tid, oid, asset="tok1", ts="100"):
+        return {
+            "id": tid,
+            "market": "mkt1",
+            "match_time": ts,
+            "maker_orders": [
+                {
+                    "order_id": oid,
+                    "maker_address": "0xFUNDER",
+                    "side": "BUY",
+                    "matched_amount": "100",
+                    "price": "0.3",
+                    "asset_id": asset,
+                }
+            ],
+        }
+
+    def test_seeds_seen_keys_from_existing_fills(self):
+        # 启动恢复:把当前已存在的成交预灌进去重集合,使其能跨重启覆盖历史成交。
+        monitor, api, db = _make_monitor()
+        db.get_trade_history.return_value = []
+        db.get_actions.return_value = []
+        api.get_trades.return_value = [self._buy_trade("T-old", "O-old")]
+        monitor.init_watermark()
+        assert ("T-old", "O-old") in monitor._seen_fill_keys
+
+    def test_restart_does_not_reprocess_already_seen_fill(self):
+        # 2026-05-29 实盘现象:重启后 _seen_fill_keys 本是空的 + 水位线只是粗下界,
+        # 旧成交被 get_trades 重新捞回、当成"新成交"重放 -> 给已平仓市场重写
+        # cancel_remainder / 重设冷却。init_watermark 预灌 seen 后,启动后不再重放。
+        monitor, api, db = _make_monitor()
+        db.get_trade_history.return_value = []
+        db.get_actions.return_value = []
+        old_buy = self._buy_trade("T-old", "O-old")
+        api.get_trades.return_value = [old_buy]
+
+        monitor.init_watermark()  # 启动恢复:预灌 seen
+        monitor.check_buy_orders()  # 下一 tick:同一笔旧成交不应再被处理
+
+        db.set_cooldown.assert_not_called()
+        api.cancel_orders.assert_not_called()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert "cancel_remainder" not in ats
+
+    def test_new_fill_after_startup_still_handled(self):
+        # 反向保证:启动后真正新发生的成交照常处理(设冷却 + 撤余单)。
+        monitor, api, db = _make_monitor()
+        db.get_trade_history.return_value = []
+        db.get_actions.return_value = []
+        api.get_trades.return_value = []  # 启动时无历史成交
+        monitor.init_watermark()
+
+        api.get_trades.return_value = [self._buy_trade("T-new", "O-new", ts="200")]
+        monitor.check_buy_orders()
+
+        db.set_cooldown.assert_called_once()
+        api.cancel_orders.assert_called_once_with(["O-new"])
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert "cancel_remainder" in ats
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +502,9 @@ class TestCheckTakeProfit:
             ],
         }
 
-    def test_cost_query_omits_maker_address(self):
+    def test_cost_query_uses_market_not_asset_filter(self):
+        # 成本查询按 market(conditionId)过滤,不传 asset_id(服务端 asset 过滤失效)、
+        # 不传 maker_address(我们在该市场的 taker 成交也要一并带回给 extract_fills)。
         monitor, api, db = _make_monitor()
         api.get_user_positions.return_value = [self._pos()]
         api.get_open_orders.return_value = []
@@ -451,7 +515,8 @@ class TestCheckTakeProfit:
 
         params = api.get_trades.call_args.args[0]
         assert params.maker_address is None
-        assert params.asset_id == "tok1"
+        assert params.asset_id is None
+        assert params.market == "mkt1"
 
     def test_places_sell_for_taker_acquired_position(self):
         monitor, api, db = _make_monitor()
@@ -1574,30 +1639,51 @@ class TestCostHelper:
             self._buy_trade("tok1", 0.28, 200, ts="2"),
         ]
         monitor.begin_status_tick()
-        cost, lots = monitor._cost_lots("tok1", 400)
+        cost, lots = monitor._cost_lots("tok1", 400, "mkt1")
         assert cost == pytest.approx(0.24)
 
     def test_cost_cached_within_tick(self):
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = [self._buy_trade("tok1", 0.28, 361)]
         monitor.begin_status_tick()
-        monitor._cost_lots("tok1", 361)
-        monitor._cost_lots("tok1", 361)
+        monitor._cost_lots("tok1", 361, "mkt1")
+        monitor._cost_lots("tok1", 361, "mkt1")
         assert api.get_trades.call_count == 1  # 同 tick 只取一次
 
     def test_cost_none_when_get_trades_fails(self):
         monitor, api, db = _make_monitor()
         api.get_trades.side_effect = Exception("boom")
         monitor.begin_status_tick()
-        cost, lots = monitor._cost_lots("tok1", 361)
+        cost, lots = monitor._cost_lots("tok1", 361, "mkt1")
         assert cost is None
 
     def test_cost_none_when_no_buy_fills(self):
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = []
         monitor.begin_status_tick()
-        cost, lots = monitor._cost_lots("tok1", 361)
+        cost, lots = monitor._cost_lots("tok1", 361, "mkt1")
         assert cost is None
+
+    def test_cost_uses_market_filter_when_asset_filter_broken(self):
+        # 真实事故(2026-05-29):Polymarket /trades 的服务端 asset_id 过滤失效——
+        # 同一 asset 明明有成交,按 asset_id 查却返回空;按 market(conditionId)查
+        # 或全量查能拿到。_cost_lots 必须按 market 过滤,否则成本永远算不出 -> 全仓
+        # 裸奔。本测试用 side_effect 复现该 server 行为:asset_id 查询返回空,market
+        # 查询返回真实成交,断言成本仍能被重建(0.45 / 263 股)。
+        monitor, api, db = _make_monitor()
+        buy = self._buy_trade("tok1", 0.45, 263, ts="1")  # market="mkt1"
+
+        def fake_get_trades(params):
+            if getattr(params, "asset_id", None):  # 服务端 asset 过滤:坏的
+                return []
+            if getattr(params, "market", None) == "mkt1":  # market 过滤:可用
+                return [buy]
+            return []
+
+        api.get_trades.side_effect = fake_get_trades
+        monitor.begin_status_tick()
+        cost, lots = monitor._cost_lots("tok1", 263, "mkt1")
+        assert cost == pytest.approx(0.45)
 
 
 class TestStep3Blacklist:

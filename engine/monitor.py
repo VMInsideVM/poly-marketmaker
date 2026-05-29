@@ -76,35 +76,60 @@ class OrderMonitor:
             logger.warning("record_action failed: %s", e)
 
     def init_watermark(self):
-        """Seed watermark from latest recorded trade/action ts for this wallet.
+        """Seed watermark AND prime the seen-fill-keys set on startup recovery.
 
-        DB created_at is local record time; trade match_time is exchange
-        time. Both ~unix seconds; this is only a conservative lower bound,
-        (trade_id, order_id) dedup guarantees no double-processing. Actions are
-        included so that clearing the trades table does not reset the watermark
+        The watermark is the latest recorded trade/action ts — DB created_at is
+        local record time while trade match_time is exchange time, so it is only
+        a **conservative lower bound**: `get_trades(after=watermark)` deliberately
+        re-fetches a recent window and relies on `(trade_id, order_id)` dedup.
+        Actions are included so that clearing the trades table does not reset it
         to 0 (which would refetch all history and re-cooldown old markets).
+
+        BUT `_seen_fill_keys` lives only in memory and is empty after a restart,
+        so that dedup used to NOT survive a restart: the first ticks re-processed
+        already-handled fills, re-recording `cancel_remainder` and re-setting
+        cooldown for markets whose position was long closed (real 2026-05-29
+        observation). So here we also **prime `_seen_fill_keys` with every fill
+        already on record** — only fills that occur AFTER startup then trigger
+        `_handle_fill`. (Offline fills are already protected position-side by the
+        position-driven take-profit, independent of Step 1.)
         """
         rows = self.db.get_trade_history(self.wallet_address)
         actions = self.db.get_actions(self.wallet_address)
         times = [r.get("created_at", 0) or 0 for r in rows]
         times += [a.get("created_at", 0) or 0 for a in actions]
         self._after_ts = max(times) if times else 0.0
+        # Prime dedup with all currently-visible fills so a restart never
+        # re-handles pre-startup fills. Best-effort: a fetch failure just leaves
+        # the (conservative) watermark in charge, same as before.
+        funder = self._funder()
+        try:
+            trades = self.api.get_trades(TradeParams(maker_address=funder))
+            for ev in select_new_buy_fills(trades, funder, set()):
+                self._seen_fill_keys.add((ev.get("trade_id"), ev.get("order_id")))
+        except Exception as e:
+            logger.warning("init_watermark seed seen-keys failed: %s", e)
 
     def _funder(self) -> str:
         """Proxy/funder address — used for get_trades maker filter and Data API."""
         return self.api.get_funder()
 
-    def _cost_lots(self, asset_id: str, size: float):
+    def _cost_lots(self, asset_id: str, size: float, condition_id: str):
         """该持仓的加权成本 + 剩余逐笔构成(本 tick 缓存)。由 CLOB get_trades 的真实
         成交(买入∪卖出,maker∪taker)按时间回放、FIFO 对冲重建;重建持仓与 size 对不
-        上(成交流滞后/外部转入)-> (None, [])。"""
+        上(成交流滞后/外部转入)-> (None, [])。
+
+        用 market=condition_id 过滤拉成交,再由 extract_fills 客户端按 asset 过滤:
+        Polymarket /trades 的服务端 asset_id 过滤失效(同一 asset 明明有成交却返回空,
+        2026-05-29 真实事故 -> 成本算不出、全仓裸奔),而 market(conditionId)过滤可用,
+        且会一并带回我们在该市场的 taker 成交(止损市价单等),正是 extract_fills 所需。"""
         if asset_id in self._cost_cache:
             return self._cost_cache[asset_id]
         funder = self._funder()
         try:
-            trades = self.api.get_trades(TradeParams(asset_id=asset_id))
+            trades = self.api.get_trades(TradeParams(market=condition_id))
         except Exception as e:
-            logger.warning("get_trades(asset=%s) for cost failed: %s", asset_id, e)
+            logger.warning("get_trades(market=%s) for cost failed: %s", condition_id, e)
             self._cost_cache[asset_id] = (None, [])
             return None, []
         fills = extract_fills(trades, funder, asset_id)
@@ -233,7 +258,7 @@ class OrderMonitor:
         cid = pos.get("conditionId", "")
         if size <= 0:
             return
-        cost, lots = self._cost_lots(asset_id, size)
+        cost, lots = self._cost_lots(asset_id, size, cid)
         if cost is None or cost <= 0:
             logger.warning(
                 "Take-profit skipped (no buy fills) asset=%s size=%s — UNPROTECTED",
@@ -348,7 +373,7 @@ class OrderMonitor:
         cid = pos.get("conditionId", "")
         if size <= 0:
             return
-        cost, lots = self._cost_lots(asset_id, size)
+        cost, lots = self._cost_lots(asset_id, size, cid)
         # 成本只认 get_trades 加权;取不到 -> 不做止损。
         if cost is None or cost <= 0:
             logger.warning(
