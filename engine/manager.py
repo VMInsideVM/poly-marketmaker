@@ -63,10 +63,23 @@ class WalletWorker:
             )
 
     def _run(self):
-        """Monitor loop: run one tick at each check_interval."""
+        """Monitor loop: run one tick at each check_interval.
+
+        Each tick is isolated: an unhandled exception in any step is logged and
+        the loop continues. Without this guard a single transient error killed
+        the wallet's monitor thread for good — no fill detection, no stop-loss,
+        no restart, the only symptom a frozen monitor-status table (audit F4).
+        """
         check_interval = self.settings["fill_check_interval_sec"]
         while not self._stop_event.is_set():
-            self._tick()
+            try:
+                self._tick()
+            except Exception as e:
+                logger.exception(
+                    "Monitor tick crashed for %s (continuing): %s",
+                    self.wallet_address,
+                    e,
+                )
             self._stop_event.wait(timeout=check_interval)
 
     def _tick(self):

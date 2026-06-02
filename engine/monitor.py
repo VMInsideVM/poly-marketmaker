@@ -357,8 +357,15 @@ class OrderMonitor:
         try:
             open_orders = self.api.get_open_orders()
         except Exception as e:
-            logger.error("get_open_orders failed for %s: %s", self.wallet_address, e)
-            open_orders = []
+            # F8: 取不到挂单就跳过本 tick 止损,绝不在不知道既有止盈卖单的情况下市价
+            # 平仓(会与残留限价卖单瞬间双挂)。与 check_take_profit 的失败处理一致,
+            # 下个 tick 自愈。
+            logger.error(
+                "get_open_orders failed for %s (skip stop-loss): %s",
+                self.wallet_address,
+                e,
+            )
+            return
         for pos in positions:
             try:
                 self._check_pos_sl(pos, open_orders, settings)
@@ -393,6 +400,28 @@ class OrderMonitor:
             )
             return
         if not stop_loss_triggered(cur, cost, settings["stop_loss_pct"]):
+            return
+        # F5: 实时盘口买一二次确认。Data API curPrice 与已被禁用的 avgPrice 同源,
+        # 可能瞬时 glitch;只有当真正能卖到的价(best_bid)也跌破成本止损阈值,才市价
+        # 平仓,否则视为数据 glitch,跳过(不砸盘)并标一行可见状态,下个 tick 自愈。
+        _, _, best_bid = self._sell_book(asset_id)
+        if best_bid is None or not stop_loss_triggered(
+            best_bid, cost, settings["stop_loss_pct"]
+        ):
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price="-",
+                size=str(size),
+                matched="-",
+                stage="Step2",
+                action="⚠️跳过·盘口未确认",
+                detail=(
+                    f"curPrice{cur:.4f}触发但买一"
+                    f"{'无' if best_bid is None else f'{best_bid:.4f}'}"
+                    f"未跌破成本{cost:.4f}止损阈值,疑似数据glitch,不砸盘"
+                ),
+            )
             return
         sell_ids = [
             o["id"]

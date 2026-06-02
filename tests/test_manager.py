@@ -6,6 +6,25 @@ from unittest.mock import MagicMock, patch
 from engine.manager import EngineManager, WalletWorker
 
 
+class TestRunLoopResilience:
+    """F4: 监控主循环必须隔离单次 tick 故障——任一未捕获异常都不能杀死该钱包的
+    监控线程(否则该钱包从此不再检测成交/不再止损,且不会自动重启)。"""
+
+    def test_run_survives_tick_exception_and_continues(self):
+        api, db = MagicMock(), MagicMock()
+        worker = WalletWorker(api, db, "0xW", {"fill_check_interval_sec": 5})
+        calls = {"n": 0}
+
+        def boom():
+            calls["n"] += 1
+            worker._stop_event.set()  # 让循环这轮之后退出
+            raise RuntimeError("tick blew up")
+
+        worker._tick = boom
+        worker._run()  # 必须正常返回,不能把异常抛出来杀死线程
+        assert calls["n"] == 1
+
+
 def _make_manager():
     db = MagicMock()
     db.get_settings.return_value = {

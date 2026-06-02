@@ -553,6 +553,12 @@ class TestStopLoss:
         api.get_open_orders.return_value = [
             {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
         ]
+        # F5: 止损需实时盘口买一二次确认,提供一个买一已跌破成本的盘口。
+        api.get_orderbook.return_value = {
+            "tick_size": "0.01",
+            "bids": [{"price": "0.24", "size": "500"}],
+            "asks": [{"price": "0.26", "size": "500"}],
+        }
         api.get_trades.return_value = [
             {
                 "id": "t",
@@ -584,6 +590,92 @@ class TestStopLoss:
         )
         assert "加权自1笔买入成交" in sl.kwargs["price_basis"]
         assert "avgPrice" not in sl.kwargs["price_basis"]
+
+    def test_curprice_glitch_does_not_dump_when_book_healthy(self):
+        # F5: Data API curPrice 瞬时偏低(glitch)触发止损,但实时买一仍健康时,
+        # 绝不能市价砸盘——用真实成本 0.30、curPrice 0.24(触发)、买一 0.29(健康)。
+        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
+        api.get_user_positions.return_value = [
+            {
+                "asset": "tok1",
+                "size": 1000.0,
+                "avgPrice": 0.30,
+                "curPrice": 0.24,  # glitch 触发(<0.30*0.85=0.255)
+                "conditionId": "mkt1",
+            }
+        ]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = {
+            "tick_size": "0.01",
+            "bids": [{"price": "0.29", "size": "500"}],  # 真实买一健康
+            "asks": [{"price": "0.31", "size": "500"}],
+        }
+        api.get_trades.return_value = [
+            {
+                "id": "t",
+                "market": "mkt1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "1000",
+                        "price": "0.30",
+                        "asset_id": "tok1",
+                    }
+                ],
+            }
+        ]
+
+        monitor.check_stop_loss()
+
+        api.place_market_sell.assert_not_called()
+        db.record_trade.assert_not_called()
+
+    def test_rejected_market_sell_records_no_phantom_trade(self):
+        # F2: 市价止损被交易所拒/未成交(OrderRejected)时,绝不能记一笔幻影止损成交。
+        from api.polymarket_api import OrderRejected
+
+        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
+        api.get_user_positions.return_value = [
+            {
+                "asset": "tok1",
+                "size": 1000.0,
+                "avgPrice": 0.30,
+                "curPrice": 0.24,
+                "conditionId": "mkt1",
+            }
+        ]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = {
+            "tick_size": "0.01",
+            "bids": [{"price": "0.24", "size": "500"}],
+            "asks": [{"price": "0.26", "size": "500"}],
+        }
+        api.get_trades.return_value = [
+            {
+                "id": "t",
+                "market": "mkt1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "1000",
+                        "price": "0.30",
+                        "asset_id": "tok1",
+                    }
+                ],
+            }
+        ]
+        api.place_market_sell.side_effect = OrderRejected("市价卖单 未成交")
+
+        with patch("engine.monitor.stop_loss_triggered", return_value=True):
+            monitor.check_stop_loss()  # must not raise
+
+        db.record_trade.assert_not_called()
 
     def test_no_stop_loss_when_price_stable(self):
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
@@ -626,6 +718,48 @@ class TestStopLoss:
         api.get_user_positions.side_effect = Exception("Data API down")
 
         monitor.check_stop_loss()  # must not raise
+
+        api.place_market_sell.assert_not_called()
+
+    def test_open_orders_failure_skips_stop_loss_tick(self):
+        # F8: 取不到挂单(get_open_orders 报错)时,本 tick 不做止损——否则会在不知道
+        # 既有止盈卖单的情况下直接市价卖,可能与残留限价卖单瞬间双挂。下个 tick 自愈。
+        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
+        api.get_user_positions.return_value = [
+            {
+                "asset": "tok1",
+                "size": 1000.0,
+                "avgPrice": 0.30,
+                "curPrice": 0.24,
+                "conditionId": "mkt1",
+            }
+        ]
+        api.get_open_orders.side_effect = Exception("CLOB down")
+        api.get_orderbook.return_value = {
+            "tick_size": "0.01",
+            "bids": [{"price": "0.24", "size": "500"}],
+            "asks": [{"price": "0.26", "size": "500"}],
+        }
+        api.get_trades.return_value = [
+            {
+                "id": "t",
+                "market": "mkt1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "1000",
+                        "price": "0.30",
+                        "asset_id": "tok1",
+                    }
+                ],
+            }
+        ]
+
+        with patch("engine.monitor.stop_loss_triggered", return_value=True):
+            monitor.check_stop_loss()  # must not raise
 
         api.place_market_sell.assert_not_called()
 
@@ -1230,9 +1364,18 @@ class TestStep2ActionLog:
             }
         ]
 
+    def _book(self):
+        # F5: 买一已跌破成本止损阈值,确认止损可执行。
+        return {
+            "tick_size": "0.01",
+            "bids": [{"price": "0.24", "size": "500"}],
+            "asks": [{"price": "0.26", "size": "500"}],
+        }
+
     def test_stop_loss_records_cancel_and_market_sell(self):
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
         api.get_user_positions.return_value = self._pos()
+        api.get_orderbook.return_value = self._book()
         api.get_open_orders.return_value = [
             {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
         ]
@@ -1272,6 +1415,7 @@ class TestStep2ActionLog:
     def test_no_cancel_action_when_no_sell_orders(self):
         monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
         api.get_user_positions.return_value = self._pos()
+        api.get_orderbook.return_value = self._book()
         api.get_open_orders.return_value = []
         api.get_trades.return_value = [
             {

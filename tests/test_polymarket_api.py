@@ -1,5 +1,6 @@
 """tests/test_polymarket_api.py — PolymarketAPI 构造时的 L1 凭证派生。"""
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from api.polymarket_api import (
@@ -86,3 +87,129 @@ def test_get_balance_uses_instance_signature_type(mock_clob, _mock_derive):
     params = temp.get_balance_allowance.call_args.args[0]
     assert params.signature_type == 1
     assert bal == 10.0
+
+
+def _api_with_mock_client(mock_clob):
+    """Build a PolymarketAPI whose .client is the shared mock."""
+    temp = MagicMock()
+    temp.get_address.return_value = "0xEOA"
+    mock_clob.return_value = temp
+    return PolymarketAPI("0xpk", signature_type=2), temp
+
+
+class TestNegRiskAutoResolve:
+    """卖单未显式指定 neg_risk 时,必须传 None 让底层客户端按 token 自查真实
+    neg_risk(client.create_*_order 仅在 options.neg_risk is None 时才回退到
+    get_neg_risk(token_id))。写死 False 会让负风险市场的止盈/止损卖单签到错误的
+    交易所合约、被拒,导致该持仓既挂不出止盈卖单、止损也平不掉仓(2026-06-02 事故)。"""
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_limit_sell_defaults_neg_risk_to_none(self, mock_clob, _mock_derive):
+        api, client = _api_with_mock_client(mock_clob)
+        api.place_limit_sell("tok1", 0.30, 100, tick_size="0.01")
+        options = client.create_and_post_order.call_args.args[1]
+        assert options.neg_risk is None
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_market_sell_defaults_neg_risk_to_none(self, mock_clob, _mock_derive):
+        api, client = _api_with_mock_client(mock_clob)
+        api.place_market_sell("tok1", 1000)
+        options = client.create_and_post_market_order.call_args.args[1]
+        assert options.neg_risk is None
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_limit_buy_defaults_neg_risk_to_none(self, mock_clob, _mock_derive):
+        api, client = _api_with_mock_client(mock_clob)
+        api.place_limit_buy("tok1", 0.30, 100, tick_size="0.01")
+        options = client.create_and_post_order.call_args.args[1]
+        assert options.neg_risk is None
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_explicit_neg_risk_true_is_honored_on_sell(self, mock_clob, _mock_derive):
+        api, client = _api_with_mock_client(mock_clob)
+        api.place_limit_sell("tok1", 0.30, 100, neg_risk=True)
+        options = client.create_and_post_order.call_args.args[1]
+        assert options.neg_risk is True
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_explicit_neg_risk_false_is_honored_on_buy(self, mock_clob, _mock_derive):
+        api, client = _api_with_mock_client(mock_clob)
+        api.place_limit_buy("tok1", 0.30, 100, neg_risk=False)
+        options = client.create_and_post_order.call_args.args[1]
+        assert options.neg_risk is False
+
+
+class TestMarketSellUsesFAK:
+    """止损市价单应为 FAK(fill-and-kill,能成交多少先成交多少),而非 FOK
+    (fill-or-kill,整笔成不了就全杀)——否则持仓 > 买一档深度时止损永远打不出去
+    (2026-06-02 审计 F3)。"""
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_market_sell_is_fak_not_fok(self, mock_clob, _mock_derive):
+        from py_clob_client_v2.clob_types import OrderType
+
+        api, client = _api_with_mock_client(mock_clob)
+        api.place_market_sell("tok1", 1000)
+        order_type = client.create_and_post_market_order.call_args.args[2]
+        assert order_type == OrderType.FAK
+
+
+class TestOrderResponseChecked:
+    """下单封装必须检查交易所应用层响应:HTTP 200 但 success=False 或 FOK/FAK
+    status='unmatched'(未成交)时要抛错,否则 monitor 会把没挂上的单/没卖出的仓
+    当成已成交,记下幻影止损成交、留下假'已挂卖单'记录(2026-06-02 审计 F2)。"""
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_limit_sell_raises_on_success_false(self, mock_clob, _mock_derive):
+        from api.polymarket_api import OrderRejected
+
+        api, client = _api_with_mock_client(mock_clob)
+        client.create_and_post_order.return_value = {
+            "success": False,
+            "errorMsg": "not enough balance",
+        }
+        with pytest.raises(OrderRejected):
+            api.place_limit_sell("tok1", 0.30, 100)
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_market_sell_raises_on_unmatched(self, mock_clob, _mock_derive):
+        from api.polymarket_api import OrderRejected
+
+        api, client = _api_with_mock_client(mock_clob)
+        client.create_and_post_market_order.return_value = {
+            "success": True,
+            "status": "unmatched",
+        }
+        with pytest.raises(OrderRejected):
+            api.place_market_sell("tok1", 1000)
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_limit_buy_ok_on_live_status(self, mock_clob, _mock_derive):
+        api, client = _api_with_mock_client(mock_clob)
+        client.create_and_post_order.return_value = {
+            "success": True,
+            "status": "live",
+            "orderID": "0xabc",
+        }
+        res = api.place_limit_buy("tok1", 0.30, 100)
+        assert res["orderID"] == "0xabc"
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_market_sell_ok_on_matched(self, mock_clob, _mock_derive):
+        api, client = _api_with_mock_client(mock_clob)
+        client.create_and_post_market_order.return_value = {
+            "success": True,
+            "status": "matched",
+        }
+        res = api.place_market_sell("tok1", 1000)
+        assert res["status"] == "matched"

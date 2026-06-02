@@ -31,6 +31,41 @@ REWARDS_API = POLYMARKET_HOST
 DATA_API_HOST = "https://data-api.polymarket.com"
 
 
+class OrderRejected(Exception):
+    """The CLOB accepted the HTTP request (200) but did not place/fill the order.
+
+    Polymarket's POST /order returns HTTP 200 with an application-level
+    ``success``/``status`` even on logical rejection (e.g. ``success: false``
+    insufficient balance) or a FOK/FAK market order that found no liquidity
+    (``status: "unmatched"``). The raw client returns that body unchanged, so
+    callers that only catch HTTP errors would treat a non-placed/non-filled
+    order as success — recording a phantom stop-loss sale or a fake resting
+    take-profit (2026-06-02 audit F2). Wrappers raise this instead.
+    """
+
+
+# Statuses that mean the order was accepted: resting (live/delayed) or filled
+# (matched). Anything else (notably "unmatched" = FOK/FAK killed) is a failure.
+_ORDER_OK_STATUSES = {"live", "matched", "delayed"}
+
+
+def _check_order_resp(res, what: str):
+    """Raise OrderRejected if an order response signals failure; else return it.
+
+    Permissive on non-dict / missing fields (unknown shape -> don't break),
+    strict on the two known failure signals: ``success is False`` and a present
+    ``status`` outside the accepted set.
+    """
+    if not isinstance(res, dict):
+        return res
+    if res.get("success") is False:
+        raise OrderRejected(f"{what} 被拒：{res.get('errorMsg') or res}")
+    status = res.get("status")
+    if status is not None and str(status).lower() not in _ORDER_OK_STATUSES:
+        raise OrderRejected(f"{what} 未成交/未挂上（status={status}）：{res}")
+    return res
+
+
 def derive_deposit_address(eoa_address: str) -> str:
     """Polymarket deposit-wallet (funder) address for a given signer EOA.
 
@@ -222,9 +257,15 @@ class PolymarketAPI:
         price: float,
         size: int,
         tick_size: str = "0.01",
-        neg_risk: bool = False,
+        neg_risk: bool | None = None,
     ) -> dict:
         """Place a limit buy order.
+
+        ``neg_risk=None`` (the default) lets the CLOB client auto-resolve the
+        market's real neg_risk from ``token_id`` (it only falls back to
+        ``get_neg_risk`` when the option is None). Passing a concrete True/False
+        forces it — NEVER hardcode False, or orders on negative-risk markets get
+        signed for the wrong exchange contract and are rejected.
 
         Returns dict with "orderID" and "status" keys.
         """
@@ -238,7 +279,8 @@ class PolymarketAPI:
             tick_size=tick_size,
             neg_risk=neg_risk,
         )
-        return self.client.create_and_post_order(order_args, options, OrderType.GTC)
+        res = self.client.create_and_post_order(order_args, options, OrderType.GTC)
+        return _check_order_resp(res, "限价买单")
 
     def place_limit_sell(
         self,
@@ -246,9 +288,15 @@ class PolymarketAPI:
         price: float,
         size: int,
         tick_size: str = "0.01",
-        neg_risk: bool = False,
+        neg_risk: bool | None = None,
     ) -> dict:
         """Place a limit sell order at specified price.
+
+        ``neg_risk=None`` (the default) lets the CLOB client auto-resolve the
+        market's real neg_risk from ``token_id``. The take-profit caller does not
+        know the position's neg_risk, so it relies on this auto-resolution — a
+        hardcoded False here silently broke every sell on negative-risk markets
+        (position couldn't be sold at all, 2026-06-02 incident).
 
         Returns dict with "orderID" and "status" keys.
         """
@@ -262,14 +310,26 @@ class PolymarketAPI:
             tick_size=tick_size,
             neg_risk=neg_risk,
         )
-        return self.client.create_and_post_order(order_args, options, OrderType.GTC)
+        res = self.client.create_and_post_order(order_args, options, OrderType.GTC)
+        return _check_order_resp(res, "限价卖单")
 
     def place_market_sell(
-        self, token_id: str, size: int, tick_size: str = "0.01", neg_risk: bool = False
+        self,
+        token_id: str,
+        size: int,
+        tick_size: str = "0.01",
+        neg_risk: bool | None = None,
     ) -> dict:
-        """Place a market sell order (FOK).
+        """Place a market sell order (FAK — fill-and-kill).
 
-        Uses MarketOrderArgsV2 with amount (pUSD value to sell).
+        Uses MarketOrderArgsV2 with amount = shares to sell. FAK (not FOK): a
+        stop-loss must exit whatever liquidity exists *now* and kill the rest —
+        FOK is all-or-nothing, so a position larger than top-of-book bid depth
+        would never stop out (2026-06-02 audit F3). ``neg_risk=None`` (the
+        default) lets the CLOB client auto-resolve the market's real neg_risk
+        from ``token_id``; the stop-loss caller does not know it. A hardcoded
+        False here meant stop-loss could never market-sell a negative-risk
+        position (2026-06-02 incident).
         """
         market_args = MarketOrderArgsV2(
             token_id=token_id,
@@ -280,9 +340,10 @@ class PolymarketAPI:
             tick_size=tick_size,
             neg_risk=neg_risk,
         )
-        return self.client.create_and_post_market_order(
-            market_args, options, OrderType.FOK
+        res = self.client.create_and_post_market_order(
+            market_args, options, OrderType.FAK
         )
+        return _check_order_resp(res, "市价卖单")
 
     # --- Order Management ---
 
