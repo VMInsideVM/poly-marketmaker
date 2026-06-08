@@ -23,14 +23,18 @@ DEFAULTS = {
 def _data_dir() -> str:
     """Directory for runtime data (database, log).
 
-    When packaged (PyInstaller `frozen`), the app is installed into
-    Program Files, which a normal user cannot write to — so runtime data
-    goes to a per-user writable folder under %LOCALAPPDATA%. In development
-    we keep the project directory so tests and the manual scripts behave as
-    before.
+    When packaged (PyInstaller `frozen`), the app is installed into a
+    location a normal user cannot write to (Program Files on Windows, the
+    read-only .app bundle in /Applications on macOS) — so runtime data goes
+    to a per-user writable folder: %LOCALAPPDATA% on Windows,
+    ~/Library/Application Support on macOS. In development we keep the
+    project directory so tests and the manual scripts behave as before.
     """
     if getattr(sys, "frozen", False):
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        if sys.platform == "darwin":
+            base = os.path.expanduser("~/Library/Application Support")
+        else:
+            base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
         path = os.path.join(base, "PolymarketMarketMaker")
         os.makedirs(path, exist_ok=True)
         return path

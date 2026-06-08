@@ -6,7 +6,7 @@
 ![version](https://img.shields.io/badge/version-1.0.15-blue)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![flask](https://img.shields.io/badge/flask-3.1-black)
-![platform](https://img.shields.io/badge/platform-Windows-lightgrey)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey)
 
 中文说明在前，English notes follow each section.
 
@@ -55,14 +55,37 @@ Built for **non-technical users**: install, double-click, a browser opens, you s
 
 ## 快速开始（普通用户）/ Quick Start (end users)
 
-1. 打开本仓库的 [**Releases**](../../releases) 页面，下载最新的 `PolymarketMarketMaker_Setup.exe`。
-2. 运行安装程序完成安装（运行时数据会写入 `%LOCALAPPDATA%\PolymarketMarketMaker`，不会污染安装目录）。
-3. 从开始菜单/桌面双击启动；浏览器会自动打开 `http://127.0.0.1:8765`。
-4. **首次运行**进入 `/setup`：设置一个登录密码（用于加密你的私钥，**忘记不可找回**）。
-5. 录入钱包私钥（仅需私钥，程序会自动推导你的 Polymarket 资金存款地址 / Gnosis Safe）。
-6. 确认参数后启动引擎。**建议先用小额资金试跑**，观察止盈/止损与挂单是否符合预期。
+到本仓库的 [**Releases**](../../releases) 页面下载对应系统的安装包。
 
-> Download the latest installer from **Releases**, install, run, open `http://127.0.0.1:8765`, set a login password (used to encrypt your key — **not recoverable if lost**), enter your wallet private key, and start the engine. Test with small amounts first.
+### Windows
+
+1. 下载 `PolymarketMarketMaker_Setup.exe`，运行安装程序完成安装。
+2. 从开始菜单/桌面双击启动。
+
+> 运行时数据写入 `%LOCALAPPDATA%\PolymarketMarketMaker`，不会污染安装目录。
+
+### macOS（Apple 芯片 / Apple Silicon）
+
+1. 下载 `PolymarketMarketMaker_Mac_arm64.dmg`，双击打开，把里面的 App 拖进「应用程序 / Applications」。
+2. **首次打开务必右键点击 App → 选「打开」**（直接双击会被 Gatekeeper 拦下，因为本 App 未做 Apple 签名）。
+3. 若提示「已损坏，无法打开」（Apple 芯片常见），先在「终端」运行一次下面的命令解除隔离，再打开：
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/PolymarketMarketMaker.app
+   ```
+
+> 运行时数据写入 `~/Library/Application Support/PolymarketMarketMaker`。
+> ⚠️ 目前仅提供 **Apple 芯片（arm64）** 版本；macOS 端**自动更新暂不可用**，升级请手动到 Releases 下载新版 `.dmg`。
+
+### 启动后（两个系统通用）/ After launch
+
+浏览器会自动打开 `http://127.0.0.1:8765`：
+
+1. **首次运行**进入 `/setup`：设置一个登录密码（用于加密你的私钥，**忘记不可找回**）。
+2. 录入钱包私钥（仅需私钥，程序会自动推导你的 Polymarket 资金存款地址 / Gnosis Safe）。
+3. 确认参数后启动引擎。**建议先用小额资金试跑**，观察止盈/止损与挂单是否符合预期。
+
+> Download the installer for your OS from **Releases** (`.exe` for Windows, `.dmg` for Apple-Silicon macOS — on macOS, right-click → Open the first time since the app is unsigned), open `http://127.0.0.1:8765`, set a login password (used to encrypt your key — **not recoverable if lost**), enter your wallet private key, and start the engine. Test with small amounts first.
 
 ⚠️ **停止引擎会同时停止止损监控**：已停止时仍持有的仓位将不再被止损保护——界面对此有明确提示，请留意。
 
@@ -153,8 +176,9 @@ powershell -ExecutionPolicy Bypass -File release.ps1
 - 版本号唯一来源：`version.py`（被 build / release / 自动更新共同读取）。
 - 发版需要已安装并登录的 [GitHub CLI](https://cli.github.com/)（`gh auth login`）。
 - 根目录若存在 `RELEASE_NOTES.md` 则作为 Release 说明，否则自动生成。
+- **macOS 包（`.dmg`）在云端构建**：`.github/workflows/build-mac.yml` 在 GitHub 的 Apple 芯片 runner 上用 `MarketMaker-mac.spec` 打包。发版（release published）时自动触发并挂到该 Release；也可在 Actions 里手动运行（`workflow_dispatch`，填 tag）把产物补挂到已有 Release。
 
-> Single source of version truth is `version.py`. `release.ps1` builds the installer, computes SHA-256, tags, and creates a GitHub Release via the `gh` CLI.
+> Single source of version truth is `version.py`. `release.ps1` builds the Windows installer locally; the macOS `.dmg` is built in the cloud by `.github/workflows/build-mac.yml` (Apple-Silicon runner) and attached to the release automatically on publish.
 
 ---
 

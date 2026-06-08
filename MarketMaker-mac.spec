@@ -1,0 +1,90 @@
+# -*- mode: python ; coding: utf-8 -*-
+# PyInstaller spec — macOS build (Apple 芯片 / arm64).
+# Build:  python -m PyInstaller MarketMaker-mac.spec --noconfirm
+# Output: dist/PolymarketMarketMaker.app  (CI 用 hdiutil 封装成 .dmg)
+#
+# 与 Windows 的 MarketMaker.spec 共用同一套 datas / hiddenimports；
+# 区别：console=False + BUNDLE 出 .app，target_arch="arm64"。
+
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+
+import version
+
+# Flask 运行时需要模板/静态资源；打进 web/ 下，使 web/routes.py 依 sys._MEIPASS
+# 计算出的路径能解析到。
+datas = [
+    ("web/templates", "web/templates"),
+    ("web/static", "web/static"),
+]
+
+# 这些包会动态 import 子模块，整包收进来，避免被静态分析漏掉。
+hiddenimports = []
+for pkg in (
+    "py_clob_client_v2",
+    "py_builder_relayer_client",
+    "eth_account",
+    "poly_eip712_structs",
+):
+    hiddenimports += collect_submodules(pkg)
+    datas += collect_data_files(pkg)
+
+
+a = Analysis(
+    ["app.py"],
+    pathex=[],
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=["pytest", "tkinter", "matplotlib"],
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="PolymarketMarketMaker",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,  # .app 无控制台窗口；日志写入日志文件
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch="arm64",
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="PolymarketMarketMaker",
+)
+
+app = BUNDLE(
+    coll,
+    name="PolymarketMarketMaker.app",
+    icon=None,
+    bundle_identifier="com.vminsidevm.polymarketmarketmaker",
+    version=version.__version__,
+    info_plist={
+        # 磁盘上文件名为 PolymarketMarketMaker.app；Finder 显示中文名。
+        "CFBundleName": "Polymarket 做市助手",
+        "CFBundleDisplayName": "Polymarket 做市助手",
+        "CFBundleShortVersionString": version.__version__,
+        "CFBundleVersion": version.__version__,
+        "NSHighResolutionCapable": True,
+        "LSMinimumSystemVersion": "11.0",
+    },
+)
