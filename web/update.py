@@ -7,7 +7,9 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -42,8 +44,18 @@ def is_newer(latest, current):
     return lv > cv
 
 
-def parse_release(rel):
-    """从 GitHub release JSON 取出更新所需字段。资源缺失则对应字段为 None。"""
+def parse_release(rel, system=None):
+    """从 GitHub release JSON 取出本平台更新所需字段。资源缺失则对应字段为 None。
+
+    按平台选安装包:macOS 取 ``.dmg``,其余(Windows/Linux)取 ``.exe``。
+    sha256 必须与所选安装包**按文件名配对**(``<包名>.sha256``):自 v1.0.15 起
+    一个 release 同时含 .exe 与 .dmg 两套校验文件,若只按后缀取第一个 .sha256 会
+    取错另一平台的校验值,导致校验失败。找不到配对项时回退到任意 .sha256(兼容只
+    含单个包的老版本)。
+    system 可注入以便测试;默认用当前运行平台 ``sys.platform``。
+    """
+    system = system or sys.platform
+    pkg_suffix = ".dmg" if system == "darwin" else ".exe"
     tag = rel.get("tag_name", "") or ""
     assets = rel.get("assets", []) or []
 
@@ -53,14 +65,23 @@ def parse_release(rel):
                 return a
         return None
 
-    exe = _find(".exe")
-    sha = _find(".sha256")
+    pkg = _find(pkg_suffix)
+    sha = None
+    if pkg:
+        want = (pkg.get("name", "") or "") + ".sha256"
+        for a in assets:
+            if (a.get("name", "") or "") == want:
+                sha = a
+                break
+    if sha is None:  # 兜底:老版本只有一个包+一个 .sha256
+        sha = _find(".sha256")
     return {
         "tag": tag,
         "version": tag.lstrip("vV"),
         "notes": rel.get("body", "") or "",
-        "exe_url": exe.get("browser_download_url") if exe else None,
-        "exe_size": exe.get("size") if exe else None,
+        "pkg_name": pkg.get("name") if pkg else None,
+        "pkg_url": pkg.get("browser_download_url") if pkg else None,
+        "pkg_size": pkg.get("size") if pkg else None,
         "sha256_url": sha.get("browser_download_url") if sha else None,
     }
 
@@ -114,13 +135,13 @@ def check_update(current=__version__, fetch=None, now=None):
             info = None
     if info is None:
         return {"update_available": False, "current": current}
-    available = bool(info["exe_url"]) and is_newer(info["version"], current)
+    available = bool(info["pkg_url"]) and is_newer(info["version"], current)
     return {
         "update_available": available,
         "current": current,
         "latest": info["version"],
         "notes": info["notes"],
-        "size": info["exe_size"],
+        "size": info["pkg_size"],
     }
 
 
@@ -175,17 +196,16 @@ def _run_update(
     """
     try:
         os.makedirs(dest_dir, exist_ok=True)
-        dest = os.path.join(
-            dest_dir, f"PolymarketMarketMaker_Setup_{info['version']}.exe"
-        )
+        # 下载文件名直接用 release 的资源名,天然区分平台(.exe / .dmg)。
+        dest = os.path.join(dest_dir, info["pkg_name"])
 
         # state is already "downloading" — set by start_update (the sole owner of the
         # initial state) before the thread is spawned, so polling can observe it
         # immediately after start_update returns without waiting for the thread to run.
         download(
-            info["exe_url"],
+            info["pkg_url"],
             dest,
-            info.get("exe_size"),
+            info.get("pkg_size"),
             lambda p: setattr(state, "percent", p),
         )
 
@@ -237,8 +257,69 @@ def _launch_installer(path):
     )
 
 
+def _current_app_bundle():
+    """正在运行的 .app 包路径(……/Foo.app),仅 macOS 冻结运行时有意义。
+
+    冻结后 sys.executable = ……/Foo.app/Contents/MacOS/Foo,向上三级即 .app。
+    """
+    return os.path.dirname(os.path.dirname(os.path.dirname(sys.executable)))
+
+
+def _install_mac(path, *, app_path=None, popen=None):
+    """macOS 静默更新:写一个 detached helper 脚本并启动它,随后本进程退出。
+
+    helper 会:等本进程退出 → 挂载 .dmg → 用 ditto 取新 .app 覆盖当前安装位置 →
+    卸载 → 重新打开。用 ditto 程序化拷贝(而非浏览器下载)使新包不带
+    com.apple.quarantine 标记,重开不会再被 Gatekeeper 拦("已损坏")。
+    app_path / popen 可注入以便测试。
+    """
+    app_path = app_path or _current_app_bundle()
+    popen = popen or subprocess.Popen
+    app_name = os.path.basename(app_path)  # PolymarketMarketMaker.app
+    app_dir = os.path.dirname(app_path)  # 通常是 /Applications
+    pid = os.getpid()
+    script_path = os.path.join(os.path.dirname(path), "apply_update.sh")
+    helper = (
+        "#!/bin/bash\n"
+        "set -e\n"
+        f"DMG={shlex.quote(path)}\n"
+        f"APP={shlex.quote(app_path)}\n"
+        f"APPDIR={shlex.quote(app_dir)}\n"
+        f"APPNAME={shlex.quote(app_name)}\n"
+        f"PID={pid}\n"
+        "# 等主程序退出,避免覆盖正在运行的包(最多约 20s)\n"
+        'for _ in $(seq 1 100); do kill -0 "$PID" 2>/dev/null || break; sleep 0.2; done\n'
+        "MNT=$(mktemp -d /tmp/pmm_update.XXXXXX)\n"
+        'hdiutil attach -nobrowse -quiet -mountpoint "$MNT" "$DMG"\n'
+        'if [ -d "$MNT/$APPNAME" ]; then\n'
+        '  rm -rf "$APPDIR/$APPNAME.new"\n'
+        '  /usr/bin/ditto "$MNT/$APPNAME" "$APPDIR/$APPNAME.new"\n'
+        '  rm -rf "$APP"\n'
+        '  mv "$APPDIR/$APPNAME.new" "$APP"\n'
+        "fi\n"
+        'hdiutil detach "$MNT" -quiet || true\n'
+        'rmdir "$MNT" 2>/dev/null || true\n'
+        'open "$APP"\n'
+    )
+    with open(script_path, "w", encoding="utf-8") as f:
+        f.write(helper)
+    os.chmod(script_path, 0o755)
+    popen(
+        ["/bin/bash", script_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+
+def _platform_launcher(system=None):
+    """按平台返回"安装动作":macOS 用 _install_mac,其余用 _launch_installer。"""
+    system = system or sys.platform
+    return _install_mac if system == "darwin" else _launch_installer
+
+
 def _shutdown_self():
-    """立即退出进程,释放 exe 文件锁,交由安装包覆盖并重启。"""
+    """立即退出进程,释放文件锁,交由安装包/helper 覆盖并重启。"""
     logger.info("为安装更新而退出进程")
     os._exit(0)
 
@@ -255,13 +336,16 @@ def start_update(mgr, *, info_provider=None, **deps):
         return {"ok": True, "message": "更新已在进行中"}
 
     info = (info_provider or (lambda: parse_release(_fetch_latest_release())))()
-    if not info or not info.get("exe_url") or not info.get("sha256_url"):
-        return {"ok": False, "message": "未找到可用的更新包(缺少 exe 或 sha256 资源)"}
+    if not info or not info.get("pkg_url") or not info.get("sha256_url"):
+        return {
+            "ok": False,
+            "message": "未找到可用的更新包(缺少本平台安装包或 sha256 资源)",
+        }
 
     deps.setdefault("download", _download)
     deps.setdefault("verify", verify_sha256)
     deps.setdefault("fetch_sha", _http_get)
-    deps.setdefault("launch", _launch_installer)
+    deps.setdefault("launch", _platform_launcher())
     deps.setdefault("shutdown", _shutdown_self)
 
     # Single owner of the initial "downloading" state — set here (not inside

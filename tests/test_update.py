@@ -1,5 +1,6 @@
 """tests/test_update.py — 自动更新纯逻辑单测(无网络)。"""
 
+import os
 import re
 from version import __version__
 import hashlib
@@ -14,6 +15,9 @@ from web.update import (
     _State,
     _run_update,
     start_update,
+    _install_mac,
+    _platform_launcher,
+    _launch_installer,
 )
 import web.update as updater
 
@@ -58,7 +62,11 @@ class TestIsNewer:
         assert is_newer("1.0.8", "garbage") is False
 
 
-def _fake_release(tag="v1.0.8", with_exe=True, with_sha=True, body="修复若干问题"):
+def _fake_release(
+    tag="v1.0.8", with_exe=True, with_dmg=True, with_sha=True, body="修复若干问题"
+):
+    """构造一个 release JSON。默认同时含 Windows(.exe) 与 macOS(.dmg) 两套包,
+    每套各带自己的 .sha256(模拟 v1.0.15 起的双平台 release)。"""
     assets = []
     if with_exe:
         assets.append(
@@ -68,39 +76,83 @@ def _fake_release(tag="v1.0.8", with_exe=True, with_sha=True, body="修复若干
                 "size": 12345678,
             }
         )
-    if with_sha:
+        if with_sha:
+            assets.append(
+                {
+                    "name": "PolymarketMarketMaker_Setup.exe.sha256",
+                    "browser_download_url": "https://example.com/Setup.exe.sha256",
+                    "size": 70,
+                }
+            )
+    if with_dmg:
         assets.append(
             {
-                "name": "PolymarketMarketMaker_Setup.exe.sha256",
-                "browser_download_url": "https://example.com/Setup.exe.sha256",
-                "size": 70,
+                "name": "PolymarketMarketMaker_Mac_arm64.dmg",
+                "browser_download_url": "https://example.com/Mac.dmg",
+                "size": 29502630,
             }
         )
+        if with_sha:
+            assets.append(
+                {
+                    "name": "PolymarketMarketMaker_Mac_arm64.dmg.sha256",
+                    "browser_download_url": "https://example.com/Mac.dmg.sha256",
+                    "size": 65,
+                }
+            )
     return {"tag_name": tag, "body": body, "assets": assets}
 
 
 class TestParseRelease:
-    def test_full(self):
-        info = parse_release(_fake_release())
+    def test_windows_picks_exe(self):
+        info = parse_release(_fake_release(), system="win32")
         assert info["tag"] == "v1.0.8"
         assert info["version"] == "1.0.8"
         assert info["notes"] == "修复若干问题"
-        assert info["exe_url"] == "https://example.com/Setup.exe"
-        assert info["exe_size"] == 12345678
+        assert info["pkg_name"] == "PolymarketMarketMaker_Setup.exe"
+        assert info["pkg_url"] == "https://example.com/Setup.exe"
+        assert info["pkg_size"] == 12345678
+        # sha256 必须配对到 exe 的那个,而不是 dmg 的
         assert info["sha256_url"] == "https://example.com/Setup.exe.sha256"
 
-    def test_missing_exe(self):
-        info = parse_release(_fake_release(with_exe=False))
-        assert info["exe_url"] is None
-        assert info["exe_size"] is None
+    def test_mac_picks_dmg(self):
+        info = parse_release(_fake_release(), system="darwin")
+        assert info["pkg_name"] == "PolymarketMarketMaker_Mac_arm64.dmg"
+        assert info["pkg_url"] == "https://example.com/Mac.dmg"
+        assert info["pkg_size"] == 29502630
+        # sha256 必须配对到 dmg 的那个,而不是 exe 的(防止取错导致校验失败)
+        assert info["sha256_url"] == "https://example.com/Mac.dmg.sha256"
 
-    def test_missing_sha(self):
-        info = parse_release(_fake_release(with_sha=False))
-        assert info["sha256_url"] is None
+    def test_sha_paired_not_first(self):
+        # 资源顺序里 dmg.sha256 在 exe.sha256 之前时,windows 仍须取 exe.sha256
+        rel = _fake_release()
+        rel["assets"].reverse()
+        info = parse_release(rel, system="win32")
+        assert info["sha256_url"] == "https://example.com/Setup.exe.sha256"
+
+    def test_missing_platform_package(self):
+        # mac-only release,Windows 客户端取不到 .exe -> 无包
+        info = parse_release(_fake_release(with_exe=False), system="win32")
+        assert info["pkg_url"] is None
+        assert info["pkg_size"] is None
+
+    def test_single_package_sha_fallback(self):
+        # 老版本只有一个包+一个 .sha256(名字不配对)时,回退到任意 .sha256
+        rel = {
+            "tag_name": "v1.0.8",
+            "body": "x",
+            "assets": [
+                {"name": "Setup.exe", "browser_download_url": "u", "size": 1},
+                {"name": "checksums.sha256", "browser_download_url": "s", "size": 1},
+            ],
+        }
+        info = parse_release(rel, system="win32")
+        assert info["pkg_url"] == "u"
+        assert info["sha256_url"] == "s"
 
     def test_empty_release(self):
-        info = parse_release({})
-        assert info["exe_url"] is None
+        info = parse_release({}, system="win32")
+        assert info["pkg_url"] is None
         assert info["sha256_url"] is None
         assert info["notes"] == ""
 
@@ -245,9 +297,10 @@ class TestRunUpdate:
     def _info(self):
         return {
             "version": "1.0.8",
-            "exe_url": "https://example.com/Setup.exe",
+            "pkg_name": "PolymarketMarketMaker_Setup.exe",
+            "pkg_url": "https://example.com/Setup.exe",
             "sha256_url": "https://example.com/Setup.exe.sha256",
-            "exe_size": 100,
+            "pkg_size": 100,
         }
 
     def test_happy_path(self, tmp_path):
@@ -277,9 +330,8 @@ class TestRunUpdate:
 
         run()
         assert state.state == "installing"
-        assert launched and launched[0].endswith(
-            "PolymarketMarketMaker_Setup_1.0.8.exe"
-        )
+        # 下载文件名取自 release 的资源名(跨平台:.exe / .dmg)
+        assert launched and launched[0].endswith("PolymarketMarketMaker_Setup.exe")
         assert shut == [True]
 
     def test_sha_mismatch_aborts(self, tmp_path):
@@ -330,7 +382,7 @@ class TestStartUpdate:
             mgr,
             info_provider=lambda: {
                 "version": "1.0.8",
-                "exe_url": "u",
+                "pkg_url": "u",
                 "sha256_url": "s",
             },
         )
@@ -343,7 +395,7 @@ class TestStartUpdate:
             None,
             info_provider=lambda: {
                 "version": "1.0.8",
-                "exe_url": None,
+                "pkg_url": None,
                 "sha256_url": None,
             },
         )
@@ -362,7 +414,7 @@ class TestStartUpdate:
                 None,
                 info_provider=lambda: {
                     "version": "1.0.8",
-                    "exe_url": "u",
+                    "pkg_url": "u",
                     "sha256_url": "s",
                 },
             )
@@ -393,9 +445,9 @@ class TestStartUpdate:
             None,
             info_provider=lambda: {
                 "version": "1.0.8",
-                "exe_url": "u",
+                "pkg_url": "u",
                 "sha256_url": "s",
-                "exe_size": 1,
+                "pkg_size": 1,
             },
         )
         assert out["ok"] is True
@@ -412,3 +464,50 @@ class _ImmediateThread:
 
     def start(self):
         self._target(*self._args, **self._kwargs)
+
+
+class TestPlatformLauncher:
+    def test_mac_uses_install_mac(self):
+        assert _platform_launcher("darwin") is _install_mac
+
+    def test_windows_uses_installer(self):
+        assert _platform_launcher("win32") is _launch_installer
+
+    def test_non_darwin_uses_installer(self):
+        # 非 darwin 一律走"启动安装包"路径(Windows 风格)
+        assert _platform_launcher("linux") is _launch_installer
+
+
+class TestInstallMac:
+    def test_writes_helper_script_and_launches_detached(self, tmp_path):
+        dmg = str(tmp_path / "PolymarketMarketMaker_Mac_arm64.dmg")
+        with open(dmg, "wb") as f:
+            f.write(b"dmgbytes")
+        app_path = "/Applications/PolymarketMarketMaker.app"
+        popen_calls = []
+
+        _install_mac(
+            dmg,
+            app_path=app_path,
+            popen=lambda *a, **k: popen_calls.append((a, k)),
+        )
+
+        # 启动了恰好一个 detached 的 bash helper
+        assert len(popen_calls) == 1
+        args, _kwargs = popen_calls[0]
+        cmd = args[0]
+        assert cmd[0] == "/bin/bash"
+        script = cmd[1]
+        assert os.path.exists(script)
+
+        body = open(script, encoding="utf-8").read()
+        # 等本进程退出后再覆盖正在运行的包
+        assert "kill -0" in body
+        # 挂载 dmg -> ditto 覆盖 -> 卸载 -> 重新打开
+        assert "hdiutil attach" in body
+        assert "ditto" in body
+        assert "hdiutil detach" in body
+        assert "open " in body
+        # 引用了正确的 dmg 与 app 路径
+        assert dmg in body
+        assert app_path in body
