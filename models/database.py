@@ -128,6 +128,17 @@ class Database:
                 note TEXT NOT NULL DEFAULT '',
                 added_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
+            CREATE TABLE IF NOT EXISTS templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+            );
+            CREATE TABLE IF NOT EXISTS template_settings (
+                template_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (template_id, key)
+            );
         """
         )
         self.conn.commit()
@@ -150,6 +161,11 @@ class Database:
         em_cols = {row[1] for row in c.fetchall()}
         if em_cols and "min_cost" not in em_cols:
             c.execute("ALTER TABLE eligible_markets ADD COLUMN min_cost REAL DEFAULT 0")
+            self.conn.commit()
+        c.execute("PRAGMA table_info(wallets)")
+        wcols = {row[1] for row in c.fetchall()}
+        if "template_id" not in wcols:
+            c.execute("ALTER TABLE wallets ADD COLUMN template_id INTEGER")
             self.conn.commit()
 
     # --- Settings ---

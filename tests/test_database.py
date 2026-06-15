@@ -316,3 +316,25 @@ class TestBlacklist:
     def test_empty_when_none(self, db):
         assert db.get_blacklist_ids() == set()
         assert db.get_blacklist() == []
+
+
+class TestTemplateSchema:
+    def test_templates_table_exists(self, db):
+        c = db.conn.cursor()
+        c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='templates'"
+        )
+        assert c.fetchone() is not None
+
+    def test_template_settings_table_exists(self, db):
+        c = db.conn.cursor()
+        c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='template_settings'"
+        )
+        assert c.fetchone() is not None
+
+    def test_wallets_has_template_id_column(self, db):
+        c = db.conn.cursor()
+        c.execute("PRAGMA table_info(wallets)")
+        cols = {row[1] for row in c.fetchall()}
+        assert "template_id" in cols
