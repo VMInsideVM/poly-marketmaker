@@ -414,6 +414,7 @@ class PolymarketAPI:
         order_by: str = "rate_per_day",
         position: str = "DESC",
         max_pages: int = 5,
+        tag_slug: str = None,
     ) -> list[dict]:
         """Fetch markets with active rewards using GET /rewards/markets/multi.
 
@@ -440,6 +441,8 @@ class PolymarketAPI:
             # Do NOT combine a large page_size with min_price/max_price + order_by
             # — that combination makes this endpoint hang / 500 (see scanner.py).
             params = {"page_size": 100}
+            if tag_slug is not None:
+                params["tag_slug"] = tag_slug
             if min_price is not None:
                 params["min_price"] = min_price
             if max_price is not None:
