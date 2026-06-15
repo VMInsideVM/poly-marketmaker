@@ -3,7 +3,7 @@
 import sqlite3
 import json
 import time
-from config import DEFAULTS
+from config import DEFAULTS, ENGINE_DEFAULTS, TEMPLATE_DEFAULTS
 
 
 class Database:
@@ -167,6 +167,12 @@ class Database:
         if "template_id" not in wcols:
             c.execute("ALTER TABLE wallets ADD COLUMN template_id INTEGER")
             self.conn.commit()
+        c.execute("SELECT COUNT(*) AS n FROM templates")
+        if c.fetchone()["n"] == 0:
+            c.execute(
+                "INSERT INTO templates (name) VALUES (?)", (self.DEFAULT_TEMPLATE_NAME,)
+            )
+            self.conn.commit()
 
     # --- Settings ---
 
@@ -185,6 +191,83 @@ class Database:
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, json.dumps(value)),
             )
+        self.conn.commit()
+
+    # --- Templates ---
+
+    DEFAULT_TEMPLATE_NAME = "默认"
+
+    def create_template(self, name: str) -> int:
+        c = self.conn.cursor()
+        c.execute("INSERT INTO templates (name) VALUES (?)", (name,))
+        self.conn.commit()
+        return c.lastrowid
+
+    def list_templates(self) -> list[dict]:
+        c = self.conn.cursor()
+        c.execute("SELECT id, name, created_at FROM templates ORDER BY id")
+        return [dict(row) for row in c.fetchall()]
+
+    def get_default_template_id(self) -> int:
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT id FROM templates WHERE name = ?", (self.DEFAULT_TEMPLATE_NAME,)
+        )
+        row = c.fetchone()
+        if row is None:
+            return self.create_template(self.DEFAULT_TEMPLATE_NAME)
+        return row["id"]
+
+    def get_template(self, template_id: int) -> dict:
+        """TEMPLATE_DEFAULTS 合并该模板的覆盖键(逐键 + JSON 值)。"""
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT key, value FROM template_settings WHERE template_id = ?",
+            (template_id,),
+        )
+        stored = {row["key"]: json.loads(row["value"]) for row in c.fetchall()}
+        result = dict(TEMPLATE_DEFAULTS)
+        result.update(stored)
+        return result
+
+    def save_template(self, template_id: int, values: dict):
+        c = self.conn.cursor()
+        for key, value in values.items():
+            c.execute(
+                "INSERT OR REPLACE INTO template_settings (template_id, key, value) "
+                "VALUES (?, ?, ?)",
+                (template_id, key, json.dumps(value)),
+            )
+        self.conn.commit()
+
+    def set_wallet_template(self, address: str, template_id: int):
+        c = self.conn.cursor()
+        c.execute(
+            "UPDATE wallets SET template_id = ? WHERE address = ?",
+            (template_id, address),
+        )
+        self.conn.commit()
+
+    def get_template_for(self, address: str) -> dict:
+        """按钱包地址取其绑定模板;NULL/未知钱包回落默认模板。"""
+        c = self.conn.cursor()
+        c.execute("SELECT template_id FROM wallets WHERE address = ?", (address,))
+        row = c.fetchone()
+        tid = row["template_id"] if row and row["template_id"] is not None else None
+        if tid is None:
+            tid = self.get_default_template_id()
+        return self.get_template(tid)
+
+    def delete_template(self, template_id: int):
+        if template_id == self.get_default_template_id():
+            raise ValueError("默认模板不可删除")
+        c = self.conn.cursor()
+        c.execute(
+            "UPDATE wallets SET template_id = NULL WHERE template_id = ?",
+            (template_id,),
+        )
+        c.execute("DELETE FROM template_settings WHERE template_id = ?", (template_id,))
+        c.execute("DELETE FROM templates WHERE id = ?", (template_id,))
         self.conn.commit()
 
     # --- Auth ---
@@ -238,8 +321,8 @@ class Database:
     def list_wallets(self) -> list[dict]:
         c = self.conn.cursor()
         c.execute(
-            "SELECT address, encrypted_key, funder, signature_type, enabled, created_at "
-            "FROM wallets"
+            "SELECT address, encrypted_key, funder, signature_type, enabled, "
+            "created_at, template_id FROM wallets"
         )
         return [dict(row) for row in c.fetchall()]
 

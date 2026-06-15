@@ -318,6 +318,61 @@ class TestBlacklist:
         assert db.get_blacklist() == []
 
 
+class TestTemplateCRUD:
+    def test_create_and_list_templates(self, db):
+        tid = db.create_template("保守")
+        assert isinstance(tid, int)
+        assert "保守" in [t["name"] for t in db.list_templates()]
+
+    def test_create_duplicate_name_raises(self, db):
+        db.create_template("保守")
+        with pytest.raises(Exception):
+            db.create_template("保守")
+
+    def test_save_and_get_template_merges_defaults(self, db):
+        tid = db.create_template("激进")
+        db.save_template(tid, {"max_spread_cents": 6.0, "stop_loss_pct": 8.0})
+        t = db.get_template(tid)
+        assert t["max_spread_cents"] == 6.0
+        assert t["stop_loss_pct"] == 8.0
+        assert t["min_reward_usd"] == 100.0
+        assert t["excluded_categories"] == ["sports", "esports", "weather"]
+        assert "scan_interval_sec" not in t
+
+    def test_default_template_exists_after_init(self, db):
+        assert isinstance(db.get_default_template_id(), int)
+        assert "默认" in [t["name"] for t in db.list_templates()]
+
+    def test_set_wallet_template_and_get_template_for(self, db):
+        db.add_wallet("0xAAA", "k")
+        tid = db.create_template("激进")
+        db.save_template(tid, {"max_spread_cents": 6.0})
+        db.set_wallet_template("0xAAA", tid)
+        assert db.get_template_for("0xAAA")["max_spread_cents"] == 6.0
+
+    def test_get_template_for_null_falls_back_to_default(self, db):
+        db.add_wallet("0xBBB", "k")
+        t = db.get_template_for("0xBBB")
+        assert t["min_reward_usd"] == 100.0
+        assert t["max_spread_cents"] == 3.0
+
+    def test_get_template_for_unknown_wallet_falls_back_to_default(self, db):
+        assert db.get_template_for("0xNOPE")["max_spread_cents"] == 3.0
+
+    def test_delete_default_template_rejected(self, db):
+        with pytest.raises(Exception):
+            db.delete_template(db.get_default_template_id())
+
+    def test_delete_template_rebinds_wallets_to_default(self, db):
+        db.add_wallet("0xCCC", "k")
+        tid = db.create_template("临时")
+        db.set_wallet_template("0xCCC", tid)
+        db.delete_template(tid)
+        w = next(w for w in db.list_wallets() if w["address"] == "0xCCC")
+        assert w["template_id"] is None
+        assert db.get_template_for("0xCCC")["max_spread_cents"] == 3.0
+
+
 class TestTemplateSchema:
     def test_templates_table_exists(self, db):
         c = db.conn.cursor()
