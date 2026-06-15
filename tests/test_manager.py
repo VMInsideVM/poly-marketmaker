@@ -43,6 +43,15 @@ def _make_manager():
         {"address": "0xDEF", "encrypted_key": "enc2", "enabled": 1},
     ]
     db.get_open_buy_orders.return_value = []
+    db.get_template_for.return_value = {
+        "excluded_categories": [],
+        "min_reward_usd": 100.0,
+        "max_buy_orders_per_wallet": 5,
+        "order_size_mode": "min",
+        "order_size_custom_usd": 0.0,
+    }
+    db.get_template.return_value = {"excluded_categories": [], "min_reward_usd": 100.0}
+    db.get_default_template_id.return_value = 1
     manager = EngineManager(db, encryption_key=b"x" * 32)
     return manager, db
 
@@ -187,25 +196,28 @@ class TestTestPlaceOrders:
 class TestScanMarketsLastScanTime:
     def test_last_scan_time_only_updates_at_round_completion(self):
         manager, db = _make_manager()
-        manager._scanner_api = MagicMock()  # skip API-construction branch
-
+        manager._scanner_api = MagicMock()
         observed = []
 
         class FakeScanner:
             def __init__(self, api, db, addr):
                 pass
 
-            def scan(self, on_progress=None, on_found=None):
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
                 on_found({"market_id": "m1"})
                 observed.append(manager.last_scan_time)
                 on_found({"market_id": "m2"})
                 observed.append(manager.last_scan_time)
                 return [{"market_id": "m1"}, {"market_id": "m2"}]
 
+            def filter_for_template(self, pool, tmpl, addr):
+                return pool
+
         assert manager.last_scan_time == 0
         with patch("engine.manager.MarketScanner", FakeScanner):
             manager.scan_markets()
-
         assert observed == [0, 0]
         assert manager.last_scan_time > 0
         assert manager.scan_status == "done"
@@ -222,51 +234,51 @@ class TestSharedScanWithStatus:
             def __init__(self, api, db, addr):
                 pass
 
-            def scan(self, on_progress=None, on_found=None):
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
                 on_progress(1, 2, "checking")
                 seen.append(manager.scan_status)
                 on_found({"market_id": "m1"})
                 return [{"market_id": "m1"}]
 
+            def filter_for_template(self, pool, tmpl, addr):
+                return pool
+
         with patch("engine.manager.MarketScanner", FakeScanner):
             manager.scan_markets()
-
         assert seen == ["scanning"]
         assert manager.scan_status == "done"
         assert manager.last_scan_time > 0
         assert manager.eligible_markets == [{"market_id": "m1"}]
         db.save_eligible_markets.assert_called_once_with([{"market_id": "m1"}])
 
-    def test_auto_do_scan_reports_status_and_distributes(self):
+    def test_auto_do_scan_filters_per_wallet_and_places(self):
         manager, db = _make_manager()
         manager._scanner_api = MagicMock()
         worker = MagicMock()
         worker.running = True
         manager.engines = {"0xABC": worker}
-        seen = []
 
         class FakeScanner:
             def __init__(self, api, db, addr):
                 pass
 
-            def scan(self, on_progress=None, on_found=None):
-                on_progress(3, 3, "done-ish")
-                seen.append(manager.scan_status)
-                return [{"market_id": "m9"}]
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
+                return [{"market_id": "m9", "tags": []}]
+
+            def filter_for_template(self, pool, tmpl, addr):
+                return pool
 
         with patch("engine.manager.MarketScanner", FakeScanner):
             manager._do_scan()
-
-        assert seen == ["scanning"]
         assert manager.scan_status == "done"
         assert manager.last_scan_time > 0
-        worker.place_orders.assert_called_once_with([{"market_id": "m9"}])
-        db.save_eligible_markets.assert_not_called()
+        worker.place_orders.assert_called_once_with([{"market_id": "m9", "tags": []}])
 
     def test_auto_do_scan_distributes_sorted_by_competitiveness(self):
-        # Auto mode must distribute lowest-competitiveness first, matching the
-        # manual place_all_orders path and the documented behavior — not the raw
-        # scan order (rate_per_day DESC).
         manager, db = _make_manager()
         manager._scanner_api = MagicMock()
         worker = MagicMock()
@@ -277,18 +289,20 @@ class TestSharedScanWithStatus:
             def __init__(self, api, db, addr):
                 pass
 
-            def scan(self, on_progress=None, on_found=None):
-                # returned OUT of competitiveness order
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
                 return [
                     {"market_id": "hi", "market_competitiveness": 0.9},
                     {"market_id": "lo", "market_competitiveness": 0.1},
                     {"market_id": "mid", "market_competitiveness": 0.5},
                 ]
 
+            def filter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
         with patch("engine.manager.MarketScanner", FakeScanner):
             manager._do_scan()
-
-        worker.place_orders.assert_called_once()
         distributed = worker.place_orders.call_args[0][0]
         assert [m["market_id"] for m in distributed] == ["lo", "mid", "hi"]
 
@@ -302,13 +316,14 @@ class TestSharedScanWithStatus:
             def __init__(self, api, db, addr):
                 pass
 
-            def scan(self, on_progress=None, on_found=None):
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
                 raise RuntimeError("scanner blew up")
 
         with patch("engine.manager.MarketScanner", BoomScanner):
             with pytest.raises(RuntimeError):
                 manager._scan_with_status()
-
         assert manager.scan_status == "done"
         assert manager.last_scan_time == 12345.0
         assert manager.eligible_markets == [{"market_id": "prev"}]

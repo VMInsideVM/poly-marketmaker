@@ -431,31 +431,25 @@ class EngineManager:
         logger.info("Saved %d eligible markets to database", len(eligible))
 
     def place_all_orders(self):
-        """Distribute eligible markets to all wallets for order placement.
-
-        Orders are placed from lowest competitiveness first (less competition = more reward share).
-        """
+        """每钱包按自己模板从候选池精筛后下单。"""
         if not self.eligible_markets:
-            logger.warning("No eligible markets to place orders on")
+            logger.warning("No candidate pool to place orders on")
             return
-
-        # Sort: lowest competitiveness first
-        sorted_markets = sorted(
-            self.eligible_markets,
-            key=lambda m: float(m.get("market_competitiveness", 0) or 0),
-        )
-
         for address, worker in self.engines.items():
-            if worker.running:
-                try:
-                    worker.place_orders(sorted_markets)
-                except Exception as e:
-                    logger.error("Error placing orders for %s: %s", address, e)
-        logger.info(
-            "Distributed %d eligible markets to %d wallets",
-            len(self.eligible_markets),
-            len(self.engines),
-        )
+            if not worker.running:
+                continue
+            try:
+                tmpl = self.db.get_template_for(address)
+                scanner = MarketScanner(self._scanner_api, self.db, "")
+                eligible = scanner.filter_for_template(
+                    self.eligible_markets, tmpl, address
+                )
+                eligible.sort(
+                    key=lambda m: float(m.get("market_competitiveness", 0) or 0)
+                )
+                worker.place_orders(eligible)
+            except Exception as e:
+                logger.error("Error placing orders for %s: %s", address, e)
 
     def test_place_orders(self) -> dict:
         """Place up to 3 strategy-compliant test buys on the first enabled
@@ -551,6 +545,23 @@ class EngineManager:
 
             self._stop_event.wait(timeout=scan_interval)
 
+    def _active_templates(self) -> list[dict]:
+        """所有启用钱包绑定模板(按 excluded_categories 去重),供采集器算并集/交集。"""
+        try:
+            wallets = self.db.list_wallets()
+        except Exception:
+            wallets = []
+        seen = {}
+        for w in wallets:
+            if not w.get("enabled"):
+                continue
+            tmpl = self.db.get_template_for(w["address"])
+            key = tuple(sorted(tmpl.get("excluded_categories", []) or []))
+            seen[key] = tmpl
+        if seen:
+            return list(seen.values())
+        return [self.db.get_template(self.db.get_default_template_id())]
+
     def _scan_with_status(self) -> list:
         """Run one scan, reporting scan_status/progress; shared by manual and
         auto paths. On success sets eligible_markets/last_scan_time and
@@ -576,37 +587,37 @@ class EngineManager:
 
         try:
             scanner = MarketScanner(self._scanner_api, self.db, "")
-            eligible = scanner.scan(on_progress=on_progress, on_found=on_found)
+            templates = self._active_templates()
+            candidate_pool = scanner.fetch_candidates(
+                templates, on_progress=on_progress, on_found=on_found
+            )
         except Exception:
             self.eligible_markets = prev_eligible  # don't blank on failure
             self.scan_status = "done"  # not 'scanning': progress bar won't stick
             raise
-        self.eligible_markets = eligible
+        self.eligible_markets = candidate_pool
         self.last_scan_time = _time.time()
         self.scan_status = "done"
-        self.scan_progress = f"Done: {len(eligible)} eligible"
-        logger.info("Scanner found %d eligible markets", len(eligible))
-        return eligible
+        self.scan_progress = f"Done: {len(candidate_pool)} candidates"
+        logger.info("Scanner found %d candidates", len(candidate_pool))
+        return candidate_pool
 
     def _do_scan(self):
-        """Run one scan cycle: find eligible markets, distribute to wallets."""
-        eligible = self._scan_with_status()
-
-        # Distribute lowest-competitiveness first (less competition = larger
-        # reward share), matching the manual place_all_orders path. The scan
-        # returns markets in rate_per_day DESC order, so without this sort auto
-        # mode would diverge from the documented "lowest competitiveness first".
-        sorted_markets = sorted(
-            eligible, key=lambda m: float(m.get("market_competitiveness", 0) or 0)
-        )
-
-        # Distribute to each running wallet
+        """采集一次候选池,每钱包按自己模板精筛+下单。"""
+        candidate_pool = self._scan_with_status()
         for address, worker in self.engines.items():
-            if worker.running:
-                try:
-                    worker.place_orders(sorted_markets)
-                except Exception as e:
-                    logger.error("Error distributing to wallet %s: %s", address, e)
+            if not worker.running:
+                continue
+            try:
+                tmpl = self.db.get_template_for(address)
+                scanner = MarketScanner(self._scanner_api, self.db, "")
+                eligible = scanner.filter_for_template(candidate_pool, tmpl, address)
+                eligible.sort(
+                    key=lambda m: float(m.get("market_competitiveness", 0) or 0)
+                )
+                worker.place_orders(eligible)
+            except Exception as e:
+                logger.error("Error distributing to wallet %s: %s", address, e)
 
     def startup_recovery(self):
         """API-driven recovery: seed each monitor's trade watermark from DB history.
