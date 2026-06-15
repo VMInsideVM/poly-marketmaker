@@ -254,6 +254,39 @@ class TestEligibleMarkets:
         assert len(rows) == 1
         assert rows[0]["min_cost"] == 29.0
 
+    def test_save_and_get_tags(self, db):
+        db.save_eligible_markets(
+            [
+                {
+                    "market_id": "A",
+                    "token_id": "t1",
+                    "market_name": "M",
+                    "outcome": "Yes",
+                    "daily_reward": 50,
+                    "order_price": 0,
+                    "order_size": 0,
+                    "tags": ["sports"],
+                }
+            ]
+        )
+        assert db.get_eligible_markets()[0]["tags"] == ["sports"]
+
+    def test_tags_default_empty_list(self, db):
+        db.save_eligible_markets(
+            [
+                {
+                    "market_id": "B",
+                    "token_id": "t2",
+                    "market_name": "M2",
+                    "outcome": "No",
+                    "daily_reward": 50,
+                    "order_price": 0,
+                    "order_size": 0,
+                }
+            ]
+        )
+        assert db.get_eligible_markets()[0]["tags"] == []
+
 
 class TestMarketMeta:
     def test_upsert_and_get(self, db):

@@ -114,6 +114,7 @@ class Database:
                 order_size INTEGER NOT NULL,
                 min_cost REAL DEFAULT 0,
                 end_date TEXT DEFAULT '',
+                tags TEXT DEFAULT '[]',
                 scanned_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
             CREATE TABLE IF NOT EXISTS market_meta (
@@ -161,6 +162,11 @@ class Database:
         em_cols = {row[1] for row in c.fetchall()}
         if em_cols and "min_cost" not in em_cols:
             c.execute("ALTER TABLE eligible_markets ADD COLUMN min_cost REAL DEFAULT 0")
+            self.conn.commit()
+        c.execute("PRAGMA table_info(eligible_markets)")
+        em_cols2 = {row[1] for row in c.fetchall()}
+        if em_cols2 and "tags" not in em_cols2:
+            c.execute("ALTER TABLE eligible_markets ADD COLUMN tags TEXT DEFAULT '[]'")
             self.conn.commit()
         c.execute("PRAGMA table_info(wallets)")
         wcols = {row[1] for row in c.fetchall()}
@@ -560,8 +566,8 @@ class Database:
                  daily_reward, rewards_max_spread, rewards_min_size,
                  tick_size, tick_size_str, neg_risk,
                  reward_range_min, reward_range_max,
-                 order_price, order_size, min_cost, end_date, scanned_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 order_price, order_size, min_cost, end_date, tags, scanned_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     m.get("market_id", ""),
                     m.get("token_id", ""),
@@ -580,6 +586,7 @@ class Database:
                     m.get("order_size", 0),
                     m.get("min_cost", 0),
                     m.get("end_date", ""),
+                    json.dumps(m.get("tags", []) or []),
                     now,
                 ),
             )
@@ -589,7 +596,15 @@ class Database:
         """Get all eligible markets from last scan."""
         c = self.conn.cursor()
         c.execute("SELECT * FROM eligible_markets ORDER BY market_competitiveness DESC")
-        return [dict(row) for row in c.fetchall()]
+        out = []
+        for row in c.fetchall():
+            d = dict(row)
+            try:
+                d["tags"] = json.loads(d.get("tags") or "[]")
+            except (ValueError, TypeError):
+                d["tags"] = []
+            out.append(d)
+        return out
 
     # --- Market Meta (condition_id -> name + slugs, persistent across scans) ---
 
