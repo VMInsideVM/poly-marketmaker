@@ -16,6 +16,11 @@ import logging
 from datetime import datetime
 from engine.strategy import determine_order_price, reward_price_range
 from engine.take_profit import ceil_to_tick
+from engine.categories import (
+    excluded_intersection,
+    queried_categories,
+    partition_candidates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,236 +50,195 @@ class MarketScanner:
         self.db = db
         self.wallet_address = wallet_address
 
-    def scan(self, on_progress=None, on_found=None) -> list[dict]:
-        """Scan reward markets and return eligible ones with order prices.
+    def fetch_candidates(
+        self, templates, on_progress=None, on_found=None, skip_orderbook=False
+    ) -> list[dict]:
+        """共享采集:抓全量奖励市场,按品类交集采集阶段排除,打 tags,补精确奖励,
+        缓存订单簿。钱包无关、网络密集、不算价。skip_orderbook 仅供单测。"""
+        inter = excluded_intersection(templates)
+        queried = queried_categories(templates)
+        floors = [t.get("min_reward_usd", 0) for t in templates]
+        min_floor = min(floors) if floors else 0
 
-        Args:
-            on_progress: callback(checked, total, message) called during scan
-            on_found: callback(market_dict) called when a new eligible market is found
+        full = self.api.get_rewards_markets()
+        category_ids = {}
+        for slug in queried:
+            rows = self.api.get_rewards_markets(tag_slug=slug)
+            category_ids[slug] = {m.get("condition_id", "") for m in rows}
 
-        Returns list of dicts, each representing one token to place an order on.
-        """
-        settings = self.db.get_settings()
-        # No balance filter here: the eligible list is shared across wallets,
-        # each of which has a different balance. We record a per-market min_cost
-        # threshold instead, and each wallet gates on it at placement time.
-        min_reward = settings["min_reward_usd"]
-        min_price_cents = settings["min_price_cents"]
-        max_price_cents = settings["max_price_cents"]
-        max_spread_cents = settings["max_spread_cents"]
-        min_days = settings["min_settlement_days"]
-
-        # Step 1: Fetch markets sorted by rate_per_day DESC.
-        # Do NOT pass min_price/max_price: the server-side price filter combined
-        # with order_by=rate_per_day makes /rewards/markets/multi hang (read
-        # timeout) or return HTTP 500, which silently emptied the scan. Token
-        # prices are filtered client-side below (Step 5 + best_bid check), so the
-        # server-side price filter was redundant anyway.
-        logger.info("Fetching rewards markets...")
-        markets = self.api.get_rewards_markets()
-        logger.info("Fetched %d markets, filtering...", len(markets))
-
-        eligible = []
-
-        # 全局黑名单:这些 condition_id 不进 eligible(一次性加载)。
+        pool = partition_candidates(full, category_ids, inter)
         blacklist = self.db.get_blacklist_ids()
 
-        # Pre-filter: reward + settlement date + cooldown
-        candidates = []
-        for market in markets:
-            tokens = market.get("tokens", [])
-            if not tokens:
+        out = []
+        checked = 0
+        for market in pool:
+            cid = market.get("condition_id", "")
+            if cid in blacklist:
                 continue
-            rewards_config = market.get("rewards_config", [])
-            total_rate = sum(rc.get("rate_per_day", 0) for rc in rewards_config)
-            if total_rate < min_reward:
+            total_rate = sum(
+                rc.get("rate_per_day", 0) for rc in market.get("rewards_config", [])
+            )
+            if total_rate < min_floor:
+                continue  # 比最宽松模板还低,任何模板都不会要
+            self.db.upsert_market_meta(
+                cid,
+                market.get("question", ""),
+                market.get("market_slug", ""),
+                market.get("event_slug", ""),
+            )
+            # 精确每市场奖励(与旧 scan 一致:/rewards/markets/{cid})
+            market_reward = total_rate
+            try:
+                raw = self.api.get_rewards_for_market(cid)
+                if raw:
+                    market_reward = sum(
+                        rc.get("rate_per_day", 0)
+                        for rd in raw
+                        for rc in rd.get("rewards_config", [])
+                    )
+            except Exception as e:
+                logger.warning("Precise reward fetch failed for %s: %s", cid, e)
+            market["market_reward"] = market_reward
+            if not skip_orderbook:
+                market["_orderbooks"] = self._fetch_orderbooks(market)
+            checked += 1
+            if on_progress:
+                on_progress(
+                    checked, len(pool), f"Checking: {market.get('question','')}"
+                )
+            if on_found:
+                on_found(market)
+            out.append(market)
+        return out
+
+    def _fetch_orderbooks(self, market: dict) -> dict:
+        """抓该市场每 token 的订单簿快照(钱包无关)。抓不到的略过。"""
+        books = {}
+        for token in market.get("tokens", []):
+            token_id = token.get("token_id", "")
+            if not token_id:
+                continue
+            try:
+                spread_val = self.api.get_spread(token_id)
+                ob = self.api.get_orderbook(token_id)
+            except Exception as e:
+                logger.warning("Orderbook fetch failed for %s: %s", token_id, e)
+                continue
+            books[token_id] = {
+                "bids": ob.get("bids", []),
+                "asks": ob.get("asks", []),
+                "tick_size": ob.get("tick_size", "0.01"),
+                "spread": spread_val,
+            }
+        return books
+
+    def filter_for_template(
+        self, candidate_pool, template, wallet_address
+    ) -> list[dict]:
+        """从候选池产出某模板的 eligible(门槛过滤 + 品类 narrow + 老算法定价)。"""
+        min_reward = template["min_reward_usd"]
+        min_price_cents = template["min_price_cents"]
+        max_price_cents = template["max_price_cents"]
+        max_spread_cents = template["max_spread_cents"]
+        min_days = template["min_settlement_days"]
+        excluded = set(template.get("excluded_categories", []) or [])
+
+        eligible = []
+        for market in candidate_pool:
+            if excluded & set(market.get("tags", [])):
+                continue
+            total_rate = sum(
+                rc.get("rate_per_day", 0) for rc in market.get("rewards_config", [])
+            )
+            market_reward = market.get("market_reward", total_rate)
+            if total_rate < min_reward or market_reward < min_reward:
                 continue
             end_date_str = market.get("end_date", "")
             end_ts = _parse_end_date(end_date_str)
             days_left = (end_ts - time.time()) / 86400 if end_ts else -1
             if 0 <= days_left < min_days:
                 continue
+
             condition_id = market.get("condition_id", "")
-            if condition_id in blacklist:
-                continue
-            if self.db.is_in_cooldown(self.wallet_address, condition_id):
-                continue
-            candidates.append(market)
-
-        logger.info("Pre-filter: %d -> %d candidates", len(markets), len(candidates))
-        checked = 0
-
-        for market in candidates:
-            condition_id = market.get("condition_id", "")
-            tokens = market.get("tokens", [])
-            rewards_config = market.get("rewards_config", [])
-            total_rate = sum(rc.get("rate_per_day", 0) for rc in rewards_config)
-            end_date_str = market.get("end_date", "")
-            question = market.get("question", "")
-            # 持久化市场元信息(名称+slug),供各页显示市场名与 Polymarket 链接。
-            # 该表不随扫描清空,逐次累积覆盖。
-            self.db.upsert_market_meta(
-                condition_id,
-                question,
-                market.get("market_slug", ""),
-                market.get("event_slug", ""),
-            )
-            checked += 1
-            if on_progress:
-                on_progress(checked, len(candidates), f"Checking: {question}")
-            logger.info(
-                "[%d/%d] Checking: %s (rate=$%.0f/day)",
-                checked,
-                len(candidates),
-                question,
-                total_rate,
-            )
-
-            # Step 4: Get precise reward via /rewards/markets/{condition_id}
-            raw_rewards = self.api.get_rewards_for_market(condition_id)
-            market_reward = 0
-            for rd in raw_rewards:
-                for rc in rd.get("rewards_config", []):
-                    market_reward += rc.get("rate_per_day", 0)
-            if not raw_rewards:
-                market_reward = total_rate
-            if market_reward < min_reward:
-                logger.info(
-                    "  Skipped: reward $%.0f < $%.0f", market_reward, min_reward
-                )
-                continue
-
-            # Step 5: Find tokens with price in range
-            valid_tokens = [
-                t
-                for t in tokens
-                if min_price_cents <= float(t.get("price", 0)) * 100 <= max_price_cents
-            ]
-            if not valid_tokens:
-                logger.info(
-                    "  Skipped: no tokens in price range [%.0f, %.0f] cents",
-                    min_price_cents,
-                    max_price_cents,
-                )
-                continue
-
-            # Step 6 & 7: Check each valid token
-            # max_spread is in CENTS (e.g. 3, 4.5) — keep it as a float; do not
-            # int()-truncate (4.5 -> 4 would narrow the reward band).
+            if self.db.is_in_cooldown(wallet_address, condition_id):
+                continue  # 该钱包对此市场仍在冷却(与旧 scan 口径一致)
             max_spread_reward = float(market.get("rewards_max_spread", 2))
             min_size = int(market.get("rewards_min_size", 0))
             neg_risk = market.get("neg_risk", False)
-
+            books = market.get("_orderbooks", {})
+            valid_tokens = [
+                t
+                for t in market.get("tokens", [])
+                if min_price_cents <= float(t.get("price", 0)) * 100 <= max_price_cents
+            ]
             for token in valid_tokens:
                 token_id = token.get("token_id", "")
-                token_price = float(token.get("price", 0))
-                outcome = token.get("outcome", "?")
-
-                # Step 6: Fast spread check
-                spread_val = self.api.get_spread(token_id)
-                if spread_val < 0:
-                    logger.info("  %s: no orderbook", outcome)
+                book = books.get(token_id)
+                if not book:
                     continue
-                if spread_val * 100 >= max_spread_cents:
-                    logger.info(
-                        "  %s: spread %.2f cents >= %.0f cents",
-                        outcome,
-                        spread_val * 100,
-                        max_spread_cents,
-                    )
+                spread_val = book.get("spread", -1)
+                if spread_val < 0 or spread_val * 100 >= max_spread_cents:
                     continue
-
-                # Step 7: Full orderbook
-                try:
-                    orderbook = self.api.get_orderbook(token_id)
-                except Exception as e:
-                    logger.warning("Failed to get orderbook for %s: %s", token_id, e)
-                    continue
-
                 bids = sorted(
-                    orderbook.get("bids", []),
-                    key=lambda x: float(x["price"]),
-                    reverse=True,
+                    book.get("bids", []), key=lambda x: float(x["price"]), reverse=True
                 )
-                asks = sorted(
-                    orderbook.get("asks", []), key=lambda x: float(x["price"])
-                )
+                asks = sorted(book.get("asks", []), key=lambda x: float(x["price"]))
                 if not bids or not asks:
                     continue
-
                 best_bid = float(bids[0]["price"])
                 best_ask = float(asks[0]["price"])
-
-                # Confirm price range with actual best_bid
                 if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
                     continue
-
-                # Calculate reward range and determine order price
-                tick_size_str = orderbook.get("tick_size", "0.01")
+                tick_size_str = book.get("tick_size", "0.01")
                 tick_size = float(tick_size_str)
                 midpoint = (best_bid + best_ask) / 2
-                # Reward band is max_spread CENTS around the midpoint, NOT
-                # max_spread ticks (the latter is ~10x too narrow on 0.1-cent
-                # markets, which then never produce an order price).
                 reward_range_min, reward_range_max = reward_price_range(
                     midpoint, max_spread_reward
                 )
-
-                # Minimum capital to place a reward-qualifying order here:
-                # rewards_min_size x the lowest tradable tick inside the reward
-                # range. Each wallet gates on this at placement time.
                 min_cost = min_size * ceil_to_tick(
                     max(reward_range_min, 0.0), tick_size
                 )
-
                 try:
                     order_price = determine_order_price(
                         bids=bids,
-                        # int tick-count drives the 1-cent coarse-path choice
-                        # (1 cent == 1 tick); unchanged from before. The band
-                        # above already carries the full (fractional) cents.
                         max_spread=int(max_spread_reward),
                         tick_size=tick_size,
                         reward_range_min=reward_range_min,
                         reward_range_max=reward_range_max,
                     )
                 except Exception as e:
-                    logger.warning(
-                        "Strategy error for %s [%s]: %s", question, outcome, e
-                    )
+                    logger.warning("Strategy error for %s: %s", condition_id, e)
                     continue
                 if order_price is None:
                     continue
-
-                entry = {
-                    "market_id": condition_id,
-                    "token_id": token_id,
-                    "market_name": market.get("question", ""),
-                    "outcome": token.get("outcome", ""),
-                    "market_competitiveness": market.get("market_competitiveness", 0),
-                    "end_date": end_date_str,
-                    "daily_reward": market_reward,
-                    "rewards_max_spread": max_spread_reward,
-                    "rewards_min_size": min_size,
-                    "tick_size": tick_size,
-                    "tick_size_str": tick_size_str,
-                    "neg_risk": neg_risk,
-                    "reward_range_min": reward_range_min,
-                    "reward_range_max": reward_range_max,
-                    "order_price": order_price,
-                    "order_size": min_size,
-                    "min_cost": min_cost,
-                }
-                eligible.append(entry)
-                if on_found:
-                    on_found(entry)
-                logger.info(
-                    "  ELIGIBLE: %s [%s] @ %.4f x %d",
-                    question,
-                    outcome,
-                    order_price,
-                    min_size,
+                eligible.append(
+                    {
+                        "market_id": condition_id,
+                        "token_id": token_id,
+                        "market_name": market.get("question", ""),
+                        "outcome": token.get("outcome", ""),
+                        "market_competitiveness": market.get(
+                            "market_competitiveness", 0
+                        ),
+                        "end_date": end_date_str,
+                        "daily_reward": market_reward,
+                        "rewards_max_spread": max_spread_reward,
+                        "rewards_min_size": min_size,
+                        "tick_size": tick_size,
+                        "tick_size_str": tick_size_str,
+                        "neg_risk": neg_risk,
+                        "reward_range_min": reward_range_min,
+                        "reward_range_max": reward_range_max,
+                        "order_price": order_price,
+                        "order_size": min_size,
+                        "min_cost": min_cost,
+                        "tags": market.get("tags", []),
+                    }
                 )
-                # Both tokens can be eligible independently
-
         return eligible
+
+    def scan(self, on_progress=None, on_found=None) -> list[dict]:
+        """兼容 shim:用默认模板采集 + 精筛(老入口,供单模板路径与既有测试)。"""
+        tmpl = self.db.get_template(self.db.get_default_template_id())
+        pool = self.fetch_candidates([tmpl], on_progress=on_progress, on_found=on_found)
+        return self.filter_for_template(pool, tmpl, self.wallet_address)
