@@ -110,6 +110,20 @@ class TestWalletWorkerTick:
 
 
 class TestTestPlaceOrders:
+    class _FakeScanner:
+        """filter_for_template 原样返回候选池(测试里候选已是可下单形状)。
+
+        eligible_markets 现为候选池;test_place_orders 会先 filter_for_template
+        再 place_orders。这些测试不验证精筛逻辑本身(那在 test_scanner.py),
+        故用假精筛原样透传,聚焦 test_place_orders 的钱包选择/下单/异常路径。
+        """
+
+        def __init__(self, api, db, addr):
+            pass
+
+        def filter_for_template(self, pool, tmpl, addr):
+            return list(pool)
+
     def test_no_eligible_markets_returns_scan_hint(self):
         manager, db = _make_manager()
         manager.eligible_markets = []
@@ -127,6 +141,7 @@ class TestTestPlaceOrders:
 
     def test_no_running_worker_builds_transient_api_and_places(self):
         manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
         manager.eligible_markets = [{"market_competitiveness": 0.5, "name": "m"}]
         # engines empty -> first enabled wallet has no running worker;
         # must construct a transient API/worker just to place the orders.
@@ -135,6 +150,8 @@ class TestTestPlaceOrders:
             "engine.manager.PolymarketAPI"
         ) as mock_api_cls, patch(
             "engine.manager.WalletWorker", return_value=fake_worker
+        ), patch(
+            "engine.manager.MarketScanner", self._FakeScanner
         ):
             result = manager.test_place_orders()
         assert result["ok"] is True
@@ -147,6 +164,7 @@ class TestTestPlaceOrders:
 
     def test_places_on_first_enabled_running_worker_with_limit_3(self):
         manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
         manager.eligible_markets = [
             {"market_competitiveness": 0.9, "name": "high"},
             {"market_competitiveness": 0.1, "name": "low"},
@@ -155,7 +173,8 @@ class TestTestPlaceOrders:
         worker.running = True
         # db.list_wallets()[0] is 0xABC (enabled) per _make_manager
         manager.engines = {"0xABC": worker}
-        result = manager.test_place_orders()
+        with patch("engine.manager.MarketScanner", self._FakeScanner):
+            result = manager.test_place_orders()
         assert result["ok"] is True
         worker.place_orders.assert_called_once()
         args, kwargs = worker.place_orders.call_args
@@ -166,12 +185,14 @@ class TestTestPlaceOrders:
 
     def test_place_orders_exception_returns_error_dict(self):
         manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
         manager.eligible_markets = [{"market_competitiveness": 0.5}]
         worker = MagicMock()
         worker.running = True
         worker.place_orders.side_effect = RuntimeError("boom")
         manager.engines = {"0xABC": worker}
-        result = manager.test_place_orders()
+        with patch("engine.manager.MarketScanner", self._FakeScanner):
+            result = manager.test_place_orders()
         assert result["ok"] is False
         assert "boom" in result["message"]
 
@@ -187,10 +208,40 @@ class TestTestPlaceOrders:
         good = MagicMock()
         good.running = True
         manager.engines = {"0xABC": stopped, "0xDEF": good}
-        result = manager.test_place_orders()
+        with patch("engine.manager.MarketScanner", self._FakeScanner):
+            result = manager.test_place_orders()
         assert result["ok"] is True
         good.place_orders.assert_called_once()
         stopped.place_orders.assert_not_called()
+
+    def test_filters_candidate_pool_per_wallet_before_placing(self):
+        # 回归:eligible_markets 是候选池(按市场、无 token_id);test_place_orders
+        # 必须先 filter_for_template 精筛成逐 token eligible,否则 place_orders
+        # 取 token_id 会 KeyError(此前直接把候选池喂给 place_orders)。
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        manager.eligible_markets = [{"condition_id": "A", "tokens": [], "tags": []}]
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xABC": worker}
+
+        filtered = [{"market_id": "A", "token_id": "A-y", "market_competitiveness": 0}]
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def filter_for_template(self, pool, tmpl, addr):
+                return list(filtered)
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            res = manager.test_place_orders()
+
+        assert res["ok"] is True
+        worker.place_orders.assert_called_once()
+        passed = worker.place_orders.call_args[0][0]
+        assert passed == filtered  # 收到的是精筛后的逐 token eligible,而非候选池
+        assert worker.place_orders.call_args[1].get("limit") == 3
 
 
 class TestScanMarketsLastScanTime:

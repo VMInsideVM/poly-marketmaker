@@ -5,6 +5,29 @@ import pytest
 from models.database import Database
 
 
+def test_settings_page_engine_strategy_split_roundtrip(tmp_path):
+    """/api/settings 的拆分机制:引擎键存 settings、策略键存默认模板,GET 合并取回。"""
+    from config import ENGINE_DEFAULTS, TEMPLATE_DEFAULTS
+
+    database = Database(str(tmp_path / "split.db"))
+    database.init()
+    try:
+        data = {"scan_interval_sec": 90, "stop_loss_pct": 7.0, "min_reward_usd": 250.0}
+        engine = {k: v for k, v in data.items() if k in ENGINE_DEFAULTS}
+        strategy = {k: v for k, v in data.items() if k in TEMPLATE_DEFAULTS}
+        database.save_settings(engine)
+        database.save_template(database.get_default_template_id(), strategy)
+        merged = dict(database.get_settings())
+        merged.update(database.get_template(database.get_default_template_id()))
+        assert merged["scan_interval_sec"] == 90
+        assert merged["stop_loss_pct"] == 7.0
+        assert merged["min_reward_usd"] == 250.0
+        # 策略键没有泄漏进引擎级 settings
+        assert "stop_loss_pct" not in database.get_settings()
+    finally:
+        database.close()
+
+
 def test_config_split_engine_and_template_defaults():
     from config import ENGINE_DEFAULTS, TEMPLATE_DEFAULTS, DEFAULTS
 

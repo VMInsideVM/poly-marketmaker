@@ -462,11 +462,6 @@ class EngineManager:
         if not self.eligible_markets:
             return {"ok": False, "message": "请先扫描市场"}
 
-        sorted_markets = sorted(
-            self.eligible_markets,
-            key=lambda m: float(m.get("market_competitiveness", 0) or 0),
-        )
-
         wallet = next((w for w in self.db.list_wallets() if w["enabled"]), None)
         if wallet is None:
             return {"ok": False, "message": "没有启用的钱包"}
@@ -489,6 +484,17 @@ class EngineManager:
             except Exception as e:
                 logger.error("Error building API for test orders: %s", e)
                 return {"ok": False, "message": f"测试挂单失败：{e}"}
+
+        # eligible_markets 现为候选池(按市场、无 token_id/价格);必须先按该钱包
+        # 模板精筛成逐 token 的可下单 eligible,否则 place_orders 取 token_id 会 KeyError。
+        tmpl = self.db.get_template_for(address)
+        scanner = MarketScanner(self._scanner_api, self.db, "")
+        sorted_markets = scanner.filter_for_template(
+            self.eligible_markets, tmpl, address
+        )
+        sorted_markets.sort(
+            key=lambda m: float(m.get("market_competitiveness", 0) or 0)
+        )
 
         try:
             worker.place_orders(sorted_markets, limit=3)
@@ -556,7 +562,12 @@ class EngineManager:
             if not w.get("enabled"):
                 continue
             tmpl = self.db.get_template_for(w["address"])
-            key = tuple(sorted(tmpl.get("excluded_categories", []) or []))
+            # 去重键须含采集器实际用到的两个维度:品类排除集 + 奖励下限
+            # (min_reward_usd 决定预筛 min_floor);只按品类去重会丢掉下限差异。
+            key = (
+                tuple(sorted(tmpl.get("excluded_categories", []) or [])),
+                tmpl.get("min_reward_usd", 0),
+            )
             seen[key] = tmpl
         if seen:
             return list(seen.values())
