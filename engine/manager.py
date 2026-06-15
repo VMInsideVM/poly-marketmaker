@@ -122,10 +122,10 @@ class WalletWorker:
         # Hard per-wallet cap on the TOTAL open buy orders. Read live from
         # settings (not the constructor snapshot) so a config change takes
         # effect on the next placement without restarting the engine.
-        settings = self.db.get_settings()
-        max_buys = int(settings.get("max_buy_orders_per_wallet", 5))
-        order_size_mode = settings.get("order_size_mode", "min")
-        order_size_custom_usd = float(settings.get("order_size_custom_usd", 0) or 0)
+        tmpl = self.db.get_template_for(self.wallet_address)
+        max_buys = int(tmpl.get("max_buy_orders_per_wallet", 5))
+        order_size_mode = tmpl.get("order_size_mode", "min")
+        order_size_custom_usd = float(tmpl.get("order_size_custom_usd", 0) or 0)
 
         # If existing buys already exceed the cap (e.g. the user just lowered
         # it), cancel the excess down to the cap. Keep the oldest orders
