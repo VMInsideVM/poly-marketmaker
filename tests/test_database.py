@@ -5,6 +5,24 @@ import pytest
 from models.database import Database
 
 
+def test_config_split_engine_and_template_defaults():
+    from config import ENGINE_DEFAULTS, TEMPLATE_DEFAULTS, DEFAULTS
+
+    assert set(ENGINE_DEFAULTS) == {
+        "scan_interval_sec",
+        "fill_check_interval_sec",
+        "cooldown_minutes",
+        "rewards_cache_ttl_sec",
+    }
+    assert TEMPLATE_DEFAULTS["excluded_categories"] == ["sports", "esports", "weather"]
+    assert TEMPLATE_DEFAULTS["min_reward_usd"] == 100.0
+    assert TEMPLATE_DEFAULTS["stop_loss_pct"] == 15.0
+    # 向后兼容:DEFAULTS 仍是两者合并(get_settings 在最后一个任务前仍用它)
+    assert DEFAULTS["scan_interval_sec"] == 30
+    assert DEFAULTS["min_reward_usd"] == 100.0
+    assert set(ENGINE_DEFAULTS) & set(TEMPLATE_DEFAULTS) == set()
+
+
 @pytest.fixture
 def db(tmp_path):
     db_path = str(tmp_path / "test.db")
