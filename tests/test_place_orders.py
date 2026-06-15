@@ -5,12 +5,15 @@ from engine.manager import WalletWorker
 
 
 def _worker(api, db, cap=5):
-    # The buy-order cap is read live from db.get_settings() at placement time
+    # The buy-order cap is read live from db.get_template_for() at placement time
     # (not the constructor snapshot), so tests seed it on the db mock.
-    db.get_settings.return_value = {
+    db.get_template_for.return_value = {
         "max_buy_orders_per_wallet": cap,
-        "cooldown_minutes": 20,
         "order_size_mode": "min",
+        "order_size_custom_usd": 0.0,
+    }
+    db.get_settings.return_value = {
+        "cooldown_minutes": 20,
     }
     db.get_blacklist_ids.return_value = set()
     api.get_user_positions.return_value = []  # default: no held positions
@@ -67,10 +70,13 @@ def test_no_limit_places_on_all_markets_regression():
 
 
 def _worker_capped(api, db, cap):
-    db.get_settings.return_value = {
+    db.get_template_for.return_value = {
         "max_buy_orders_per_wallet": cap,
-        "cooldown_minutes": 20,
         "order_size_mode": "min",
+        "order_size_custom_usd": 0.0,
+    }
+    db.get_settings.return_value = {
+        "cooldown_minutes": 20,
     }
     db.get_blacklist_ids.return_value = set()
     api.get_user_positions.return_value = []  # default: no held positions
@@ -203,7 +209,7 @@ def test_skipped_markets_do_not_count_toward_limit():
 
 
 def test_cap_read_live_from_db_not_constructor_snapshot():
-    # The cap must be read live from db.get_settings() so a config change takes
+    # The cap must be read live from db.get_template_for() so a config change takes
     # effect on the next placement without restarting the engine. Constructor
     # snapshot says 10, live DB says 2 -> only 2 buys are placed.
     api = MagicMock()
@@ -219,9 +225,10 @@ def test_cap_read_live_from_db_not_constructor_snapshot():
         "0xWALLET",
         {"fill_check_interval_sec": 5, "max_buy_orders_per_wallet": 10},
     )
-    db.get_settings.return_value = {
+    db.get_template_for.return_value = {
         "max_buy_orders_per_wallet": 2,
-        "cooldown_minutes": 20,
+        "order_size_mode": "min",
+        "order_size_custom_usd": 0.0,
     }
     markets = [_market(i) for i in range(5)]
     with patch("engine.strategy.determine_order_price", return_value=0.40):
@@ -307,7 +314,7 @@ def test_order_size_uses_full_balance():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
     worker = _worker(api, db)
-    db.get_settings.return_value["order_size_mode"] = "balance"
+    db.get_template_for.return_value["order_size_mode"] = "balance"
     with patch("engine.strategy.determine_order_price", return_value=0.50):
         worker.place_orders([_market(0)])
     api.place_limit_buy.assert_called_once()
@@ -323,7 +330,7 @@ def test_balance_not_decremented_across_markets():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
     worker = _worker(api, db)
-    db.get_settings.return_value["order_size_mode"] = "balance"
+    db.get_template_for.return_value["order_size_mode"] = "balance"
     markets = [_market(i) for i in range(3)]
     with patch("engine.strategy.determine_order_price", return_value=0.50):
         worker.place_orders(markets)
@@ -340,7 +347,7 @@ def test_skip_when_full_balance_below_min_reward_size():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 3.0  # floor(3.0/0.50)=6 份
     worker = _worker(api, db)
-    db.get_settings.return_value["order_size_mode"] = "balance"
+    db.get_template_for.return_value["order_size_mode"] = "balance"
     m = _market(0)
     m["rewards_min_size"] = 10  # 需要 >=10,只买得起 6 -> 跳过
     with patch("engine.strategy.determine_order_price", return_value=0.50):
@@ -357,7 +364,7 @@ def test_place_buy_action_records_full_size():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
     worker = _worker(api, db)
-    db.get_settings.return_value["order_size_mode"] = "balance"
+    db.get_template_for.return_value["order_size_mode"] = "balance"
     with patch("engine.strategy.determine_order_price", return_value=0.50):
         worker.place_orders([_market(0)])
     pb = next(
@@ -377,7 +384,7 @@ def test_order_size_floors_on_inexact_division():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
     worker = _worker(api, db)
-    db.get_settings.return_value["order_size_mode"] = "balance"
+    db.get_template_for.return_value["order_size_mode"] = "balance"
     with patch("engine.strategy.determine_order_price", return_value=0.30):
         worker.place_orders([_market(0)])
     api.place_limit_buy.assert_called_once()
@@ -473,8 +480,8 @@ def test_custom_mode_uses_dollar_cap():
     api.get_orderbook.return_value = _ok_orderbook()
     api.get_balance.return_value = 1000.0
     worker = _worker(api, db)
-    db.get_settings.return_value["order_size_mode"] = "custom"
-    db.get_settings.return_value["order_size_custom_usd"] = 50.0
+    db.get_template_for.return_value["order_size_mode"] = "custom"
+    db.get_template_for.return_value["order_size_custom_usd"] = 50.0
     with patch("engine.strategy.determine_order_price", return_value=0.50):
         worker.place_orders([_market(0)])
     api.place_limit_buy.assert_called_once()

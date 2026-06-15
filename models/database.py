@@ -3,7 +3,7 @@
 import sqlite3
 import json
 import time
-from config import DEFAULTS
+from config import DEFAULTS, ENGINE_DEFAULTS, TEMPLATE_DEFAULTS
 
 
 class Database:
@@ -114,6 +114,7 @@ class Database:
                 order_size INTEGER NOT NULL,
                 min_cost REAL DEFAULT 0,
                 end_date TEXT DEFAULT '',
+                tags TEXT DEFAULT '[]',
                 scanned_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
             CREATE TABLE IF NOT EXISTS market_meta (
@@ -127,6 +128,17 @@ class Database:
                 condition_id TEXT PRIMARY KEY,
                 note TEXT NOT NULL DEFAULT '',
                 added_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+            );
+            CREATE TABLE IF NOT EXISTS templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+            );
+            CREATE TABLE IF NOT EXISTS template_settings (
+                template_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (template_id, key)
             );
         """
         )
@@ -151,15 +163,44 @@ class Database:
         if em_cols and "min_cost" not in em_cols:
             c.execute("ALTER TABLE eligible_markets ADD COLUMN min_cost REAL DEFAULT 0")
             self.conn.commit()
+        c.execute("PRAGMA table_info(eligible_markets)")
+        em_cols2 = {row[1] for row in c.fetchall()}
+        if em_cols2 and "tags" not in em_cols2:
+            c.execute("ALTER TABLE eligible_markets ADD COLUMN tags TEXT DEFAULT '[]'")
+            self.conn.commit()
+        c.execute("PRAGMA table_info(wallets)")
+        wcols = {row[1] for row in c.fetchall()}
+        if "template_id" not in wcols:
+            c.execute("ALTER TABLE wallets ADD COLUMN template_id INTEGER")
+            self.conn.commit()
+        c.execute("SELECT COUNT(*) AS n FROM templates")
+        if c.fetchone()["n"] == 0:
+            c.execute(
+                "INSERT INTO templates (name) VALUES (?)", (self.DEFAULT_TEMPLATE_NAME,)
+            )
+            default_id = c.lastrowid
+            c.execute("SELECT key, value FROM settings")
+            for row in list(c.fetchall()):
+                if row["key"] in TEMPLATE_DEFAULTS:
+                    c.execute(
+                        "INSERT OR REPLACE INTO template_settings "
+                        "(template_id, key, value) VALUES (?, ?, ?)",
+                        (default_id, row["key"], row["value"]),
+                    )
+                    c.execute("DELETE FROM settings WHERE key = ?", (row["key"],))
+            self.conn.commit()
 
     # --- Settings ---
 
     def get_settings(self) -> dict:
+        """引擎级全局参数(策略级参数见 get_template_for)。"""
         c = self.conn.cursor()
         c.execute("SELECT key, value FROM settings")
         stored = {row["key"]: json.loads(row["value"]) for row in c.fetchall()}
-        result = dict(DEFAULTS)
-        result.update(stored)
+        result = dict(ENGINE_DEFAULTS)
+        for k in ENGINE_DEFAULTS:
+            if k in stored:
+                result[k] = stored[k]
         return result
 
     def save_settings(self, settings: dict):
@@ -169,6 +210,83 @@ class Database:
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, json.dumps(value)),
             )
+        self.conn.commit()
+
+    # --- Templates ---
+
+    DEFAULT_TEMPLATE_NAME = "默认"
+
+    def create_template(self, name: str) -> int:
+        c = self.conn.cursor()
+        c.execute("INSERT INTO templates (name) VALUES (?)", (name,))
+        self.conn.commit()
+        return c.lastrowid
+
+    def list_templates(self) -> list[dict]:
+        c = self.conn.cursor()
+        c.execute("SELECT id, name, created_at FROM templates ORDER BY id")
+        return [dict(row) for row in c.fetchall()]
+
+    def get_default_template_id(self) -> int:
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT id FROM templates WHERE name = ?", (self.DEFAULT_TEMPLATE_NAME,)
+        )
+        row = c.fetchone()
+        if row is None:
+            return self.create_template(self.DEFAULT_TEMPLATE_NAME)
+        return row["id"]
+
+    def get_template(self, template_id: int) -> dict:
+        """TEMPLATE_DEFAULTS 合并该模板的覆盖键(逐键 + JSON 值)。"""
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT key, value FROM template_settings WHERE template_id = ?",
+            (template_id,),
+        )
+        stored = {row["key"]: json.loads(row["value"]) for row in c.fetchall()}
+        result = dict(TEMPLATE_DEFAULTS)
+        result.update(stored)
+        return result
+
+    def save_template(self, template_id: int, values: dict):
+        c = self.conn.cursor()
+        for key, value in values.items():
+            c.execute(
+                "INSERT OR REPLACE INTO template_settings (template_id, key, value) "
+                "VALUES (?, ?, ?)",
+                (template_id, key, json.dumps(value)),
+            )
+        self.conn.commit()
+
+    def set_wallet_template(self, address: str, template_id: int):
+        c = self.conn.cursor()
+        c.execute(
+            "UPDATE wallets SET template_id = ? WHERE address = ?",
+            (template_id, address),
+        )
+        self.conn.commit()
+
+    def get_template_for(self, address: str) -> dict:
+        """按钱包地址取其绑定模板;NULL/未知钱包回落默认模板。"""
+        c = self.conn.cursor()
+        c.execute("SELECT template_id FROM wallets WHERE address = ?", (address,))
+        row = c.fetchone()
+        tid = row["template_id"] if row and row["template_id"] is not None else None
+        if tid is None:
+            tid = self.get_default_template_id()
+        return self.get_template(tid)
+
+    def delete_template(self, template_id: int):
+        if template_id == self.get_default_template_id():
+            raise ValueError("默认模板不可删除")
+        c = self.conn.cursor()
+        c.execute(
+            "UPDATE wallets SET template_id = NULL WHERE template_id = ?",
+            (template_id,),
+        )
+        c.execute("DELETE FROM template_settings WHERE template_id = ?", (template_id,))
+        c.execute("DELETE FROM templates WHERE id = ?", (template_id,))
         self.conn.commit()
 
     # --- Auth ---
@@ -222,8 +340,8 @@ class Database:
     def list_wallets(self) -> list[dict]:
         c = self.conn.cursor()
         c.execute(
-            "SELECT address, encrypted_key, funder, signature_type, enabled, created_at "
-            "FROM wallets"
+            "SELECT address, encrypted_key, funder, signature_type, enabled, "
+            "created_at, template_id FROM wallets"
         )
         return [dict(row) for row in c.fetchall()]
 
@@ -461,8 +579,8 @@ class Database:
                  daily_reward, rewards_max_spread, rewards_min_size,
                  tick_size, tick_size_str, neg_risk,
                  reward_range_min, reward_range_max,
-                 order_price, order_size, min_cost, end_date, scanned_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 order_price, order_size, min_cost, end_date, tags, scanned_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     m.get("market_id", ""),
                     m.get("token_id", ""),
@@ -481,6 +599,7 @@ class Database:
                     m.get("order_size", 0),
                     m.get("min_cost", 0),
                     m.get("end_date", ""),
+                    json.dumps(m.get("tags", []) or []),
                     now,
                 ),
             )
@@ -490,7 +609,15 @@ class Database:
         """Get all eligible markets from last scan."""
         c = self.conn.cursor()
         c.execute("SELECT * FROM eligible_markets ORDER BY market_competitiveness DESC")
-        return [dict(row) for row in c.fetchall()]
+        out = []
+        for row in c.fetchall():
+            d = dict(row)
+            try:
+                d["tags"] = json.loads(d.get("tags") or "[]")
+            except (ValueError, TypeError):
+                d["tags"] = []
+            out.append(d)
+        return out
 
     # --- Market Meta (condition_id -> name + slugs, persistent across scans) ---
 

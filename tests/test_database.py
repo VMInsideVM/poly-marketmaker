@@ -5,6 +5,47 @@ import pytest
 from models.database import Database
 
 
+def test_settings_page_engine_strategy_split_roundtrip(tmp_path):
+    """/api/settings 的拆分机制:引擎键存 settings、策略键存默认模板,GET 合并取回。"""
+    from config import ENGINE_DEFAULTS, TEMPLATE_DEFAULTS
+
+    database = Database(str(tmp_path / "split.db"))
+    database.init()
+    try:
+        data = {"scan_interval_sec": 90, "stop_loss_pct": 7.0, "min_reward_usd": 250.0}
+        engine = {k: v for k, v in data.items() if k in ENGINE_DEFAULTS}
+        strategy = {k: v for k, v in data.items() if k in TEMPLATE_DEFAULTS}
+        database.save_settings(engine)
+        database.save_template(database.get_default_template_id(), strategy)
+        merged = dict(database.get_settings())
+        merged.update(database.get_template(database.get_default_template_id()))
+        assert merged["scan_interval_sec"] == 90
+        assert merged["stop_loss_pct"] == 7.0
+        assert merged["min_reward_usd"] == 250.0
+        # 策略键没有泄漏进引擎级 settings
+        assert "stop_loss_pct" not in database.get_settings()
+    finally:
+        database.close()
+
+
+def test_config_split_engine_and_template_defaults():
+    from config import ENGINE_DEFAULTS, TEMPLATE_DEFAULTS, DEFAULTS
+
+    assert set(ENGINE_DEFAULTS) == {
+        "scan_interval_sec",
+        "fill_check_interval_sec",
+        "cooldown_minutes",
+        "rewards_cache_ttl_sec",
+    }
+    assert TEMPLATE_DEFAULTS["excluded_categories"] == ["sports", "esports", "weather"]
+    assert TEMPLATE_DEFAULTS["min_reward_usd"] == 100.0
+    assert TEMPLATE_DEFAULTS["stop_loss_pct"] == 15.0
+    # 向后兼容:DEFAULTS 仍是两者合并(get_settings 在最后一个任务前仍用它)
+    assert DEFAULTS["scan_interval_sec"] == 30
+    assert DEFAULTS["min_reward_usd"] == 100.0
+    assert set(ENGINE_DEFAULTS) & set(TEMPLATE_DEFAULTS) == set()
+
+
 @pytest.fixture
 def db(tmp_path):
     db_path = str(tmp_path / "test.db")
@@ -15,27 +56,76 @@ def db(tmp_path):
 
 
 class TestSettings:
-    def test_get_default_settings(self, db):
+    def test_get_default_settings_engine_only(self, db):
         settings = db.get_settings()
-        assert settings["min_reward_usd"] == 100.0
-        assert settings["stop_loss_pct"] == 15.0
+        assert settings["scan_interval_sec"] == 30
+        assert settings["cooldown_minutes"] == 20
+        assert "stop_loss_pct" not in settings
+        assert "min_reward_usd" not in settings
 
-    def test_get_settings_includes_order_size_defaults(self, db):
-        settings = db.get_settings()
-        assert settings["order_size_mode"] == "min"
-        assert settings["order_size_custom_usd"] == 0.0
-
-    def test_save_and_load_settings(self, db):
-        db.save_settings({"min_reward_usd": 200.0, "stop_loss_pct": 10.0})
-        settings = db.get_settings()
-        assert settings["min_reward_usd"] == 200.0
-        assert settings["stop_loss_pct"] == 10.0
+    def test_save_and_load_engine_settings(self, db):
+        db.save_settings({"scan_interval_sec": 60})
+        assert db.get_settings()["scan_interval_sec"] == 60
 
     def test_save_password_hash(self, db):
         db.save_password("hashed_pw", b"salt_bytes")
         pw_hash, salt = db.get_password()
         assert pw_hash == "hashed_pw"
         assert salt == b"salt_bytes"
+
+
+class TestSettingsToTemplateMigration:
+    def _make_legacy_state(self, db):
+        """模拟老库:templates 空,settings 里有策略键+引擎键。"""
+        import json as _json
+
+        c = db.conn.cursor()
+        c.execute("DELETE FROM template_settings")
+        c.execute("DELETE FROM templates")
+        c.execute("DELETE FROM settings")
+        legacy = {
+            "stop_loss_pct": 10.0,
+            "min_reward_usd": 200.0,
+            "order_size_mode": "balance",
+            "scan_interval_sec": 45,
+        }
+        for k, v in legacy.items():
+            c.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?)", (k, _json.dumps(v))
+            )
+        db.conn.commit()
+
+    def test_strategy_keys_move_to_default_template(self, db):
+        self._make_legacy_state(db)
+        db._migrate()
+        t = db.get_template(db.get_default_template_id())
+        assert t["stop_loss_pct"] == 10.0
+        assert t["min_reward_usd"] == 200.0
+        assert t["order_size_mode"] == "balance"
+
+    def test_engine_keys_stay_in_settings(self, db):
+        self._make_legacy_state(db)
+        db._migrate()
+        assert db.get_settings()["scan_interval_sec"] == 45
+
+    def test_strategy_keys_removed_from_settings(self, db):
+        self._make_legacy_state(db)
+        db._migrate()
+        c = db.conn.cursor()
+        c.execute("SELECT key FROM settings")
+        keys = {row["key"] for row in c.fetchall()}
+        assert "stop_loss_pct" not in keys and "min_reward_usd" not in keys
+
+    def test_migration_idempotent(self, db):
+        self._make_legacy_state(db)
+        db._migrate()
+        db._migrate()
+        assert len([t for t in db.list_templates() if t["name"] == "默认"]) == 1
+        assert db.get_template(db.get_default_template_id())["stop_loss_pct"] == 10.0
+
+    def test_fresh_install_no_copy(self, db):
+        t = db.get_template(db.get_default_template_id())
+        assert t["stop_loss_pct"] == 15.0  # 默认值,非迁移值
 
 
 class TestWallets:
@@ -236,6 +326,39 @@ class TestEligibleMarkets:
         assert len(rows) == 1
         assert rows[0]["min_cost"] == 29.0
 
+    def test_save_and_get_tags(self, db):
+        db.save_eligible_markets(
+            [
+                {
+                    "market_id": "A",
+                    "token_id": "t1",
+                    "market_name": "M",
+                    "outcome": "Yes",
+                    "daily_reward": 50,
+                    "order_price": 0,
+                    "order_size": 0,
+                    "tags": ["sports"],
+                }
+            ]
+        )
+        assert db.get_eligible_markets()[0]["tags"] == ["sports"]
+
+    def test_tags_default_empty_list(self, db):
+        db.save_eligible_markets(
+            [
+                {
+                    "market_id": "B",
+                    "token_id": "t2",
+                    "market_name": "M2",
+                    "outcome": "No",
+                    "daily_reward": 50,
+                    "order_price": 0,
+                    "order_size": 0,
+                }
+            ]
+        )
+        assert db.get_eligible_markets()[0]["tags"] == []
+
 
 class TestMarketMeta:
     def test_upsert_and_get(self, db):
@@ -298,3 +421,80 @@ class TestBlacklist:
     def test_empty_when_none(self, db):
         assert db.get_blacklist_ids() == set()
         assert db.get_blacklist() == []
+
+
+class TestTemplateCRUD:
+    def test_create_and_list_templates(self, db):
+        tid = db.create_template("保守")
+        assert isinstance(tid, int)
+        assert "保守" in [t["name"] for t in db.list_templates()]
+
+    def test_create_duplicate_name_raises(self, db):
+        db.create_template("保守")
+        with pytest.raises(Exception):
+            db.create_template("保守")
+
+    def test_save_and_get_template_merges_defaults(self, db):
+        tid = db.create_template("激进")
+        db.save_template(tid, {"max_spread_cents": 6.0, "stop_loss_pct": 8.0})
+        t = db.get_template(tid)
+        assert t["max_spread_cents"] == 6.0
+        assert t["stop_loss_pct"] == 8.0
+        assert t["min_reward_usd"] == 100.0
+        assert t["excluded_categories"] == ["sports", "esports", "weather"]
+        assert "scan_interval_sec" not in t
+
+    def test_default_template_exists_after_init(self, db):
+        assert isinstance(db.get_default_template_id(), int)
+        assert "默认" in [t["name"] for t in db.list_templates()]
+
+    def test_set_wallet_template_and_get_template_for(self, db):
+        db.add_wallet("0xAAA", "k")
+        tid = db.create_template("激进")
+        db.save_template(tid, {"max_spread_cents": 6.0})
+        db.set_wallet_template("0xAAA", tid)
+        assert db.get_template_for("0xAAA")["max_spread_cents"] == 6.0
+
+    def test_get_template_for_null_falls_back_to_default(self, db):
+        db.add_wallet("0xBBB", "k")
+        t = db.get_template_for("0xBBB")
+        assert t["min_reward_usd"] == 100.0
+        assert t["max_spread_cents"] == 3.0
+
+    def test_get_template_for_unknown_wallet_falls_back_to_default(self, db):
+        assert db.get_template_for("0xNOPE")["max_spread_cents"] == 3.0
+
+    def test_delete_default_template_rejected(self, db):
+        with pytest.raises(Exception):
+            db.delete_template(db.get_default_template_id())
+
+    def test_delete_template_rebinds_wallets_to_default(self, db):
+        db.add_wallet("0xCCC", "k")
+        tid = db.create_template("临时")
+        db.set_wallet_template("0xCCC", tid)
+        db.delete_template(tid)
+        w = next(w for w in db.list_wallets() if w["address"] == "0xCCC")
+        assert w["template_id"] is None
+        assert db.get_template_for("0xCCC")["max_spread_cents"] == 3.0
+
+
+class TestTemplateSchema:
+    def test_templates_table_exists(self, db):
+        c = db.conn.cursor()
+        c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='templates'"
+        )
+        assert c.fetchone() is not None
+
+    def test_template_settings_table_exists(self, db):
+        c = db.conn.cursor()
+        c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='template_settings'"
+        )
+        assert c.fetchone() is not None
+
+    def test_wallets_has_template_id_column(self, db):
+        c = db.conn.cursor()
+        c.execute("PRAGMA table_info(wallets)")
+        cols = {row[1] for row in c.fetchall()}
+        assert "template_id" in cols

@@ -125,7 +125,8 @@ def main():
     print(f"\n钱包: {api.get_address()}")
     print(f"余额: {balance:.2f} pUSD")
 
-    settings = db.get_settings()
+    # 策略级筛选参数现存于模板(默认模板);引擎级参数才在 get_settings。
+    settings = db.get_template(db.get_default_template_id())
     min_reward = settings["min_reward_usd"]
     max_spread_cents = settings["max_spread_cents"]
     min_price_cents = settings["min_price_cents"]

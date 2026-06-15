@@ -344,7 +344,7 @@ class OrderMonitor:
 
     # --- Step 2: stop-loss via Data API positions ---
     def check_stop_loss(self):
-        settings = self.db.get_settings()
+        settings = self.db.get_template_for(self.wallet_address)
         try:
             positions = self.api.get_user_positions(self._funder())
         except Exception as e:
@@ -583,7 +583,7 @@ class OrderMonitor:
             )
             logger.info("[Step3] blacklist cancel %s market %s", o.get("id"), cid)
             return
-        settings = self.db.get_settings()
+        settings = self.db.get_template_for(self.wallet_address)
         ob = self.api.get_orderbook(token_id)
         bids = sorted(ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True)
         asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))

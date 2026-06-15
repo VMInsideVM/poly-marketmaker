@@ -244,14 +244,25 @@ def api_monitor_status():
 @app.route("/api/settings", methods=["GET"])
 @login_required
 def api_get_settings():
-    return jsonify(db.get_settings())
+    # 引擎级(settings)+ 默认模板的策略级参数合并返回,供现有「全局参数」表单
+    # 编辑。多模板 UI 留给 SP6;此处把默认模板当作全局策略参数面板。
+    merged = dict(db.get_settings())
+    merged.update(db.get_template(db.get_default_template_id()))
+    return jsonify(merged)
 
 
 @app.route("/api/settings", methods=["POST"])
 @login_required
 def api_save_settings():
-    data = request.get_json()
-    db.save_settings(data)
+    from config import ENGINE_DEFAULTS, TEMPLATE_DEFAULTS
+
+    data = request.get_json() or {}
+    engine = {k: v for k, v in data.items() if k in ENGINE_DEFAULTS}
+    strategy = {k: v for k, v in data.items() if k in TEMPLATE_DEFAULTS}
+    if engine:
+        db.save_settings(engine)
+    if strategy:
+        db.save_template(db.get_default_template_id(), strategy)
     return jsonify(
         {
             "ok": True,
@@ -629,9 +640,10 @@ def api_cancel_all_buys():
 @login_required
 def api_get_positions():
     wallet = request.args.get("wallet")
-    sl = db.get_settings()["stop_loss_pct"] / 100.0
     out = []
     for addr, api in _wallet_apis(wallet).items():
+        # 止损比例是策略级参数,按各钱包自己的模板取(每钱包可不同)。
+        sl = db.get_template_for(addr)["stop_loss_pct"] / 100.0
         try:
             for p in api.get_user_positions(api.get_funder()):
                 avg = float(p.get("avgPrice", 0) or 0)

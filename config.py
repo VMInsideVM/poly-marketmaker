@@ -3,21 +3,30 @@
 import os
 import sys
 
-DEFAULTS = {
+# 引擎级参数:全局单值,所有钱包共用,存 settings 表。
+ENGINE_DEFAULTS = {
+    "scan_interval_sec": 30,
+    "fill_check_interval_sec": 5,
+    "cooldown_minutes": 20,
+    "rewards_cache_ttl_sec": 600,
+}
+
+# 策略级参数:每钱包/每模板取值,存 template_settings 表。
+TEMPLATE_DEFAULTS = {
     "min_reward_usd": 100.0,
     "max_spread_cents": 3.0,
     "min_price_cents": 10.0,
     "max_price_cents": 50.0,
     "min_settlement_days": 4,
     "stop_loss_pct": 15.0,
-    "scan_interval_sec": 30,
-    "fill_check_interval_sec": 5,
-    "cooldown_minutes": 20,
-    "rewards_cache_ttl_sec": 600,
     "max_buy_orders_per_wallet": 5,
     "order_size_mode": "min",
     "order_size_custom_usd": 0.0,
+    "excluded_categories": ["sports", "esports", "weather"],
 }
+
+# 向后兼容:仍暴露合并后的 DEFAULTS。get_settings() 在最后一个任务前仍以此为基准。
+DEFAULTS = {**ENGINE_DEFAULTS, **TEMPLATE_DEFAULTS}
 
 
 def _data_dir() -> str:

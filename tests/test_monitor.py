@@ -18,6 +18,7 @@ def _make_monitor(settings=None):
     if settings:
         default_settings.update(settings)
     db.get_settings.return_value = default_settings
+    db.get_template_for.return_value = default_settings
     db.get_blacklist_ids.return_value = set()
     # funder address via api.get_funder()
     api.get_funder.return_value = "0xFUNDER"
@@ -1846,3 +1847,25 @@ class TestStep3Blacklist:
         api.cancel_orders.assert_called_once_with(["o1"])
         api.place_limit_buy.assert_not_called()
         api.get_orderbook.assert_not_called()  # 命中黑名单提前返回,不取盘口
+
+
+class TestMonitorReadsTemplate:
+    def test_stop_loss_pct_from_template(self):
+        from engine.monitor import OrderMonitor
+        from unittest.mock import MagicMock
+
+        db = MagicMock()
+        db.get_template_for.return_value = {
+            "stop_loss_pct": 8.0,
+            "min_price_cents": 10.0,
+            "max_price_cents": 90.0,
+        }
+        db.get_settings.return_value = {
+            "cooldown_minutes": 20,
+            "rewards_cache_ttl_sec": 600,
+        }
+        api = MagicMock()
+        api.get_user_positions.return_value = []
+        mon = OrderMonitor(api, db, "0xW")
+        mon.check_stop_loss()
+        db.get_template_for.assert_called_with("0xW")
