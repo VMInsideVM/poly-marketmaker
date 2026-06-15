@@ -155,10 +155,10 @@ function renderEligibleTable() {
         <tr>
             <td>${i + 1}</td>
             <td>${marketCell(m.market_name, m.market_id, m.market_url)}</td>
-            <td>${m.outcome}</td>
-            <td>$${m.daily_reward.toFixed(2)}/天</td>
-            <td>${m.order_price.toFixed(4)}</td>
-            <td>${m.order_size}</td>
+            <td>${m.outcome || ''}</td>
+            <td>$${(m.daily_reward ?? 0).toFixed(2)}/天</td>
+            <td>${m.order_price != null ? m.order_price.toFixed(4) : '—'}</td>
+            <td>${m.order_size ?? '—'}</td>
             <td>${m.market_competitiveness || '-'}</td>
         </tr>
     `).join('');

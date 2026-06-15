@@ -105,6 +105,12 @@ class MarketScanner:
             except Exception as e:
                 logger.warning("Precise reward fetch failed for %s: %s", cid, e)
             market["market_reward"] = market_reward
+            # 候选池展示就绪键(供 /api/eligible 与持久化显示市场名/奖励)。
+            # 不含 order_price/outcome:候选池是按市场的,单价改为每钱包下单时
+            # 实时计算(见 filter_for_template),前端对缺失价格以「—」兜底。
+            market["market_id"] = cid
+            market["market_name"] = market.get("question", "")
+            market["daily_reward"] = market_reward
             if not skip_orderbook:
                 market["_orderbooks"] = self._fetch_orderbooks(market)
             checked += 1

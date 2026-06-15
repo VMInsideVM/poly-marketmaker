@@ -629,9 +629,10 @@ def api_cancel_all_buys():
 @login_required
 def api_get_positions():
     wallet = request.args.get("wallet")
-    sl = db.get_settings()["stop_loss_pct"] / 100.0
     out = []
     for addr, api in _wallet_apis(wallet).items():
+        # 止损比例是策略级参数,按各钱包自己的模板取(每钱包可不同)。
+        sl = db.get_template_for(addr)["stop_loss_pct"] / 100.0
         try:
             for p in api.get_user_positions(api.get_funder()):
                 avg = float(p.get("avgPrice", 0) or 0)
