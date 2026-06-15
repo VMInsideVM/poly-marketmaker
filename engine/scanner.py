@@ -1,13 +1,19 @@
-"""engine/scanner.py — Market scanner that filters eligible markets.
+"""engine/scanner.py — Market scanner: shared candidate collection + per-wallet filtering.
 
-Filtering flow (matches test_live.py logic):
-1. /rewards/markets/multi — fetch markets sorted by rate_per_day DESC
-2. Filter: total rate_per_day >= min_reward (from rewards_config sum)
-3. Filter: settlement date (only exclude 0~4 days, negative = pass)
-4. /rewards/markets/{condition_id} — get precise per-market reward
-5. Filter: at least one token price in [min_price, max_price]
-6. GET /spread — fast spread check per token
-7. GET /book — full orderbook for strategy calculation
+Two-phase design:
+- fetch_candidates(templates): wallet-independent network work. Fetches all reward
+  markets, excludes blacklisted-category markets at collection time (the category
+  intersection across templates), tags survivors, pre-filters by the loosest reward
+  floor, fetches precise per-market reward, and caches each token's orderbook. Does
+  NOT compute order prices.
+- filter_for_template(pool, template, wallet): per-wallet CPU work. Applies the
+  template's thresholds (reward floor, settlement, price band, spread), narrows by the
+  template's excluded_categories, checks cooldown, then prices via determine_order_price.
+- scan(): backward-compatible shim = fetch_candidates([default template]) +
+  filter_for_template(pool, default template).
+
+Optional on_progress(checked, total, msg) / on_found(market) callbacks fire per
+candidate during fetch_candidates.
 """
 
 import re
@@ -109,6 +115,11 @@ class MarketScanner:
             if on_found:
                 on_found(market)
             out.append(market)
+        logger.info(
+            "fetch_candidates: %d candidates (queried %d categories)",
+            len(out),
+            len(queried),
+        )
         return out
 
     def _fetch_orderbooks(self, market: dict) -> dict:
@@ -235,6 +246,12 @@ class MarketScanner:
                         "tags": market.get("tags", []),
                     }
                 )
+        logger.info(
+            "filter_for_template(%s): %d eligible from %d candidates",
+            wallet_address,
+            len(eligible),
+            len(candidate_pool),
+        )
         return eligible
 
     def scan(self, on_progress=None, on_found=None) -> list[dict]:
