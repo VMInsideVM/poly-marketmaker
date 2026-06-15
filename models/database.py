@@ -178,16 +178,29 @@ class Database:
             c.execute(
                 "INSERT INTO templates (name) VALUES (?)", (self.DEFAULT_TEMPLATE_NAME,)
             )
+            default_id = c.lastrowid
+            c.execute("SELECT key, value FROM settings")
+            for row in list(c.fetchall()):
+                if row["key"] in TEMPLATE_DEFAULTS:
+                    c.execute(
+                        "INSERT OR REPLACE INTO template_settings "
+                        "(template_id, key, value) VALUES (?, ?, ?)",
+                        (default_id, row["key"], row["value"]),
+                    )
+                    c.execute("DELETE FROM settings WHERE key = ?", (row["key"],))
             self.conn.commit()
 
     # --- Settings ---
 
     def get_settings(self) -> dict:
+        """引擎级全局参数(策略级参数见 get_template_for)。"""
         c = self.conn.cursor()
         c.execute("SELECT key, value FROM settings")
         stored = {row["key"]: json.loads(row["value"]) for row in c.fetchall()}
-        result = dict(DEFAULTS)
-        result.update(stored)
+        result = dict(ENGINE_DEFAULTS)
+        for k in ENGINE_DEFAULTS:
+            if k in stored:
+                result[k] = stored[k]
         return result
 
     def save_settings(self, settings: dict):

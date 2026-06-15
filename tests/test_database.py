@@ -33,27 +33,76 @@ def db(tmp_path):
 
 
 class TestSettings:
-    def test_get_default_settings(self, db):
+    def test_get_default_settings_engine_only(self, db):
         settings = db.get_settings()
-        assert settings["min_reward_usd"] == 100.0
-        assert settings["stop_loss_pct"] == 15.0
+        assert settings["scan_interval_sec"] == 30
+        assert settings["cooldown_minutes"] == 20
+        assert "stop_loss_pct" not in settings
+        assert "min_reward_usd" not in settings
 
-    def test_get_settings_includes_order_size_defaults(self, db):
-        settings = db.get_settings()
-        assert settings["order_size_mode"] == "min"
-        assert settings["order_size_custom_usd"] == 0.0
-
-    def test_save_and_load_settings(self, db):
-        db.save_settings({"min_reward_usd": 200.0, "stop_loss_pct": 10.0})
-        settings = db.get_settings()
-        assert settings["min_reward_usd"] == 200.0
-        assert settings["stop_loss_pct"] == 10.0
+    def test_save_and_load_engine_settings(self, db):
+        db.save_settings({"scan_interval_sec": 60})
+        assert db.get_settings()["scan_interval_sec"] == 60
 
     def test_save_password_hash(self, db):
         db.save_password("hashed_pw", b"salt_bytes")
         pw_hash, salt = db.get_password()
         assert pw_hash == "hashed_pw"
         assert salt == b"salt_bytes"
+
+
+class TestSettingsToTemplateMigration:
+    def _make_legacy_state(self, db):
+        """模拟老库:templates 空,settings 里有策略键+引擎键。"""
+        import json as _json
+
+        c = db.conn.cursor()
+        c.execute("DELETE FROM template_settings")
+        c.execute("DELETE FROM templates")
+        c.execute("DELETE FROM settings")
+        legacy = {
+            "stop_loss_pct": 10.0,
+            "min_reward_usd": 200.0,
+            "order_size_mode": "balance",
+            "scan_interval_sec": 45,
+        }
+        for k, v in legacy.items():
+            c.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?)", (k, _json.dumps(v))
+            )
+        db.conn.commit()
+
+    def test_strategy_keys_move_to_default_template(self, db):
+        self._make_legacy_state(db)
+        db._migrate()
+        t = db.get_template(db.get_default_template_id())
+        assert t["stop_loss_pct"] == 10.0
+        assert t["min_reward_usd"] == 200.0
+        assert t["order_size_mode"] == "balance"
+
+    def test_engine_keys_stay_in_settings(self, db):
+        self._make_legacy_state(db)
+        db._migrate()
+        assert db.get_settings()["scan_interval_sec"] == 45
+
+    def test_strategy_keys_removed_from_settings(self, db):
+        self._make_legacy_state(db)
+        db._migrate()
+        c = db.conn.cursor()
+        c.execute("SELECT key FROM settings")
+        keys = {row["key"] for row in c.fetchall()}
+        assert "stop_loss_pct" not in keys and "min_reward_usd" not in keys
+
+    def test_migration_idempotent(self, db):
+        self._make_legacy_state(db)
+        db._migrate()
+        db._migrate()
+        assert len([t for t in db.list_templates() if t["name"] == "默认"]) == 1
+        assert db.get_template(db.get_default_template_id())["stop_loss_pct"] == 10.0
+
+    def test_fresh_install_no_copy(self, db):
+        t = db.get_template(db.get_default_template_id())
+        assert t["stop_loss_pct"] == 15.0  # 默认值,非迁移值
 
 
 class TestWallets:
