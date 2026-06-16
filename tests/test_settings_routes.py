@@ -33,7 +33,6 @@ def test_get_settings_returns_v4_params(tmp_path, monkeypatch):
         "max_exposure_shares",
         "max_concurrent_markets",
         "min_price_double_cents",
-        "tiers_k",
         "discovery_interval_sec",
     ):
         assert k in data, f"GET /api/settings 缺 {k}"

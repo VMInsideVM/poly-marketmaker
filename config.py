@@ -24,7 +24,6 @@ TEMPLATE_DEFAULTS = {
     "case_a_mode": "ask",
     "excluded_categories": ["sports", "esports", "weather"],
     # 多档挂单(SP2)
-    "tiers_k": 6,
     "tier_rules": [[{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)],
     "max_exposure_usd": 250,
     "max_exposure_shares": 500,

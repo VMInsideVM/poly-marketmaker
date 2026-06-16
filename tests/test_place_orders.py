@@ -14,7 +14,6 @@ def _make_worker(balance=10000.0, template=None):
     db.get_blacklist_ids.return_value = set()
     db.is_in_cooldown.return_value = False
     tmpl = {
-        "tiers_k": 6,
         "tier_rules": [
             [{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)
         ],
@@ -288,8 +287,14 @@ def test_dropout_cancels_ineligible_market_buys():
     # 在市场 B 有买单,本轮 eligible 只有 A,cancel_dropouts=True -> B 买单被撤、A 照常挂。
     worker, api, db = _make_worker()
     api.get_open_orders.return_value = [
-        {"side": "BUY", "market": "B", "asset_id": "B-y", "price": "0.40",
-         "original_size": "100", "id": "o-b"}
+        {
+            "side": "BUY",
+            "market": "B",
+            "asset_id": "B-y",
+            "price": "0.40",
+            "original_size": "100",
+            "id": "o-b",
+        }
     ]
     api.get_orderbook.return_value = _ob([(0.30, 1000)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes")], cancel_dropouts=True)
@@ -304,24 +309,42 @@ def test_dropout_skips_cooldown_but_cancels_others():
     worker, api, db = _make_worker()
     db.is_in_cooldown.side_effect = lambda w, m: (m == "C")
     api.get_open_orders.return_value = [
-        {"side": "BUY", "market": "C", "asset_id": "C-y", "price": "0.40",
-         "original_size": "100", "id": "o-c"},
-        {"side": "BUY", "market": "D", "asset_id": "D-y", "price": "0.40",
-         "original_size": "100", "id": "o-d"},
+        {
+            "side": "BUY",
+            "market": "C",
+            "asset_id": "C-y",
+            "price": "0.40",
+            "original_size": "100",
+            "id": "o-c",
+        },
+        {
+            "side": "BUY",
+            "market": "D",
+            "asset_id": "D-y",
+            "price": "0.40",
+            "original_size": "100",
+            "id": "o-d",
+        },
     ]
     api.get_orderbook.return_value = _ob([(0.30, 1000)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes")], cancel_dropouts=True)
     cancelled = [oid for c in api.cancel_orders.call_args_list for oid in c.args[0]]
-    assert "o-d" in cancelled       # 跌出(非冷却) -> 撤
-    assert "o-c" not in cancelled   # 冷却 -> 保留
+    assert "o-d" in cancelled  # 跌出(非冷却) -> 撤
+    assert "o-c" not in cancelled  # 冷却 -> 保留
 
 
 def test_dropout_off_by_default():
     # cancel_dropouts 默认 False(测试挂单路径):跌出市场买单不被撤。
     worker, api, db = _make_worker()
     api.get_open_orders.return_value = [
-        {"side": "BUY", "market": "B", "asset_id": "B-y", "price": "0.40",
-         "original_size": "100", "id": "o-b"}
+        {
+            "side": "BUY",
+            "market": "B",
+            "asset_id": "B-y",
+            "price": "0.40",
+            "original_size": "100",
+            "id": "o-b",
+        }
     ]
     api.get_orderbook.return_value = _ob([(0.30, 1000)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes")])
@@ -333,10 +356,22 @@ def test_dropout_cancels_only_buys_not_sells():
     # 跌出市场若有卖单,只撤买单、卖单保留。
     worker, api, db = _make_worker()
     api.get_open_orders.return_value = [
-        {"side": "BUY", "market": "B", "asset_id": "B-y", "price": "0.40",
-         "original_size": "100", "id": "o-b-buy"},
-        {"side": "SELL", "market": "B", "asset_id": "B-y", "price": "0.60",
-         "original_size": "100", "id": "o-b-sell"},
+        {
+            "side": "BUY",
+            "market": "B",
+            "asset_id": "B-y",
+            "price": "0.40",
+            "original_size": "100",
+            "id": "o-b-buy",
+        },
+        {
+            "side": "SELL",
+            "market": "B",
+            "asset_id": "B-y",
+            "price": "0.60",
+            "original_size": "100",
+            "id": "o-b-sell",
+        },
     ]
     api.get_orderbook.return_value = _ob([(0.30, 1000)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes")], cancel_dropouts=True)
