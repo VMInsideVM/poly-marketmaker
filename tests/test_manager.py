@@ -407,6 +407,51 @@ class TestSharedScanWithStatus:
         assert manager.eligible_markets == [{"market_id": "m1"}]
         assert manager.last_scan_time > 0
 
+    def test_should_discover_at_interval_boundary_true(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = [{"market_id": "m1"}]
+        manager.last_scan_time = 1000.0
+        # 恰好等于间隔 -> >= -> 该发现
+        assert manager._should_discover(1000.0 + 14400) is True
+
+    def test_discovery_fail_then_place_uses_prev_pool(self):
+        # 发现失败保留上一份缓存池,本轮 _place_round 仍用它刷簿下单。
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xABC": worker}
+        manager.eligible_markets = [{"market_id": "prev", "tags": []}]
+        manager.last_scan_time = 1000.0
+        refreshed = {}
+
+        class FlakyScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
+                raise RuntimeError("discovery down")
+
+            def refresh_orderbooks(self, pool):
+                refreshed["pool"] = pool
+
+            def filter_for_template(self, pool, tmpl, addr):
+                return pool
+
+        with patch("engine.manager.MarketScanner", FlakyScanner):
+            try:
+                manager._discover()  # raises; _scan_with_status 恢复 prev_eligible
+            except RuntimeError:
+                pass
+            manager._place_round()
+        assert manager.eligible_markets == [{"market_id": "prev", "tags": []}]
+        assert refreshed["pool"] == [{"market_id": "prev", "tags": []}]
+        worker.place_orders.assert_called_once_with(
+            [{"market_id": "prev", "tags": []}], cancel_dropouts=True
+        )
+
     def test_scan_failure_resets_status_and_keeps_last_scan_time(self):
         manager, db = _make_manager()
         manager._scanner_api = MagicMock()

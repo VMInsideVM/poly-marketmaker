@@ -642,19 +642,21 @@ class EngineManager:
         self._scan_with_status(skip_orderbook=True)
 
     def _place_round(self):
-        """快节奏:刷新订单簿 -> 每钱包精筛 + 下单(跌出撤单)。空池跳过。"""
-        if not self.eligible_markets:
+        """快节奏:刷新订单簿 -> 每钱包精筛 + 下单(跌出撤单)。空池跳过。
+
+        先把候选池快照到本地 pool:并发的手动扫描会重绑 self.eligible_markets
+        (扫描中先清空再重建),本轮持快照不受影响,免得中途看到空池误跳过。"""
+        pool = self.eligible_markets
+        if not pool:
             return
         scanner = MarketScanner(self._scanner_api, self.db, "")
-        scanner.refresh_orderbooks(self.eligible_markets)
+        scanner.refresh_orderbooks(pool)
         for address, worker in self.engines.items():
             if not worker.running:
                 continue
             try:
                 tmpl = self.db.get_template_for(address)
-                eligible = scanner.filter_for_template(
-                    self.eligible_markets, tmpl, address
-                )
+                eligible = scanner.filter_for_template(pool, tmpl, address)
                 eligible.sort(
                     key=lambda m: float(m.get("market_competitiveness", 0) or 0)
                 )
