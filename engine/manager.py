@@ -547,18 +547,25 @@ class EngineManager:
             worker.stop()
 
     def _scanner_loop(self):
-        """Shared scanner: runs once per scan_interval, feeds all wallets."""
+        """快节奏循环:按 discovery_interval 发现新市场(慢),每轮刷簿+下单(快)。"""
         settings = self.db.get_settings()
-        scan_interval = settings["scan_interval_sec"]
+        place_interval = settings["scan_interval_sec"]
 
         while not self._stop_event.is_set():
             if self._scanner_api and self.engines:
                 try:
-                    self._do_scan()
+                    if self._should_discover(time.time()):
+                        self._discover()
                 except Exception as e:
-                    logger.error("Scanner error: %s", e)
+                    logger.error("Discovery error: %s", e)
+                # 发现失败也不拖垮下单:_scan_with_status 失败保留上一份缓存池,
+                # 本轮仍用它刷簿下单;首启失败则池空,_place_round 空池 guard 跳过。
+                try:
+                    self._place_round()
+                except Exception as e:
+                    logger.error("Place round error: %s", e)
 
-            self._stop_event.wait(timeout=scan_interval)
+            self._stop_event.wait(timeout=place_interval)
 
     def _active_templates(self) -> list[dict]:
         """所有启用钱包绑定模板(按 excluded_categories 去重),供采集器算并集/交集。"""
@@ -582,7 +589,7 @@ class EngineManager:
             return list(seen.values())
         return [self.db.get_template(self.db.get_default_template_id())]
 
-    def _scan_with_status(self) -> list:
+    def _scan_with_status(self, skip_orderbook: bool = False) -> list:
         """Run one scan, reporting scan_status/progress; shared by manual and
         auto paths. On success sets eligible_markets/last_scan_time and
         scan_status='done' and returns the eligible list. On failure resets
@@ -609,7 +616,10 @@ class EngineManager:
             scanner = MarketScanner(self._scanner_api, self.db, "")
             templates = self._active_templates()
             candidate_pool = scanner.fetch_candidates(
-                templates, on_progress=on_progress, on_found=on_found
+                templates,
+                on_progress=on_progress,
+                on_found=on_found,
+                skip_orderbook=skip_orderbook,
             )
         except Exception:
             self.eligible_markets = prev_eligible  # don't blank on failure
@@ -622,22 +632,29 @@ class EngineManager:
         logger.info("Scanner found %d candidates", len(candidate_pool))
         return candidate_pool
 
-    def _do_scan(self):
-        """采集一次候选池,每钱包按自己模板精筛+下单。"""
-        candidate_pool = self._scan_with_status()
-        if not candidate_pool:
-            # 采集成功但本轮 0 市场(可能是奖励端点瞬时抖动)。此时绝不下单:否则
-            # place_orders(cancel_dropouts=True) 会把全部在挂买单当「跌出 eligible」
-            # 一锅端掉。空池跳过,等下轮重采。(某钱包模板筛后为空属正常,仍下单。)
-            logger.warning("_do_scan: 候选池为空,本轮跳过下单(避免误撤全部买单)")
+    def _should_discover(self, now: float) -> bool:
+        """无缓存池、或距上次发现 >= discovery_interval -> 该重新发现。"""
+        interval = self.db.get_settings()["discovery_interval_sec"]
+        return (not self.eligible_markets) or (now - self.last_scan_time) >= interval
+
+    def _discover(self):
+        """慢节奏:全量奖励发现(不抓订单簿),刷新缓存候选池 + 持久化。"""
+        self._scan_with_status(skip_orderbook=True)
+
+    def _place_round(self):
+        """快节奏:刷新订单簿 -> 每钱包精筛 + 下单(跌出撤单)。空池跳过。"""
+        if not self.eligible_markets:
             return
+        scanner = MarketScanner(self._scanner_api, self.db, "")
+        scanner.refresh_orderbooks(self.eligible_markets)
         for address, worker in self.engines.items():
             if not worker.running:
                 continue
             try:
                 tmpl = self.db.get_template_for(address)
-                scanner = MarketScanner(self._scanner_api, self.db, "")
-                eligible = scanner.filter_for_template(candidate_pool, tmpl, address)
+                eligible = scanner.filter_for_template(
+                    self.eligible_markets, tmpl, address
+                )
                 eligible.sort(
                     key=lambda m: float(m.get("market_competitiveness", 0) or 0)
                 )
