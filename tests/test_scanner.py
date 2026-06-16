@@ -187,3 +187,23 @@ class TestFilterForTemplate:
         assert out and all("order_price" not in e for e in out)
         e = out[0]
         assert e["token_id"] and "rewards_min_size" in e and "rewards_max_spread" in e
+
+
+class TestRewardBracket:
+    def test_upward_bracket_mapping(self):
+        from engine.scanner import reward_bracket
+
+        assert reward_bracket(20) == 20
+        assert reward_bracket(21) == 50
+        assert reward_bracket(50) == 50
+        assert reward_bracket(100) == 100
+        assert reward_bracket(101) == 200
+        assert reward_bracket(200) == 200
+        assert reward_bracket(250) == 250
+
+    def test_over_250_or_nonpositive_is_none(self):
+        from engine.scanner import reward_bracket
+
+        assert reward_bracket(251) is None
+        assert reward_bracket(0) is None
+        assert reward_bracket(-5) is None

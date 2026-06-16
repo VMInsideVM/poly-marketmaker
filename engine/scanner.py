@@ -47,6 +47,19 @@ def _parse_end_date(end_date_str: str) -> float:
     return 0
 
 
+def reward_bracket(min_size):
+    """向上取档(更保守):返回 20/50/100/200/250;超 250 或 <=0 返回 None。
+
+    v4 §2:仅服务市场筛选,不参与挂单/离场。
+    """
+    if min_size <= 0:
+        return None
+    for b in (20, 50, 100, 200, 250):
+        if min_size <= b:
+            return b
+    return None
+
+
 class MarketScanner:
     def __init__(self, api, db, wallet_address: str):
         self.api = api
