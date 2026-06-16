@@ -19,7 +19,7 @@
 </section>
 
 <section class="config-section">
-    <h2>策略参数</h2>
+    <h2>策略参数（默认模板）</h2>
     <form id="settings-form">
         <div class="form-grid">
             <div class="form-group">
@@ -43,12 +43,67 @@
                 <input type="number" name="min_settlement_days" step="1">
             </div>
             <div class="form-group">
-                <label>止损比例 (%)</label>
-                <input type="number" name="stop_loss_pct" step="1">
+                <label>浮亏阈值 θ_loss (美分)</label>
+                <input type="number" name="theta_loss_cents" step="1">
+            </div>
+            <div class="form-group">
+                <label>强平阈值 θ_stop (美分)</label>
+                <input type="number" name="theta_stop_cents" step="1">
+            </div>
+            <div class="form-group">
+                <label>成本≤买一时离场方式</label>
+                <select name="case_a_mode">
+                    <option value="ask">挂卖一（吃满价差，maker）</option>
+                    <option value="market">市价（贴买一立即清掉）</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>单市场最大敞口 (USD)</label>
+                <input type="number" name="max_exposure_usd" step="1">
+            </div>
+            <div class="form-group">
+                <label>单市场最大份数 (share)</label>
+                <input type="number" name="max_exposure_shares" step="1">
+            </div>
+            <div class="form-group">
+                <label>最大并发做市市场数</label>
+                <input type="number" name="max_concurrent_markets" step="1">
+            </div>
+            <div class="form-group">
+                <label>双边挂单价格下限 (美分)</label>
+                <input type="number" name="min_price_double_cents" step="1">
+            </div>
+            <div class="form-group">
+                <label>价格档数 K</label>
+                <input type="number" name="tiers_k" step="1" min="1">
             </div>
         </div>
 
-        <h2>运行参数</h2>
+        <h3>排除品类</h3>
+        <div id="excluded-categories" class="form-inline">
+            <label><input type="checkbox" value="sports"> 体育</label>
+            <label><input type="checkbox" value="esports"> 电竞</label>
+            <label><input type="checkbox" value="weather"> 天气</label>
+        </div>
+
+        <h3>单份奖励阈值（按最低份数取档）</h3>
+        <div id="per-share-thresholds" class="form-grid">
+            <div class="form-group"><label>20 档</label><input type="number" step="0.01" data-bracket="20"></div>
+            <div class="form-group"><label>50 档</label><input type="number" step="0.01" data-bracket="50"></div>
+            <div class="form-group"><label>100 档</label><input type="number" step="0.01" data-bracket="100"></div>
+            <div class="form-group"><label>200 档</label><input type="number" step="0.01" data-bracket="200"></div>
+            <div class="form-group"><label>250 档</label><input type="number" step="0.01" data-bracket="250"></div>
+        </div>
+
+        <h3>多档挂单规则 tier_rules（JSON）</h3>
+        <textarea id="tier-rules-json" rows="10" style="width:100%;font-family:monospace"></textarea>
+        <p style="color:#888;font-size:12px;margin-top:4px;">
+            JSON：档位数组，每档是若干区间 {"upper": 累加厚度上限或 null, "action": {...}}（半开升序 [前一上界, upper)）。
+            动作 type 五选一：min_size（最小份数）/ fixed_shares（固定份数，带 "shares"）/ fixed_amount（固定金额，带 "usd"）/ wallet_total（钱包剩余全额）/ skip（不挂）。
+            例：[[{"upper": null, "action": {"type": "min_size"}}]]。留默认即每档挂最小份数。
+        </p>
+
+        <h2>运行参数（引擎全局）</h2>
         <div class="form-grid">
             <div class="form-group">
                 <label>市场扫描间隔 (秒)</label>
@@ -67,24 +122,8 @@
                 <input type="number" name="rewards_cache_ttl_sec" step="1">
             </div>
             <div class="form-group">
-                <label>每钱包挂买单上限</label>
-                <input type="number" name="max_buy_orders_per_wallet" step="1" min="1">
-            </div>
-        </div>
-
-        <h2>下单量</h2>
-        <div class="form-grid">
-            <div class="form-group">
-                <label>下单量模式</label>
-                <select name="order_size_mode">
-                    <option value="min">符合奖励的最小份额（默认）</option>
-                    <option value="custom">自定义单市场美元上限</option>
-                    <option value="balance">按余额全额</option>
-                </select>
-            </div>
-            <div class="form-group">
-                <label>自定义美元上限 (USDC，仅"自定义单市场美元上限"模式生效)</label>
-                <input type="number" name="order_size_custom_usd" step="1" min="0">
+                <label>市场发现间隔 (秒，默认 14400=4 小时)</label>
+                <input type="number" name="discovery_interval_sec" step="1">
             </div>
         </div>
         <button type="submit" class="btn btn-primary">保存设置</button>
@@ -117,10 +156,25 @@ function loadSettings() {
         originalSettings = {...data};
         currentSettings = {...data};
         const form = document.getElementById('settings-form');
+        // 标量 + case_a_mode(select):通用回填
         Object.keys(data).forEach(key => {
             const input = form.querySelector(`[name="${key}"]`);
             if (input) input.value = data[key];
         });
+        // excluded_categories(list):复选框
+        const excluded = data.excluded_categories || [];
+        document.querySelectorAll('#excluded-categories input[type=checkbox]').forEach(cb => {
+            cb.checked = excluded.includes(cb.value);
+        });
+        // per_share_reward_thresholds(dict):5 档
+        const ps = data.per_share_reward_thresholds || {};
+        document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
+            const b = inp.getAttribute('data-bracket');
+            inp.value = (ps[b] !== undefined) ? ps[b] : 0.30;
+        });
+        // tier_rules(list):JSON 美化
+        document.getElementById('tier-rules-json').value =
+            JSON.stringify(data.tier_rules || [], null, 2);
     });
 }
 
@@ -227,11 +281,31 @@ function toggleWallet(address, enabled) {
 
 document.getElementById('settings-form').addEventListener('submit', function(e) {
     e.preventDefault();
-    const formData = new FormData(this);
     const data = {};
-    formData.forEach((val, key) => {
-        data[key] = (key === 'order_size_mode') ? val : parseFloat(val);
+    // 标量数字
+    this.querySelectorAll('input[type=number][name]').forEach(inp => {
+        data[inp.name] = parseFloat(inp.value);
     });
+    // case_a_mode(select 字符串)
+    const caseSel = this.querySelector('select[name="case_a_mode"]');
+    if (caseSel) data.case_a_mode = caseSel.value;
+    // excluded_categories -> list
+    data.excluded_categories = Array.from(
+        document.querySelectorAll('#excluded-categories input[type=checkbox]:checked')
+    ).map(cb => cb.value);
+    // per_share_reward_thresholds -> dict
+    const ps = {};
+    document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
+        ps[inp.getAttribute('data-bracket')] = parseFloat(inp.value);
+    });
+    data.per_share_reward_thresholds = ps;
+    // tier_rules -> JSON.parse(客户端校验)
+    try {
+        data.tier_rules = JSON.parse(document.getElementById('tier-rules-json').value);
+    } catch (err) {
+        alert('tier_rules JSON 格式错误，请检查后再保存');
+        return;
+    }
     fetch('/api/settings', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -239,14 +313,17 @@ document.getElementById('settings-form').addEventListener('submit', function(e) 
     }).then(r => r.json()).then(resp => {
         alert(resp.message);
         originalSettings = {...data};
+        currentSettings = {...data};
     });
 });
 
 document.getElementById('settings-form').addEventListener('input', function() {
-    const formData = new FormData(this);
-    formData.forEach((val, key) => {
-        currentSettings[key] = (key === 'order_size_mode') ? val : parseFloat(val);
+    // 仅跟踪标量 + case_a_mode 给「未保存离开」提醒;结构化控件无 name,不进比较
+    this.querySelectorAll('input[type=number][name]').forEach(inp => {
+        currentSettings[inp.name] = parseFloat(inp.value);
     });
+    const caseSel = this.querySelector('select[name="case_a_mode"]');
+    if (caseSel) currentSettings.case_a_mode = caseSel.value;
 });
 
 window.addEventListener('beforeunload', function(e) {
