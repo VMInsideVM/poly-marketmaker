@@ -33,3 +33,32 @@ def build_ladder(bids, reward_range_min, reward_range_max, min_size, tiers_k):
             if len(tiers) >= tiers_k:
                 break
     return tiers
+
+
+def _interval_action(tier_rule, ct):
+    """半开升序区间 [前一上界, upper):返回包含 ct 的区间动作。"""
+    for interval in tier_rule:
+        upper = interval.get("upper")
+        if upper is None or ct < upper:
+            return interval.get("action", {"type": "skip"})
+    return {"type": "skip"}
+
+
+def resolve_tier_share(
+    cumulative_thickness, tier_rule, price, min_size, remaining_budget_usd
+):
+    """按该档累加厚度命中的区间动作,算份额(int>=0,0=不挂)。"""
+    action = _interval_action(tier_rule, cumulative_thickness)
+    t = action.get("type")
+    if t == "min_size":
+        return int(min_size)
+    if t == "fixed_shares":
+        return int(action.get("shares", 0))
+    if t == "fixed_amount":
+        if price <= 0:
+            return 0
+        s = int(float(action.get("usd", 0)) / price)
+        return s if s >= min_size else int(min_size)
+    if t == "wallet_total":
+        return int(remaining_budget_usd / price) if price > 0 else 0
+    return 0
