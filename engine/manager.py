@@ -12,7 +12,7 @@ import time
 from api.polymarket_api import PolymarketAPI
 from engine.scanner import MarketScanner
 from engine.monitor import OrderMonitor
-from engine.positions import held_condition_ids
+from engine.positions import held_side_info
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,7 @@ class WalletWorker:
                 e,
             )
             return
-        held = held_condition_ids(positions)
+        held_assets, held_value, held_shares = held_side_info(positions)
         blacklist = self.db.get_blacklist_ids()
         tmpl = self.db.get_template_for(self.wallet_address)
         tier_rules = tmpl.get("tier_rules") or []
@@ -156,7 +156,7 @@ class WalletWorker:
 
         placed = 0
         for mid in order:
-            if mid in blacklist or mid in held:
+            if mid in blacklist:
                 continue
             if self.db.is_in_cooldown(self.wallet_address, mid):
                 continue
@@ -205,37 +205,54 @@ class WalletWorker:
             side_a = sides[0]
             side_b = sides[1] if len(sides) > 1 else None
             balance = self.api.get_balance()
-            budget = min(balance, max_exposure_usd)
-            shares_budget = max_exposure_shares
-            if budget <= 0 or shares_budget <= 0:
-                continue
-            ladders = compute_market_ladders(
-                side_a, side_b, tier_rules, budget, shares_budget
-            )
-            ladders = apply_double_sided_floor(ladders, min_price_double_cents)
+            budget = max(0.0, min(balance, max_exposure_usd) - held_value.get(mid, 0.0))
+            shares_budget = max(0, max_exposure_shares - int(held_shares.get(mid, 0.0)))
+            budget_ok = budget > 0 and shares_budget > 0
+            ladders = {"a": [], "b": []}
+            if budget_ok:
+                ca = None if side_a["token_id"] in held_assets else side_a
+                cb = None if (side_b and side_b["token_id"] in held_assets) else side_b
+                ladders = compute_market_ladders(
+                    ca, cb, tier_rules, budget, shares_budget
+                )
+                ladders = apply_double_sided_floor(ladders, min_price_double_cents)
 
             for key, side in (("a", side_a), ("b", side_b)):
                 if side is None:
                     continue
                 token_id = side["token_id"]
-                ladder = ladders.get(key, [])
                 resting = buys_by_token.get(token_id, [])
-                cancel_ids, to_place = reconcile_buy_orders(ladder, resting)
+                if token_id in held_assets:
+                    # 成交后单侧暂停:撤光该侧全部在挂买单、不挂新单(SP5b Q1)
+                    cancel_ids, to_place = reconcile_buy_orders([], resting)
+                    cancel_reason = "成交后单侧暂停:撤掉该侧全部买单,直至该侧持仓平掉"
+                    cancel_action = "side_pause_cancel"
+                elif budget_ok:
+                    cancel_ids, to_place = reconcile_buy_orders(
+                        ladders.get(key, []), resting
+                    )
+                    cancel_reason = "撤改收敛:撤掉价漂移/量不符的旧买单(目标多档梯已变)"
+                    cancel_action = "buy_reconcile_cancel"
+                else:
+                    # 预算不足(扣减后):活跃侧保持不动
+                    continue
                 if cancel_ids:
                     try:
                         self.api.cancel_orders(cancel_ids)
                         self.db.record_action(
                             wallet=self.wallet_address,
                             market_id=mid,
-                            action_type="buy_reconcile_cancel",
+                            action_type=cancel_action,
                             side="-",
                             price=-1,
                             size=0,
-                            reason="撤改收敛:撤掉价漂移/量不符的旧买单(目标多档梯已变)",
+                            reason=cancel_reason,
                             price_basis=f"撤 {len(cancel_ids)} 笔 BUY；来源：CLOB get_open_orders",
                         )
                     except Exception as ex:
-                        logger.warning("Reconcile cancel %s failed: %s", token_id, ex)
+                        logger.warning(
+                            "Reconcile/pause cancel %s failed: %s", token_id, ex
+                        )
                 for price, shares in to_place:
                     try:
                         self.api.place_limit_buy(
