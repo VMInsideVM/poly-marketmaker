@@ -1,10 +1,4 @@
-"""engine/take_profit.py — Pure position-driven take-profit planning (no IO).
-
-The monitor maintains exactly ONE resting SELL per position. The sell price is
-``take_profit_price(cost, best_bid, tick)`` = ``max(ceil_to_tick(cost), best_bid
-+ tick)``: at/above the real cost so we never sell below it, and strictly above
-the best bid so the order always rests as a maker and never crosses the book
-(原价不亏本金、不穿价市价清仓、赚流动性奖励).
+"""engine/take_profit.py — Pure position-driven exit planning (no IO).
 
 ``cost`` is the position's weighted-average cost reconstructed from our real CLOB
 ``get_trades`` fills (``position_cost_with_lots``: replay buys/sells, FIFO-net,
@@ -53,8 +47,7 @@ def plan_take_profit(
 ) -> dict:
     """对一个持仓的 SELL 们做对账,使恰好一笔卖单挂在 want_price、覆盖整个 size。
 
-    want_price 由调用方用 take_profit_price(cost, best_bid, tick) 预先算好(已对齐
-    tick、已含穿价护栏),本函数不再加工价格。返回 {"action","price","size",
+    want_price 由调用方预先算好(已对齐 tick、已含穿价护栏),本函数不再加工价格。返回 {"action","price","size",
     "cancel_ids"}:noop / keep / replace。
     """
     if size <= 0 or want_price is None or want_price <= 0 or tick <= 0:
@@ -125,18 +118,6 @@ def position_cost_with_lots(fills: list[dict], size: float):
         for l in lots
     ]
     return cost_sum / recon, result_lots
-
-
-def take_profit_price(cost: float, best_bid: float | None, tick: float) -> float:
-    """止盈卖价 = max(ceil_to_tick(cost), best_bid + tick) 的穿价护栏。
-
-    保证卖价严格高于买一 -> 永远是挂得住的 maker 单,绝不穿价市价清仓。best_bid 为
-    None(盘口某侧缺失)时退回 ceil_to_tick(cost)(盘口空时本就无买盘可穿)。
-    """
-    base = ceil_to_tick(cost, tick)
-    if best_bid is not None:
-        base = max(base, round(best_bid + tick, 10))
-    return base
 
 
 _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"

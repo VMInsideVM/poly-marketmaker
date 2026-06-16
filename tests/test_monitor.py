@@ -11,7 +11,6 @@ def _make_monitor(settings=None):
     api = MagicMock()
     db = MagicMock()
     default_settings = {
-        "stop_loss_pct": 15.0,
         "cooldown_minutes": 20,
         "rewards_cache_ttl_sec": 600,
     }
@@ -614,7 +613,6 @@ class TestMonitorStatusSnapshot:
         db.get_settings.return_value = {
             "cooldown_minutes": 20,
             "rewards_cache_ttl_sec": 600,
-            "stop_loss_pct": 15.0,
         }
         monitor.begin_status_tick()
         monitor._handle_fill(

@@ -31,7 +31,6 @@ def _make_manager():
         "scan_interval_sec": 30,
         "fill_check_interval_sec": 5,
         "cooldown_minutes": 20,
-        "stop_loss_pct": 15.0,
         "min_reward_usd": 100.0,
         "max_spread_cents": 3.0,
         "min_price_cents": 10.0,

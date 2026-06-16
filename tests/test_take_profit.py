@@ -6,7 +6,6 @@ from engine.take_profit import (
     plan_take_profit,
     position_cost_with_lots,
     describe_cost_basis,
-    take_profit_price,
 )
 
 
@@ -204,22 +203,6 @@ class TestPositionCostWithLots:
 
     def test_zero_size(self):
         assert position_cost_with_lots([_f("BUY", 0.28, 361, 1, "X")], 0) == (None, [])
-
-
-class TestTakeProfitPrice:
-    def test_cost_above_bid_sells_at_cost(self):
-        # 成本 0.45 > 买一 0.40 -> 挂成本价 0.45
-        assert take_profit_price(0.45, 0.40, 0.01) == 0.45
-
-    def test_cost_below_bid_lifts_to_bid_plus_tick(self):
-        # 事故场景:成本 0.21 < 买一 0.27 -> 上移到 0.28,绝不穿价
-        assert take_profit_price(0.21, 0.27, 0.01) == pytest.approx(0.28)
-
-    def test_no_bid_falls_back_to_cost(self):
-        assert take_profit_price(0.30, None, 0.01) == 0.30
-
-    def test_off_tick_cost_ceiled(self):
-        assert take_profit_price(0.3023, 0.10, 0.01) == 0.31
 
 
 class TestDescribeCostBasis:
