@@ -227,6 +227,7 @@ def test_held_value_deducts_other_side_budget():
         if c.args[0] == "A-n"
     }
     assert placed.get(0.50) == 100  # 预算 100-50=50U;50/0.50=100 封顶(未扣则 200)
+    assert not any(c.args[0] == "A-y" for c in api.place_limit_buy.call_args_list)
 
 
 def test_both_sides_held_cancels_both_and_places_nothing():
@@ -258,3 +259,26 @@ def test_both_sides_held_cancels_both_and_places_nothing():
     cancelled = [oid for c in api.cancel_orders.call_args_list for oid in c.args[0]]
     assert "o-yes" in cancelled and "o-no" in cancelled
     api.place_limit_buy.assert_not_called()
+
+
+def test_budget_exhausted_still_cancels_paused_side():
+    # 已持仓市值吃满单市场敞口(budget_ok=False);暂停侧仍撤光旧单,活跃侧无预算不挂。
+    worker, api, db = _make_worker(template={"max_exposure_usd": 20})
+    api.get_user_positions.return_value = [
+        {"conditionId": "A", "asset": "A-y", "size": 100.0, "curPrice": 0.50}
+    ]  # 市值 50U > 20U cap -> budget_ok False
+    api.get_open_orders.return_value = [
+        {
+            "side": "BUY",
+            "market": "A",
+            "asset_id": "A-y",
+            "price": "0.50",
+            "original_size": "100",
+            "id": "o-yes",
+        }
+    ]
+    api.get_orderbook.return_value = _ob([(0.50, 1000)], [(0.51, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes"), _elig("A", "A-n", "No")])
+    cancelled = [oid for c in api.cancel_orders.call_args_list for oid in c.args[0]]
+    assert "o-yes" in cancelled  # 暂停侧仍撤光(不受 budget_ok 影响)
+    api.place_limit_buy.assert_not_called()  # 活跃侧无预算 -> 不挂
