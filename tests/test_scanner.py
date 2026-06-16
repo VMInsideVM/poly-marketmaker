@@ -94,6 +94,58 @@ class TestFetchCandidatesCategoryWiring:
         assert all("order_price" not in m for m in pool)
 
 
+class TestDiscoverAndRefreshSplit:
+    def test_discover_candidates_has_no_orderbooks(self):
+        api = MagicMock()
+        api.get_rewards_markets.return_value = [
+            {"condition_id": "C", "tokens": [{"token_id": "C-y"}], "rewards_config": []}
+        ]
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        pool = scanner.discover_candidates(
+            [{"excluded_categories": [], "min_reward_usd": 0}]
+        )
+        assert pool and all("_orderbooks" not in m for m in pool)
+        api.get_spread.assert_not_called()  # 发现阶段不抓订单簿
+        api.get_orderbook.assert_not_called()
+
+    def test_refresh_orderbooks_fills_and_overwrites(self):
+        api = MagicMock()
+        api.get_spread.return_value = 0.01
+        api.get_orderbook.return_value = {
+            "bids": [{"price": "0.30", "size": "100"}],
+            "asks": [{"price": "0.31", "size": "100"}],
+            "tick_size": "0.01",
+        }
+        scanner = MarketScanner(api, MagicMock(), "")
+        pool = [
+            {
+                "condition_id": "A",
+                "tokens": [{"token_id": "A-y"}],
+                "_orderbooks": {"STALE": {}},
+            }  # 旧簿应被覆盖
+        ]
+        scanner.refresh_orderbooks(pool)
+        assert "A-y" in pool[0]["_orderbooks"]
+        assert "STALE" not in pool[0]["_orderbooks"]  # 覆盖写,不留陈旧
+
+    def test_fetch_candidates_still_includes_orderbooks(self):
+        api = MagicMock()
+        api.get_rewards_markets.return_value = [
+            {"condition_id": "C", "tokens": [{"token_id": "C-y"}], "rewards_config": []}
+        ]
+        api.get_spread.return_value = 0.01
+        api.get_orderbook.return_value = {"bids": [], "asks": [], "tick_size": "0.01"}
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        pool = scanner.fetch_candidates(
+            [{"excluded_categories": [], "min_reward_usd": 0}]
+        )
+        assert all("_orderbooks" in m for m in pool)
+
+
 class TestFilterForTemplate:
     def _candidate(self, cid, tags, daily_reward=50, bid=0.30, ask=0.31, min_size=100):
         bid2 = round(bid - 0.01, 2)

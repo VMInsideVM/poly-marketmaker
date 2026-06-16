@@ -66,11 +66,11 @@ class MarketScanner:
         self.db = db
         self.wallet_address = wallet_address
 
-    def fetch_candidates(
-        self, templates, on_progress=None, on_found=None, skip_orderbook=False
+    def discover_candidates(
+        self, templates, on_progress=None, on_found=None
     ) -> list[dict]:
-        """共享采集:抓全量奖励市场,按品类交集采集阶段排除,打 tags,补精确奖励,
-        缓存订单簿。钱包无关、网络密集、不算价。skip_orderbook 仅供单测。"""
+        """共享发现:抓全量奖励市场,按品类交集采集阶段排除,打 tags,补精确奖励。
+        钱包无关、网络密集(rewards 端点)、不抓订单簿、不算价。"""
         inter = excluded_intersection(templates)
         queried = queried_categories(templates)
         floors = [t.get("min_reward_usd", 0) for t in templates]
@@ -121,8 +121,6 @@ class MarketScanner:
             market["market_id"] = cid
             market["market_name"] = market.get("question", "")
             market["daily_reward"] = market_reward
-            if not skip_orderbook:
-                market["_orderbooks"] = self._fetch_orderbooks(market)
             checked += 1
             if on_progress:
                 on_progress(
@@ -132,11 +130,29 @@ class MarketScanner:
                 on_found(market)
             out.append(market)
         logger.info(
-            "fetch_candidates: %d candidates (queried %d categories)",
+            "discover_candidates: %d candidates (queried %d categories)",
             len(out),
             len(queried),
         )
         return out
+
+    def refresh_orderbooks(self, pool):
+        """给候选池每个市场刷新订单簿快照(覆盖写)。钱包无关、可重复调。
+        某 token 抓不到则不入该市场的 _orderbooks(filter 现有逻辑会跳过该 token),
+        覆盖写保证不留上一轮的陈旧簿。"""
+        for market in pool:
+            market["_orderbooks"] = self._fetch_orderbooks(market)
+
+    def fetch_candidates(
+        self, templates, on_progress=None, on_found=None, skip_orderbook=False
+    ) -> list[dict]:
+        """共享采集 = 发现 + (除非 skip_orderbook)刷新订单簿。手动扫描/单测用。"""
+        pool = self.discover_candidates(
+            templates, on_progress=on_progress, on_found=on_found
+        )
+        if not skip_orderbook:
+            self.refresh_orderbooks(pool)
+        return pool
 
     def _fetch_orderbooks(self, market: dict) -> dict:
         """抓该市场每 token 的订单簿快照(钱包无关)。抓不到的略过。"""
