@@ -8,9 +8,8 @@ Two-phase design:
   NOT compute order prices.
 - filter_for_template(pool, template, wallet): per-wallet CPU work. Applies the
   template's thresholds (reward floor, settlement, price band, spread), narrows by the
-  template's excluded_categories, checks cooldown, then prices via determine_order_price.
-- scan(): backward-compatible shim = fetch_candidates([default template]) +
-  filter_for_template(pool, default template).
+  template's excluded_categories, checks cooldown. Does NOT compute prices or costs —
+  pricing and sizing happen at placement time (place_orders).
 
 Optional on_progress(checked, total, msg) / on_found(market) callbacks fire per
 candidate during fetch_candidates.
@@ -20,8 +19,6 @@ import re
 import time
 import logging
 from datetime import datetime
-from engine.strategy import determine_order_price, reward_price_range
-from engine.take_profit import ceil_to_tick
 from engine.categories import (
     excluded_intersection,
     queried_categories,
@@ -207,27 +204,6 @@ class MarketScanner:
                 if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
                     continue
                 tick_size_str = book.get("tick_size", "0.01")
-                tick_size = float(tick_size_str)
-                midpoint = (best_bid + best_ask) / 2
-                reward_range_min, reward_range_max = reward_price_range(
-                    midpoint, max_spread_reward
-                )
-                min_cost = min_size * ceil_to_tick(
-                    max(reward_range_min, 0.0), tick_size
-                )
-                try:
-                    order_price = determine_order_price(
-                        bids=bids,
-                        max_spread=int(max_spread_reward),
-                        tick_size=tick_size,
-                        reward_range_min=reward_range_min,
-                        reward_range_max=reward_range_max,
-                    )
-                except Exception as e:
-                    logger.warning("Strategy error for %s: %s", condition_id, e)
-                    continue
-                if order_price is None:
-                    continue
                 eligible.append(
                     {
                         "market_id": condition_id,
@@ -241,14 +217,8 @@ class MarketScanner:
                         "daily_reward": market_reward,
                         "rewards_max_spread": max_spread_reward,
                         "rewards_min_size": min_size,
-                        "tick_size": tick_size,
                         "tick_size_str": tick_size_str,
                         "neg_risk": neg_risk,
-                        "reward_range_min": reward_range_min,
-                        "reward_range_max": reward_range_max,
-                        "order_price": order_price,
-                        "order_size": min_size,
-                        "min_cost": min_cost,
                         "tags": market.get("tags", []),
                     }
                 )
@@ -259,9 +229,3 @@ class MarketScanner:
             len(candidate_pool),
         )
         return eligible
-
-    def scan(self, on_progress=None, on_found=None) -> list[dict]:
-        """兼容 shim:用默认模板采集 + 精筛(老入口,供单模板路径与既有测试)。"""
-        tmpl = self.db.get_template(self.db.get_default_template_id())
-        pool = self.fetch_candidates([tmpl], on_progress=on_progress, on_found=on_found)
-        return self.filter_for_template(pool, tmpl, self.wallet_address)
