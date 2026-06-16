@@ -12,15 +12,27 @@
     <p style="color:#888;font-size:12px;margin-top:4px;">一般只需输入私钥，存款钱包地址会自动识别；若自动识别的地址与 polymarket.com/settings 不一致，可在第二个框手动填写正确的存款地址。</p>
     <table class="data-table" id="wallet-config-table">
         <thead>
-            <tr><th>地址</th><th>存款地址</th><th>状态</th><th>操作</th></tr>
+            <tr><th>地址</th><th>存款地址</th><th>模板</th><th>状态</th><th>操作</th></tr>
         </thead>
         <tbody id="wallet-config-body"></tbody>
     </table>
 </section>
 
 <section class="config-section">
-    <h2>策略参数（默认模板）</h2>
-    <form id="settings-form">
+    <h2>模板管理</h2>
+    <div class="form-inline">
+        <label>当前模板 <select id="template-select"></select></label>
+        <input type="text" id="new-template-name" placeholder="新模板名">
+        <button class="btn" type="button" onclick="createTemplate()">新建</button>
+        <button class="btn" type="button" onclick="renameTemplate()">重命名</button>
+        <button class="btn btn-danger" id="delete-template-btn" type="button" onclick="deleteTemplate()">删除</button>
+    </div>
+    <p style="color:#888;font-size:12px;margin-top:4px;">下方「策略参数」编辑当前选中的模板；上表每个钱包各自绑定模板。默认模板不可删除。</p>
+</section>
+
+<section class="config-section">
+    <h2>策略参数（当前模板）</h2>
+    <form id="strategy-form">
         <div class="form-grid">
             <div class="form-group">
                 <label>最低奖励金额 (USD)</label>
@@ -102,8 +114,13 @@
             动作 type 五选一：min_size（最小份数）/ fixed_shares（固定份数，带 "shares"）/ fixed_amount（固定金额，带 "usd"）/ wallet_total（钱包剩余全额）/ skip（不挂）。
             例：[[{"upper": null, "action": {"type": "min_size"}}]]。留默认即每档挂最小份数。
         </p>
+        <button type="submit" class="btn btn-primary">保存策略参数</button>
+    </form>
+</section>
 
-        <h2>运行参数（引擎全局）</h2>
+<section class="config-section">
+    <h2>引擎参数（全局）</h2>
+    <form id="engine-form">
         <div class="form-grid">
             <div class="form-group">
                 <label>市场扫描间隔 (秒)</label>
@@ -126,7 +143,7 @@
                 <input type="number" name="discovery_interval_sec" step="1">
             </div>
         </div>
-        <button type="submit" class="btn btn-primary">保存设置</button>
+        <button type="submit" class="btn btn-primary">保存引擎参数</button>
     </form>
 </section>
 
@@ -148,43 +165,155 @@
 
 {% block scripts %}
 <script>
-let originalSettings = {};
-let currentSettings = {};
+let templates = [];
+let defaultTemplateId = null;
+let currentTemplateId = null;
 
-function loadSettings() {
-    fetch('/api/settings').then(r => r.json()).then(data => {
-        originalSettings = {...data};
-        currentSettings = {...data};
-        const form = document.getElementById('settings-form');
-        // 标量 + case_a_mode(select):通用回填
+function loadTemplates() {
+    return fetch('/api/templates').then(r => r.json()).then(list => {
+        templates = list;
+        const def = list.find(t => t.is_default);
+        defaultTemplateId = def ? def.id : (list[0] && list[0].id);
+        const sel = document.getElementById('template-select');
+        sel.innerHTML = list.map(t =>
+            `<option value="${t.id}">${t.name}${t.is_default ? '（默认）' : ''}</option>`
+        ).join('');
+        if (currentTemplateId === null || !list.some(t => t.id === currentTemplateId)) {
+            currentTemplateId = defaultTemplateId;
+        }
+        sel.value = currentTemplateId;
+        document.getElementById('delete-template-btn').disabled =
+            (currentTemplateId === defaultTemplateId);
+    });
+}
+
+function loadStrategy(tid) {
+    fetch(`/api/templates/${tid}`).then(r => r.json()).then(data => {
+        const form = document.getElementById('strategy-form');
         Object.keys(data).forEach(key => {
             const input = form.querySelector(`[name="${key}"]`);
             if (input) input.value = data[key];
         });
-        // excluded_categories(list):复选框
         const excluded = data.excluded_categories || [];
         document.querySelectorAll('#excluded-categories input[type=checkbox]').forEach(cb => {
             cb.checked = excluded.includes(cb.value);
         });
-        // per_share_reward_thresholds(dict):5 档
         const ps = data.per_share_reward_thresholds || {};
         document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
             const b = inp.getAttribute('data-bracket');
             inp.value = (ps[b] !== undefined) ? ps[b] : 0.30;
         });
-        // tier_rules(list):JSON 美化
         document.getElementById('tier-rules-json').value =
             JSON.stringify(data.tier_rules || [], null, 2);
     });
 }
 
+function loadEngine() {
+    fetch('/api/settings').then(r => r.json()).then(data => {
+        document.querySelectorAll('#engine-form input[name]').forEach(inp => {
+            if (data[inp.name] !== undefined) inp.value = data[inp.name];
+        });
+    });
+}
+
+document.getElementById('template-select').addEventListener('change', function() {
+    currentTemplateId = parseInt(this.value, 10);
+    document.getElementById('delete-template-btn').disabled =
+        (currentTemplateId === defaultTemplateId);
+    loadStrategy(currentTemplateId);
+});
+
+function createTemplate() {
+    const name = document.getElementById('new-template-name').value.trim();
+    if (!name) { alert('请输入新模板名'); return; }
+    fetch('/api/templates', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name}),
+    }).then(r => r.json()).then(resp => {
+        if (resp.error) { alert(resp.error); return; }
+        document.getElementById('new-template-name').value = '';
+        currentTemplateId = resp.id;
+        loadTemplates().then(() => { loadStrategy(currentTemplateId); loadWallets(); });
+    });
+}
+
+function renameTemplate() {
+    const t = templates.find(x => x.id === currentTemplateId);
+    const name = prompt('新模板名', t ? t.name : '');
+    if (!name || !name.trim()) return;
+    fetch(`/api/templates/${currentTemplateId}/name`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name.trim()}),
+    }).then(r => r.json()).then(resp => {
+        if (resp.error) { alert(resp.error); return; }
+        loadTemplates().then(loadWallets);
+    });
+}
+
+function deleteTemplate() {
+    if (currentTemplateId === defaultTemplateId) { alert('默认模板不可删除'); return; }
+    if (!confirm('确定删除该模板？绑定它的钱包将回落默认模板。')) return;
+    fetch(`/api/templates/${currentTemplateId}`, {method: 'DELETE'}).then(r => r.json()).then(resp => {
+        if (resp.error) { alert(resp.error); return; }
+        currentTemplateId = defaultTemplateId;
+        loadTemplates().then(() => { loadStrategy(currentTemplateId); loadWallets(); });
+    });
+}
+
+document.getElementById('strategy-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const data = {};
+    this.querySelectorAll('input[type=number][name]').forEach(inp => {
+        data[inp.name] = parseFloat(inp.value);
+    });
+    const caseSel = this.querySelector('select[name="case_a_mode"]');
+    if (caseSel) data.case_a_mode = caseSel.value;
+    data.excluded_categories = Array.from(
+        document.querySelectorAll('#excluded-categories input[type=checkbox]:checked')
+    ).map(cb => cb.value);
+    const ps = {};
+    document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
+        ps[inp.getAttribute('data-bracket')] = parseFloat(inp.value);
+    });
+    data.per_share_reward_thresholds = ps;
+    try {
+        data.tier_rules = JSON.parse(document.getElementById('tier-rules-json').value);
+    } catch (err) {
+        alert('tier_rules JSON 格式错误，请检查后再保存');
+        return;
+    }
+    fetch(`/api/templates/${currentTemplateId}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data),
+    }).then(r => r.json()).then(() => alert('策略参数已保存（下次引擎启动生效）'));
+});
+
+document.getElementById('engine-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const data = {};
+    this.querySelectorAll('input[type=number][name]').forEach(inp => {
+        data[inp.name] = parseFloat(inp.value);
+    });
+    fetch('/api/settings', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data),
+    }).then(r => r.json()).then(resp => alert(resp.message));
+});
+
 function loadWallets() {
     fetch('/api/wallets').then(r => r.json()).then(wallets => {
         const tbody = document.getElementById('wallet-config-body');
-        tbody.innerHTML = wallets.map(w => `
+        tbody.innerHTML = wallets.map(w => {
+            const opts = templates.map(t => {
+                const sel = (w.template_id === t.id) ||
+                    (w.template_id == null && t.id === defaultTemplateId);
+                return `<option value="${t.id}" ${sel ? 'selected' : ''}>${t.name}</option>`;
+            }).join('');
+            return `
             <tr>
                 <td title="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</td>
                 <td title="${w.funder || ''}">${w.funder ? w.funder.slice(0,6)+'...'+w.funder.slice(-4) : '-'}</td>
+                <td><select onchange="bindWalletTemplate('${w.address}', this.value)">${opts}</select></td>
                 <td>
                     <label class="switch">
                         <input type="checkbox" ${w.enabled ? 'checked' : ''}
@@ -195,8 +324,15 @@ function loadWallets() {
                 <td>
                     <button class="btn btn-sm btn-danger" onclick="removeWallet('${w.address}')">删除</button>
                 </td>
-            </tr>
-        `).join('');
+            </tr>`;
+        }).join('');
+    });
+}
+
+function bindWalletTemplate(address, templateId) {
+    fetch(`/api/wallets/${address}/template`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({template_id: parseInt(templateId, 10)}),
     });
 }
 
@@ -208,11 +344,9 @@ function addWallet() {
     const funder = document.getElementById('new-funder').value.trim();
     if (!key) { alert('请输入私钥'); return; }
     if (funder) {
-        // 已手填存款地址，直接导入
         finalizeImport(key, funder);
         return;
     }
-    // 未填：先预览自动识别的地址，弹浮窗让用户比对/修改
     fetch('/api/wallets/preview', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -279,75 +413,7 @@ function toggleWallet(address, enabled) {
     });
 }
 
-document.getElementById('settings-form').addEventListener('submit', function(e) {
-    e.preventDefault();
-    const data = {};
-    // 标量数字
-    this.querySelectorAll('input[type=number][name]').forEach(inp => {
-        data[inp.name] = parseFloat(inp.value);
-    });
-    // case_a_mode(select 字符串)
-    const caseSel = this.querySelector('select[name="case_a_mode"]');
-    if (caseSel) data.case_a_mode = caseSel.value;
-    // excluded_categories -> list
-    data.excluded_categories = Array.from(
-        document.querySelectorAll('#excluded-categories input[type=checkbox]:checked')
-    ).map(cb => cb.value);
-    // per_share_reward_thresholds -> dict
-    const ps = {};
-    document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
-        ps[inp.getAttribute('data-bracket')] = parseFloat(inp.value);
-    });
-    data.per_share_reward_thresholds = ps;
-    // tier_rules -> JSON.parse(客户端校验)
-    try {
-        data.tier_rules = JSON.parse(document.getElementById('tier-rules-json').value);
-    } catch (err) {
-        alert('tier_rules JSON 格式错误，请检查后再保存');
-        return;
-    }
-    fetch('/api/settings', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(data),
-    }).then(r => r.json()).then(resp => {
-        alert(resp.message);
-        originalSettings = {...data};
-        currentSettings = {...data};
-    });
-});
-
-document.getElementById('settings-form').addEventListener('input', function() {
-    // 仅跟踪标量 + case_a_mode 给「未保存离开」提醒;结构化控件无 name,不进比较
-    this.querySelectorAll('input[type=number][name]').forEach(inp => {
-        currentSettings[inp.name] = parseFloat(inp.value);
-    });
-    const caseSel = this.querySelector('select[name="case_a_mode"]');
-    if (caseSel) currentSettings.case_a_mode = caseSel.value;
-});
-
-window.addEventListener('beforeunload', function(e) {
-    const hasChanges = Object.keys(originalSettings).some(
-        k => currentSettings[k] !== originalSettings[k]
-    );
-    if (hasChanges) {
-        e.preventDefault();
-        e.returnValue = '参数已修改但未保存，确定要离开吗？';
-    }
-});
-
-document.querySelectorAll('.nav-links a').forEach(link => {
-    link.addEventListener('click', function(e) {
-        const hasChanges = Object.keys(originalSettings).some(
-            k => currentSettings[k] !== originalSettings[k]
-        );
-        if (hasChanges && !confirm('参数已修改但未保存，是否离开？')) {
-            e.preventDefault();
-        }
-    });
-});
-
-loadSettings();
-loadWallets();
+loadTemplates().then(() => { loadStrategy(currentTemplateId); loadWallets(); });
+loadEngine();
 </script>
 {% endblock %}
