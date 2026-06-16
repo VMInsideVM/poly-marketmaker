@@ -119,6 +119,17 @@ class WalletWorker:
         blacklist = self.db.get_blacklist_ids()
         tmpl = self.db.get_template_for(self.wallet_address)
         tier_rules = tmpl.get("tier_rules") or []
+        if not tier_rules:
+            # 模板没配档位规则表 -> 一单都不会挂。显式告警,避免"引擎在跑却
+            # 静默不下单"被误认为"没机会",便于排查模板配置问题。
+            logger.warning(
+                "place_orders skipped for %s: empty tier_rules (模板未配档位规则表)",
+                self.wallet_address,
+            )
+            return
+        # max_exposure_usd 是「单市场」敞口上限(YES+NO 合计);跨市场不设全局
+        # 美元锁(maker 买单不锁仓,一笔余额垫付所有挂单),总量由 max_concurrent
+        # _markets × 单市场敞口 约束。
         max_exposure_usd = float(tmpl.get("max_exposure_usd", 250))
         max_exposure_shares = int(tmpl.get("max_exposure_shares", 500))
         max_concurrent = int(tmpl.get("max_concurrent_markets", 10))

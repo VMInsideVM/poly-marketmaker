@@ -152,3 +152,11 @@ def test_existing_exposure_on_market_reduces_budget():
         round(c.args[1], 2): c.args[2] for c in api.place_limit_buy.call_args_list
     }
     assert placed.get(0.30) == 100
+
+
+def test_empty_tier_rules_places_nothing():
+    # 模板未配档位规则表 -> 一单都不挂(并告警,不静默)。
+    worker, api, db = _make_worker(template={"tier_rules": []})
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    api.place_limit_buy.assert_not_called()
