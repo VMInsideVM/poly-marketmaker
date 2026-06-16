@@ -345,6 +345,33 @@ class PolymarketAPI:
         )
         return _check_order_resp(res, "市价卖单")
 
+    def place_marketable_limit_sell(
+        self,
+        token_id: str,
+        price: float,
+        size: int,
+        tick_size: str = "0.01",
+        neg_risk: bool | None = None,
+    ) -> dict:
+        """限价卖但 FAK(fill-and-kill):吃掉所有 >= price 的买单后 kill 剩余,永不挂簿。
+
+        用于 v4 §7 B 段逐级扫单——以「最低卖出价」为限价的市价单,绝不成交在该价以下
+        (盘口瞬时假跌也卖不穿,自带防错杀)。neg_risk=None 走自动解析(与其它卖单一致,
+        防负风险仓卖不出)。
+        """
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=float(size),
+            side="SELL",
+        )
+        options = PartialCreateOrderOptions(
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+        )
+        res = self.client.create_and_post_order(order_args, options, OrderType.FAK)
+        return _check_order_resp(res, "限价扫单(FAK)")
+
     # --- Order Management ---
 
     def cancel_order(self, order_id: str) -> dict:

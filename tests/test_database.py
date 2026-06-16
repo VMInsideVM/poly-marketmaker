@@ -12,7 +12,7 @@ def test_settings_page_engine_strategy_split_roundtrip(tmp_path):
     database = Database(str(tmp_path / "split.db"))
     database.init()
     try:
-        data = {"scan_interval_sec": 90, "stop_loss_pct": 7.0, "min_reward_usd": 250.0}
+        data = {"scan_interval_sec": 90, "min_reward_usd": 250.0}
         engine = {k: v for k, v in data.items() if k in ENGINE_DEFAULTS}
         strategy = {k: v for k, v in data.items() if k in TEMPLATE_DEFAULTS}
         database.save_settings(engine)
@@ -20,7 +20,6 @@ def test_settings_page_engine_strategy_split_roundtrip(tmp_path):
         merged = dict(database.get_settings())
         merged.update(database.get_template(database.get_default_template_id()))
         assert merged["scan_interval_sec"] == 90
-        assert merged["stop_loss_pct"] == 7.0
         assert merged["min_reward_usd"] == 250.0
         # 策略键没有泄漏进引擎级 settings
         assert "stop_loss_pct" not in database.get_settings()
@@ -39,7 +38,7 @@ def test_config_split_engine_and_template_defaults():
     }
     assert TEMPLATE_DEFAULTS["excluded_categories"] == ["sports", "esports", "weather"]
     assert TEMPLATE_DEFAULTS["min_reward_usd"] == 100.0
-    assert TEMPLATE_DEFAULTS["stop_loss_pct"] == 15.0
+    assert "stop_loss_pct" not in TEMPLATE_DEFAULTS
     # 向后兼容:DEFAULTS 仍是两者合并(get_settings 在最后一个任务前仍用它)
     assert DEFAULTS["scan_interval_sec"] == 30
     assert DEFAULTS["min_reward_usd"] == 100.0
@@ -116,9 +115,9 @@ class TestSettingsToTemplateMigration:
         self._make_legacy_state(db)
         db._migrate()
         t = db.get_template(db.get_default_template_id())
-        assert t["stop_loss_pct"] == 10.0
         assert t["min_reward_usd"] == 200.0
         # order_size_mode was retired (SP2); migration no longer moves it
+        # stop_loss_pct was retired (SP3 T5); migration no longer moves it
 
     def test_engine_keys_stay_in_settings(self, db):
         self._make_legacy_state(db)
@@ -131,18 +130,21 @@ class TestSettingsToTemplateMigration:
         c = db.conn.cursor()
         c.execute("SELECT key FROM settings")
         keys = {row["key"] for row in c.fetchall()}
-        assert "stop_loss_pct" not in keys and "min_reward_usd" not in keys
+        # min_reward_usd is still in TEMPLATE_DEFAULTS → migrated out of settings
+        assert "min_reward_usd" not in keys
+        # stop_loss_pct retired (SP3 T5): no longer in TEMPLATE_DEFAULTS,
+        # so migration leaves it stranded in settings (harmless; nothing reads it)
 
     def test_migration_idempotent(self, db):
         self._make_legacy_state(db)
         db._migrate()
         db._migrate()
         assert len([t for t in db.list_templates() if t["name"] == "默认"]) == 1
-        assert db.get_template(db.get_default_template_id())["stop_loss_pct"] == 10.0
+        assert db.get_template(db.get_default_template_id())["min_reward_usd"] == 200.0
 
     def test_fresh_install_no_copy(self, db):
         t = db.get_template(db.get_default_template_id())
-        assert t["stop_loss_pct"] == 15.0  # 默认值,非迁移值
+        assert t["min_reward_usd"] == 100.0  # 默认值,非迁移值
 
 
 class TestWallets:
@@ -440,6 +442,15 @@ class TestBlacklist:
         assert db.get_blacklist() == []
 
 
+def test_template_defaults_has_exit_keys():
+    from config import TEMPLATE_DEFAULTS
+
+    assert TEMPLATE_DEFAULTS["theta_loss_cents"] == 2
+    assert TEMPLATE_DEFAULTS["theta_stop_cents"] == 5
+    assert TEMPLATE_DEFAULTS["case_a_mode"] == "ask"
+    assert "stop_loss_pct" not in TEMPLATE_DEFAULTS
+
+
 class TestTemplateCRUD:
     def test_create_and_list_templates(self, db):
         tid = db.create_template("保守")
@@ -453,10 +464,9 @@ class TestTemplateCRUD:
 
     def test_save_and_get_template_merges_defaults(self, db):
         tid = db.create_template("激进")
-        db.save_template(tid, {"max_spread_cents": 6.0, "stop_loss_pct": 8.0})
+        db.save_template(tid, {"max_spread_cents": 6.0})
         t = db.get_template(tid)
         assert t["max_spread_cents"] == 6.0
-        assert t["stop_loss_pct"] == 8.0
         assert t["min_reward_usd"] == 100.0
         assert t["excluded_categories"] == ["sports", "esports", "weather"]
         assert "scan_interval_sec" not in t

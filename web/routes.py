@@ -643,7 +643,7 @@ def api_get_positions():
     out = []
     for addr, api in _wallet_apis(wallet).items():
         # 止损比例是策略级参数,按各钱包自己的模板取(每钱包可不同)。
-        sl = db.get_template_for(addr)["stop_loss_pct"] / 100.0
+        theta_stop = float(db.get_template_for(addr).get("theta_stop_cents", 5)) / 100.0
         try:
             for p in api.get_user_positions(api.get_funder()):
                 avg = float(p.get("avgPrice", 0) or 0)
@@ -658,7 +658,7 @@ def api_get_positions():
                         "buy_price": avg,
                         "size": size,
                         "current_price": cur,
-                        "stop_price": avg * (1 - sl),
+                        "stop_price": max(0.0, avg - theta_stop),
                         "pnl": (cur - avg) * size,
                     }
                 )

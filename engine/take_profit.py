@@ -1,10 +1,4 @@
-"""engine/take_profit.py — Pure position-driven take-profit planning (no IO).
-
-The monitor maintains exactly ONE resting SELL per position. The sell price is
-``take_profit_price(cost, best_bid, tick)`` = ``max(ceil_to_tick(cost), best_bid
-+ tick)``: at/above the real cost so we never sell below it, and strictly above
-the best bid so the order always rests as a maker and never crosses the book
-(原价不亏本金、不穿价市价清仓、赚流动性奖励).
+"""engine/take_profit.py — Pure position-driven exit planning (no IO).
 
 ``cost`` is the position's weighted-average cost reconstructed from our real CLOB
 ``get_trades`` fills (``position_cost_with_lots``: replay buys/sells, FIFO-net,
@@ -53,8 +47,7 @@ def plan_take_profit(
 ) -> dict:
     """对一个持仓的 SELL 们做对账,使恰好一笔卖单挂在 want_price、覆盖整个 size。
 
-    want_price 由调用方用 take_profit_price(cost, best_bid, tick) 预先算好(已对齐
-    tick、已含穿价护栏),本函数不再加工价格。返回 {"action","price","size",
+    want_price 由调用方预先算好(已对齐 tick、已含穿价护栏),本函数不再加工价格。返回 {"action","price","size",
     "cancel_ids"}:noop / keep / replace。
     """
     if size <= 0 or want_price is None or want_price <= 0 or tick <= 0:
@@ -127,18 +120,6 @@ def position_cost_with_lots(fills: list[dict], size: float):
     return cost_sum / recon, result_lots
 
 
-def take_profit_price(cost: float, best_bid: float | None, tick: float) -> float:
-    """止盈卖价 = max(ceil_to_tick(cost), best_bid + tick) 的穿价护栏。
-
-    保证卖价严格高于买一 -> 永远是挂得住的 maker 单,绝不穿价市价清仓。best_bid 为
-    None(盘口某侧缺失)时退回 ceil_to_tick(cost)(盘口空时本就无买盘可穿)。
-    """
-    base = ceil_to_tick(cost, tick)
-    if best_bid is not None:
-        base = max(base, round(best_bid + tick, 10))
-    return base
-
-
 _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
 
 
@@ -178,3 +159,48 @@ def describe_cost_basis(cost, lots: list[dict], max_lots: int = 6) -> str:
         f"成本={cost:.4f}（加权自{n}笔买入成交："
         f"{' '.join(parts)}{more} 共取{_fmt_share(total_take)}股）"
     )
+
+
+def plan_exit(
+    cost, best_bid, best_ask, tick, theta_loss, theta_stop, case_a_mode, size
+):
+    """三段式离场决策(v4 §7)。theta_loss/theta_stop 为价位单位(=¢/100)。
+
+    返回 {"tier","action","price","size"};action ∈ {"rest","market","sweep","noop"}。
+    cost>0、size>0 由调用方在调用前保证(成本取不到 -> 裸奔跳过,不进此函数)。
+    - rest 价 = 卖一(best_ask),无则回退 ceil_to_tick(cost)。
+    - sweep 价 = ceil_to_tick(最低卖出价)(限价卖向上取整,绝不卖穿到下限以下)。
+    """
+
+    def _rest_price():
+        if best_ask is not None and best_ask > 0:
+            return best_ask
+        return ceil_to_tick(cost, tick)
+
+    if best_bid is None:
+        if best_ask is not None and best_ask > 0:
+            return {
+                "tier": "B_park",
+                "action": "rest",
+                "price": _rest_price(),
+                "size": size,
+            }
+        return {"tier": "none", "action": "noop", "price": None, "size": 0.0}
+
+    if cost <= best_bid:
+        if case_a_mode == "market":
+            return {"tier": "A", "action": "market", "price": None, "size": size}
+        return {"tier": "A", "action": "rest", "price": _rest_price(), "size": size}
+
+    loss = cost - best_bid
+    if loss >= theta_stop:
+        return {"tier": "B0", "action": "market", "price": None, "size": size}
+    floor = cost - theta_loss
+    if best_bid >= floor:
+        return {
+            "tier": "B_sweep",
+            "action": "sweep",
+            "price": ceil_to_tick(floor, tick),
+            "size": size,
+        }
+    return {"tier": "B_park", "action": "rest", "price": _rest_price(), "size": size}
