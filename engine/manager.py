@@ -1,4 +1,4 @@
-"""engine/manager.py — Multi-wallet engine manager.
+﻿"""engine/manager.py — Multi-wallet engine manager.
 
 Architecture:
 - One shared scanner thread: scans markets once, produces eligible list
@@ -91,7 +91,12 @@ class WalletWorker:
         self.monitor.check_sell_orders()
         self.monitor.publish_status()
 
-    def place_orders(self, eligible_markets: list[dict], limit: int | None = None):
+    def place_orders(
+        self,
+        eligible_markets: list[dict],
+        limit: int | None = None,
+        cancel_dropouts: bool = False,
+    ):
         """多档挂单:按市场分组,下单时算 K 档/边,整市场敞口共享,§8 <10¢ 双边。
 
         eligible_markets = filter_for_template 的轻量 per-token 条目。
@@ -153,6 +158,42 @@ class WalletWorker:
                 grouped[mid] = []
                 order.append(mid)
             grouped[mid].append(e)
+
+        # SP5a-1 跨出 eligible 整仓撒买单：有在挂买单、不在本轮 eligible、且不在
+        # 冷却的市场 -> 撒掉该市场全部 BUY（持仓/卖单不动，仓由 check_exit 卖出）。
+        # 只在真正下单轮(_do_scan / place_all_orders)开启；冷却市场只是「暂不挂新单」
+        # 故豆免，避免撒掉正赚奖励的旧买单、并不与 SP5b「另一侧照常运行」冲突。
+        if cancel_dropouts:
+            eligible_mids = set(grouped.keys())
+            dropped = {
+                o.get("market", "")
+                for o in buy_orders
+                if o.get("market")
+                and o.get("market") not in eligible_mids
+                and not self.db.is_in_cooldown(self.wallet_address, o.get("market"))
+            }
+            drop_ids = [
+                o["id"]
+                for o in buy_orders
+                if o.get("market") in dropped and o.get("id")
+            ]
+            if drop_ids:
+                try:
+                    self.api.cancel_orders(drop_ids)
+                    markets_with_open -= dropped
+                    for mkt in dropped:
+                        self.db.record_action(
+                            wallet=self.wallet_address,
+                            market_id=mkt,
+                            action_type="dropout_cancel",
+                            side="-",
+                            price=-1,
+                            size=0,
+                            reason="市场跨出 eligible（不再满足筛选门槛），撒掉该市场全部买单；持仓仓由离场卖出",
+                            price_basis="跨出 eligible；来源:CLOB get_open_orders + filter_for_template",
+                        )
+                except Exception as ex:
+                    logger.warning("Dropout cancel failed: %s", ex)
 
         placed = 0
         for mid in order:
@@ -415,7 +456,7 @@ class EngineManager:
                 eligible.sort(
                     key=lambda m: float(m.get("market_competitiveness", 0) or 0)
                 )
-                worker.place_orders(eligible)
+                worker.place_orders(eligible, cancel_dropouts=True)
             except Exception as e:
                 logger.error("Error placing orders for %s: %s", address, e)
 
@@ -594,7 +635,7 @@ class EngineManager:
                 eligible.sort(
                     key=lambda m: float(m.get("market_competitiveness", 0) or 0)
                 )
-                worker.place_orders(eligible)
+                worker.place_orders(eligible, cancel_dropouts=True)
             except Exception as e:
                 logger.error("Error distributing to wallet %s: %s", address, e)
 

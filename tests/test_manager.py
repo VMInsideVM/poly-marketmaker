@@ -1,4 +1,4 @@
-"""tests/test_manager.py"""
+﻿"""tests/test_manager.py"""
 
 import time
 import pytest
@@ -325,7 +325,7 @@ class TestSharedScanWithStatus:
             manager._do_scan()
         assert manager.scan_status == "done"
         assert manager.last_scan_time > 0
-        worker.place_orders.assert_called_once_with([{"market_id": "m9", "tags": []}])
+        worker.place_orders.assert_called_once_with([{"market_id": "m9", "tags": []}], cancel_dropouts=True)
 
     def test_auto_do_scan_distributes_sorted_by_competitiveness(self):
         manager, db = _make_manager()
