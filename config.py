@@ -19,10 +19,14 @@ TEMPLATE_DEFAULTS = {
     "max_price_cents": 50.0,
     "min_settlement_days": 4,
     "stop_loss_pct": 15.0,
-    "max_buy_orders_per_wallet": 5,
-    "order_size_mode": "min",
-    "order_size_custom_usd": 0.0,
     "excluded_categories": ["sports", "esports", "weather"],
+    # 多档挂单(SP2)
+    "tiers_k": 6,
+    "tier_rules": [[{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)],
+    "max_exposure_usd": 250,
+    "max_exposure_shares": 500,
+    "max_concurrent_markets": 10,
+    "min_price_double_cents": 10,
 }
 
 # 向后兼容:仍暴露合并后的 DEFAULTS。get_settings() 在最后一个任务前仍以此为基准。
