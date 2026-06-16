@@ -19,6 +19,9 @@ TEMPLATE_DEFAULTS = {
     "max_price_cents": 50.0,
     "min_settlement_days": 4,
     "stop_loss_pct": 15.0,
+    "theta_loss_cents": 2,
+    "theta_stop_cents": 5,
+    "case_a_mode": "ask",
     "excluded_categories": ["sports", "esports", "weather"],
     # 多档挂单(SP2)
     "tiers_k": 6,

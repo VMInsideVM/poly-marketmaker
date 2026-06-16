@@ -440,6 +440,16 @@ class TestBlacklist:
         assert db.get_blacklist() == []
 
 
+def test_template_defaults_has_exit_keys():
+    from config import TEMPLATE_DEFAULTS
+
+    assert TEMPLATE_DEFAULTS["theta_loss_cents"] == 2
+    assert TEMPLATE_DEFAULTS["theta_stop_cents"] == 5
+    assert TEMPLATE_DEFAULTS["case_a_mode"] == "ask"
+    # 本任务暂保留 stop_loss_pct(下个任务退役)
+    assert "stop_loss_pct" in TEMPLATE_DEFAULTS
+
+
 class TestTemplateCRUD:
     def test_create_and_list_templates(self, db):
         tid = db.create_template("保守")
