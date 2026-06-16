@@ -171,8 +171,7 @@ class OrderMonitor:
         if size <= 0:
             return
         # No trades-table write: buy "history" is the live Data API position.
-        # The take-profit SELL is maintained by check_take_profit() priced off the
-        # get_trades weighted cost with a 穿价护栏 (max(cost, best_bid+tick)).
+        # 离场卖单由 check_exit() 的三段式逻辑(plan_exit)按 get_trades 加权成本维护。
         # Step 1 only sets the cooldown and cancels the buy's remainder.
         self.db.set_cooldown(
             self.wallet_address, market_id, self.db.get_settings()["cooldown_minutes"]
@@ -359,7 +358,12 @@ class OrderMonitor:
                     price_basis=f"撤 {len(sell_ids)} 笔 SELL",
                 )
             except Exception as e:
-                logger.warning("Cancel sells %s failed: %s", asset_id, e)
+                # 撤单失败仍继续清仓:离场(尤其 B0 强平)优先保证出手,不因撤单一时失败
+                # 把仓晾着不止损。代价是可能短暂与残留挂卖单并存(下个 tick 对账清理);
+                # 超卖不会发生(没有的份额卖不出)。与旧 stop-loss 的取舍一致。
+                logger.warning(
+                    "Cancel sells %s failed (proceed to exit): %s", asset_id, e
+                )
 
         if action == "market":
             self.api.place_market_sell(asset_id, size)

@@ -1125,6 +1125,37 @@ class TestCheckExit:
         api.place_market_sell.assert_called_once_with("A-y", 100)
         db.record_trade.assert_called_once()
 
+    def test_b0_cancels_existing_sell_before_market_clear(self):
+        # 已有一笔挂卖单 -> B0 必须先撤再市价清仓(避免与残留卖单并存/重复卖)。
+        sells = [
+            {
+                "id": "s1",
+                "asset_id": "A-y",
+                "side": "SELL",
+                "price": "0.42",
+                "original_size": "100",
+                "size_matched": "0",
+            }
+        ]
+        calls = []
+        monitor, api, db = self._setup(
+            0.40, 100, [(0.35, 500)], [(0.36, 500)], sells=sells
+        )
+        api.cancel_orders.side_effect = lambda ids: calls.append(("cancel", ids))
+        api.place_market_sell.side_effect = lambda a, s: calls.append(("market", a, s))
+        monitor.check_exit()
+        assert calls[0][0] == "cancel" and "s1" in calls[0][1]
+        assert calls[1][0] == "market"
+
+    def test_a_market_does_not_record_trade(self):
+        # case A 市价(无损)不是止损,不应落 stop_loss 记录。
+        monitor, api, db = self._setup(
+            0.30, 100, [(0.31, 500)], [(0.33, 500)], mode="market"
+        )
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once_with("A-y", 100)
+        db.record_trade.assert_not_called()
+
     def test_b_sweep_marketable_limit_at_floor(self):
         monitor, api, db = self._setup(0.40, 100, [(0.39, 500)], [(0.41, 500)])
         monitor.check_exit()
