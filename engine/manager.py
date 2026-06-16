@@ -1,4 +1,4 @@
-﻿"""engine/manager.py — Multi-wallet engine manager.
+"""engine/manager.py — Multi-wallet engine manager.
 
 Architecture:
 - One shared scanner thread: scans markets once, produces eligible list
@@ -159,10 +159,10 @@ class WalletWorker:
                 order.append(mid)
             grouped[mid].append(e)
 
-        # SP5a-1 跨出 eligible 整仓撒买单：有在挂买单、不在本轮 eligible、且不在
-        # 冷却的市场 -> 撒掉该市场全部 BUY（持仓/卖单不动，仓由 check_exit 卖出）。
+        # SP5a-1 跌出 eligible 整仓撤买单：有在挂买单、不在本轮 eligible、且不在
+        # 冷却的市场 -> 撤掉该市场全部 BUY（持仓/卖单不动，仍由 check_exit 卖出）。
         # 只在真正下单轮(_do_scan / place_all_orders)开启；冷却市场只是「暂不挂新单」
-        # 故豆免，避免撒掉正赚奖励的旧买单、并不与 SP5b「另一侧照常运行」冲突。
+        # 故豁免，避免撤掉正赚奖励的旧买单、并不与 SP5b「另一侧照常运行」冲突。
         if cancel_dropouts:
             eligible_mids = set(grouped.keys())
             dropped = {
@@ -189,8 +189,8 @@ class WalletWorker:
                             side="-",
                             price=-1,
                             size=0,
-                            reason="市场跨出 eligible（不再满足筛选门槛），撒掉该市场全部买单；持仓仓由离场卖出",
-                            price_basis="跨出 eligible；来源:CLOB get_open_orders + filter_for_template",
+                            reason="市场跌出 eligible（不再满足筛选门槛），撤掉该市场全部买单；持仓仍由离场卖出",
+                            price_basis="跌出 eligible；来源:CLOB get_open_orders + filter_for_template",
                         )
                 except Exception as ex:
                     logger.warning("Dropout cancel failed: %s", ex)

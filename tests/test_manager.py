@@ -1,4 +1,4 @@
-﻿"""tests/test_manager.py"""
+"""tests/test_manager.py"""
 
 import time
 import pytest
