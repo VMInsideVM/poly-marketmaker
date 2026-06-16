@@ -85,10 +85,6 @@
                 <label>双边挂单价格下限 (美分)</label>
                 <input type="number" name="min_price_double_cents" step="1">
             </div>
-            <div class="form-group">
-                <label>价格档数 K</label>
-                <input type="number" name="tiers_k" step="1" min="1">
-            </div>
         </div>
 
         <h3>排除品类</h3>
@@ -107,13 +103,10 @@
             <div class="form-group"><label>250 档</label><input type="number" step="0.01" data-bracket="250"></div>
         </div>
 
-        <h3>多档挂单规则 tier_rules（JSON）</h3>
-        <textarea id="tier-rules-json" rows="10" style="width:100%;font-family:monospace"></textarea>
-        <p style="color:#888;font-size:12px;margin-top:4px;">
-            JSON：档位数组，每档是若干区间 {"upper": 累加厚度上限或 null, "action": {...}}（半开升序 [前一上界, upper)）。
-            动作 type 五选一：min_size（最小份数）/ fixed_shares（固定份数，带 "shares"）/ fixed_amount（固定金额，带 "usd"）/ wallet_total（钱包剩余全额）/ skip（不挂）。
-            例：[[{"upper": null, "action": {"type": "min_size"}}]]。留默认即每档挂最小份数。
-        </p>
+        <h3>多档挂单规则</h3>
+        <p style="color:#888;font-size:12px;margin-top:4px;">每档从买一往下；每行「累加厚度 &lt; X → 动作」，末行「其余」兜底。动作：最小份数 / 固定份数 / 固定金额 / 钱包全额 / 不挂。</p>
+        <div id="tier-rules-editor"></div>
+        <button type="button" class="btn" onclick="addTier()">+ 加一档</button>
         <button type="submit" class="btn btn-primary">保存策略参数</button>
     </form>
 </section>
@@ -203,9 +196,133 @@ function loadStrategy(tid) {
             const b = inp.getAttribute('data-bracket');
             inp.value = (ps[b] !== undefined) ? ps[b] : 0.30;
         });
-        document.getElementById('tier-rules-json').value =
-            JSON.stringify(data.tier_rules || [], null, 2);
+        renderTierEditor(data.tier_rules || []);
     });
+}
+
+const ACTION_LABELS = {
+    min_size: '最小份数', fixed_shares: '固定份数', fixed_amount: '固定金额',
+    wallet_total: '钱包全额', skip: '不挂',
+};
+
+function actionSelectHtml(selectedType) {
+    return Object.keys(ACTION_LABELS).map(t =>
+        `<option value="${t}" ${t === selectedType ? 'selected' : ''}>${ACTION_LABELS[t]}</option>`
+    ).join('');
+}
+
+function makeIntervalRow(interval, isCatchAll) {
+    const action = (interval && interval.action) || {type: 'min_size'};
+    const type = action.type || 'min_size';
+    const row = document.createElement('div');
+    row.className = 'interval-row' + (isCatchAll ? ' catch-all' : '');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:4px 0;flex-wrap:wrap';
+    const upperHtml = isCatchAll
+        ? '<span>其余</span>'
+        : `厚度 &lt; <input class="upper-input" type="number" step="0.1" style="width:70px" value="${(interval && interval.upper != null) ? interval.upper : ''}">`;
+    let paramVal = '';
+    if (type === 'fixed_shares') paramVal = (action.shares != null) ? action.shares : '';
+    if (type === 'fixed_amount') paramVal = (action.usd != null) ? action.usd : '';
+    const paramHidden = (type === 'fixed_shares' || type === 'fixed_amount') ? '' : 'style="display:none"';
+    const paramLabel = (type === 'fixed_amount') ? '金额(USD)' : '份数';
+    const delBtn = isCatchAll ? ''
+        : '<button type="button" class="btn btn-sm" onclick="this.closest(\'.interval-row\').remove()">✕</button>';
+    row.innerHTML =
+        `${upperHtml} → ` +
+        `<select class="action-select" onchange="onActionChange(this)">${actionSelectHtml(type)}</select> ` +
+        `<span class="param-wrap" ${paramHidden}><span class="param-label">${paramLabel}</span> ` +
+        `<input class="param-input" type="number" step="0.01" style="width:90px" value="${paramVal}"></span> ` +
+        delBtn;
+    return row;
+}
+
+function onActionChange(sel) {
+    const row = sel.closest('.interval-row');
+    const wrap = row.querySelector('.param-wrap');
+    const t = sel.value;
+    if (t === 'fixed_shares' || t === 'fixed_amount') {
+        wrap.style.display = '';
+        row.querySelector('.param-label').textContent = (t === 'fixed_amount') ? '金额(USD)' : '份数';
+    } else {
+        wrap.style.display = 'none';
+    }
+}
+
+function makeTierCard(tierIntervals) {
+    const card = document.createElement('div');
+    card.className = 'tier-card';
+    card.style.cssText = 'border:1px solid #ddd;border-radius:4px;padding:8px;margin:8px 0';
+    const head = document.createElement('div');
+    head.className = 'tier-head';
+    head.style.cssText = 'font-weight:bold;margin-bottom:4px';
+    card.appendChild(head);
+    const body = document.createElement('div');
+    body.className = 'tier-body';
+    card.appendChild(body);
+    const numbered = (tierIntervals || []).filter(iv => iv && iv.upper != null);
+    let catchAll = (tierIntervals || []).find(iv => iv && iv.upper == null);
+    if (!catchAll) catchAll = {upper: null, action: {type: 'min_size'}};
+    numbered.forEach(iv => body.appendChild(makeIntervalRow(iv, false)));
+    body.appendChild(makeIntervalRow(catchAll, true));
+    const ctrls = document.createElement('div');
+    ctrls.style.cssText = 'margin-top:4px';
+    ctrls.innerHTML =
+        '<button type="button" class="btn btn-sm" onclick="addInterval(this.closest(\'.tier-card\'))">+ 区间</button> ' +
+        '<button type="button" class="btn btn-sm btn-danger" onclick="removeTier(this.closest(\'.tier-card\'))">删此档</button>';
+    card.appendChild(ctrls);
+    return card;
+}
+
+function addInterval(card) {
+    const body = card.querySelector('.tier-body');
+    const catchAll = body.querySelector('.interval-row.catch-all');
+    body.insertBefore(makeIntervalRow({upper: '', action: {type: 'min_size'}}, false), catchAll);
+}
+
+function addTier() {
+    document.getElementById('tier-rules-editor').appendChild(makeTierCard([]));
+    relabelTiers();
+}
+
+function removeTier(card) {
+    card.remove();
+    relabelTiers();
+}
+
+function relabelTiers() {
+    document.querySelectorAll('#tier-rules-editor .tier-card').forEach((card, i) => {
+        card.querySelector('.tier-head').textContent = (i === 0) ? '档 1（买一）' : `档 ${i + 1}`;
+    });
+}
+
+function renderTierEditor(tierRules) {
+    const ed = document.getElementById('tier-rules-editor');
+    ed.innerHTML = '';
+    const tiers = (tierRules && tierRules.length) ? tierRules : [[]];
+    tiers.forEach(t => ed.appendChild(makeTierCard(t)));
+    relabelTiers();
+}
+
+function serializeTierRules() {
+    const tiers = [];
+    document.querySelectorAll('#tier-rules-editor .tier-card').forEach(card => {
+        const intervals = [];
+        card.querySelectorAll('.interval-row').forEach(row => {
+            const type = row.querySelector('.action-select').value;
+            const action = {type};
+            if (type === 'fixed_shares') {
+                action.shares = parseInt(row.querySelector('.param-input').value, 10) || 0;
+            }
+            if (type === 'fixed_amount') {
+                action.usd = parseFloat(row.querySelector('.param-input').value) || 0;
+            }
+            const upper = row.classList.contains('catch-all')
+                ? null : parseFloat(row.querySelector('.upper-input').value);
+            intervals.push({upper, action});
+        });
+        tiers.push(intervals);
+    });
+    return tiers;
 }
 
 function loadEngine() {
@@ -276,12 +393,11 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
         ps[inp.getAttribute('data-bracket')] = parseFloat(inp.value);
     });
     data.per_share_reward_thresholds = ps;
-    try {
-        data.tier_rules = JSON.parse(document.getElementById('tier-rules-json').value);
-    } catch (err) {
-        alert('tier_rules JSON 格式错误，请检查后再保存');
-        return;
-    }
+    const badUpper = Array.from(
+        document.querySelectorAll('#tier-rules-editor .interval-row:not(.catch-all) .upper-input')
+    ).some(inp => inp.value === '' || isNaN(parseFloat(inp.value)));
+    if (badUpper) { alert('请填写每个区间的厚度上限'); return; }
+    data.tier_rules = serializeTierRules();
     fetch(`/api/templates/${currentTemplateId}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data),
