@@ -120,3 +120,35 @@ def test_skips_held_and_cooldown_and_blacklist():
     db.is_in_cooldown.return_value = True
     worker.place_orders([_elig("A", "A-y", "Yes")])
     api.place_limit_buy.assert_not_called()
+
+
+def test_existing_exposure_on_market_reduces_budget():
+    # 跨轮敞口:同市场已有挂单的敞口要从本轮预算里扣掉(existing + new <= 上限)。
+    worker, api, db = _make_worker(
+        template={
+            "max_exposure_usd": 50,
+            "tier_rules": [
+                [{"upper": None, "action": {"type": "fixed_shares", "shares": 200}}]
+                for _ in range(6)
+            ],
+        }
+    )
+    # 已有挂单 A-y @ 0.20 × 100 = 20U 占用敞口(价位 0.20,与新档 0.30 不同,无幂等冲突)
+    api.get_open_orders.return_value = [
+        {
+            "side": "BUY",
+            "market": "A",
+            "asset_id": "A-y",
+            "price": "0.20",
+            "original_size": "100",
+            "id": "o1",
+        }
+    ]
+    api.get_orderbook.return_value = _ob([(0.30, 1000)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    # 档想 200 份;预算 = min(balance,50) - 20 = 30U,30/0.30=100 封顶 -> 100
+    # (若没扣已有敞口,会用满 50U -> 166 份)
+    placed = {
+        round(c.args[1], 2): c.args[2] for c in api.place_limit_buy.call_args_list
+    }
+    assert placed.get(0.30) == 100
