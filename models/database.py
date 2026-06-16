@@ -259,6 +259,11 @@ class Database:
             )
         self.conn.commit()
 
+    def rename_template(self, template_id: int, name: str):
+        c = self.conn.cursor()
+        c.execute("UPDATE templates SET name = ? WHERE id = ?", (name, template_id))
+        self.conn.commit()
+
     def set_wallet_template(self, address: str, template_id: int):
         c = self.conn.cursor()
         c.execute(

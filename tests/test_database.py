@@ -534,3 +534,19 @@ class TestTemplateSchema:
         c.execute("PRAGMA table_info(wallets)")
         cols = {row[1] for row in c.fetchall()}
         assert "template_id" in cols
+
+
+def test_rename_template(db):
+    tid = db.create_template("旧名")
+    db.rename_template(tid, "新名")
+    names = {t["name"] for t in db.list_templates()}
+    assert "新名" in names and "旧名" not in names
+
+
+def test_rename_template_duplicate_raises(db):
+    import sqlite3
+
+    db.create_template("A")
+    tid = db.create_template("B")
+    with pytest.raises(sqlite3.IntegrityError):
+        db.rename_template(tid, "A")
