@@ -191,6 +191,15 @@ class MarketScanner:
                 continue  # 该钱包对此市场仍在冷却(与旧 scan 口径一致)
             max_spread_reward = float(market.get("rewards_max_spread", 2))
             min_size = int(market.get("rewards_min_size", 0))
+            # v4 §3:最低份额 0 < ≤ 250;超档无取档 -> 不做该市场
+            if not (0 < min_size <= 250):
+                continue
+            # v4 §3:单份奖励(每日LP奖励÷最低份数) >= 该取档阈值(向上取档) -> 通过
+            bracket = reward_bracket(min_size)
+            per_share = market_reward / min_size
+            thresholds = template.get("per_share_reward_thresholds", {})
+            if per_share < float(thresholds.get(str(bracket), 0.30)):
+                continue
             neg_risk = market.get("neg_risk", False)
             books = market.get("_orderbooks", {})
             valid_tokens = [
