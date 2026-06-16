@@ -95,7 +95,7 @@ class TestFetchCandidatesCategoryWiring:
 
 
 class TestFilterForTemplate:
-    def _candidate(self, cid, tags, daily_reward=50, bid=0.30, ask=0.31):
+    def _candidate(self, cid, tags, daily_reward=50, bid=0.30, ask=0.31, min_size=100):
         bid2 = round(bid - 0.01, 2)
         return {
             "condition_id": cid,
@@ -106,7 +106,7 @@ class TestFilterForTemplate:
             "end_date": "",
             "neg_risk": False,
             "rewards_max_spread": 2,
-            "rewards_min_size": 100,
+            "rewards_min_size": min_size,
             "tags": tags,
             "market_reward": daily_reward,
             "tokens": [{"token_id": cid + "-y", "outcome": "Yes", "price": bid}],
@@ -187,3 +187,53 @@ class TestFilterForTemplate:
         assert out and all("order_price" not in e for e in out)
         e = out[0]
         assert e["token_id"] and "rewards_min_size" in e and "rewards_max_spread" in e
+
+    def test_per_share_below_threshold_excluded(self):
+        scanner = self._scanner()
+        # market_reward 20 / min_size 100 = 0.20 < 0.30 默认 -> 剔除
+        pool = [self._candidate("A", [], daily_reward=20)]
+        assert scanner.filter_for_template(pool, self._template(), "0xW") == []
+
+    def test_per_share_at_or_above_threshold_passes(self):
+        scanner = self._scanner()
+        # 50 / 100 = 0.50 >= 0.30 -> 通过
+        pool = [self._candidate("B", [], daily_reward=50)]
+        out = scanner.filter_for_template(pool, self._template(), "0xW")
+        assert any(e["market_id"] == "B" for e in out)
+
+    def test_min_size_over_250_excluded(self):
+        scanner = self._scanner()
+        # 单份奖励够高且总额够,但 min_size 300 > 250 -> 剔除
+        pool = [self._candidate("C", [], daily_reward=200, min_size=300)]
+        assert scanner.filter_for_template(pool, self._template(), "0xW") == []
+
+    def test_per_bracket_thresholds_independent(self):
+        scanner = self._scanner()
+        # P: min_size 100 单份 0.40;Q: min_size 250 单份 0.40
+        # 档100 阈值调 0.50(剔 P),档250 留 0.30(过 Q)
+        c_100 = self._candidate("P", [], daily_reward=40, min_size=100)
+        c_250 = self._candidate("Q", [], daily_reward=100, min_size=250)
+        tmpl = self._template(per_share_reward_thresholds={"100": 0.50, "250": 0.30})
+        out = scanner.filter_for_template([c_100, c_250], tmpl, "0xW")
+        ids = {e["market_id"] for e in out}
+        assert "P" not in ids and "Q" in ids
+
+
+class TestRewardBracket:
+    def test_upward_bracket_mapping(self):
+        from engine.scanner import reward_bracket
+
+        assert reward_bracket(20) == 20
+        assert reward_bracket(21) == 50
+        assert reward_bracket(50) == 50
+        assert reward_bracket(100) == 100
+        assert reward_bracket(101) == 200
+        assert reward_bracket(200) == 200
+        assert reward_bracket(250) == 250
+
+    def test_over_250_or_nonpositive_is_none(self):
+        from engine.scanner import reward_bracket
+
+        assert reward_bracket(251) is None
+        assert reward_bracket(0) is None
+        assert reward_bracket(-5) is None

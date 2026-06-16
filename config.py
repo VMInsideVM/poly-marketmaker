@@ -29,6 +29,14 @@ TEMPLATE_DEFAULTS = {
     "max_exposure_shares": 500,
     "max_concurrent_markets": 10,
     "min_price_double_cents": 10,
+    # 单份奖励阈值档位(SP4)
+    "per_share_reward_thresholds": {
+        "20": 0.30,
+        "50": 0.30,
+        "100": 0.30,
+        "200": 0.30,
+        "250": 0.30,
+    },
 }
 
 # 向后兼容:仍暴露合并后的 DEFAULTS。get_settings() 在最后一个任务前仍以此为基准。
