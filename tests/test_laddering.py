@@ -142,3 +142,24 @@ def test_market_ladders_cross_side_order_a_before_b_same_tier():
     out = compute_market_ladders(a, b, rules, 100.0, 100000)
     assert out["a"] == [(0.50, 200)]
     assert out["b"] == []
+
+
+from engine.laddering import apply_double_sided_floor
+
+
+def test_double_sided_no_sub_threshold_unchanged():
+    ladders = {"a": [(0.30, 100)], "b": []}
+    assert apply_double_sided_floor(ladders, 10) == {"a": [(0.30, 100)], "b": []}
+
+
+def test_double_sided_sub_threshold_both_sides_kept():
+    ladders = {"a": [(0.08, 100)], "b": [(0.30, 100)]}
+    assert apply_double_sided_floor(ladders, 10) == {
+        "a": [(0.08, 100)],
+        "b": [(0.30, 100)],
+    }
+
+
+def test_double_sided_sub_threshold_one_side_cleared():
+    ladders = {"a": [(0.08, 100)], "b": []}
+    assert apply_double_sided_floor(ladders, 10) == {"a": [], "b": []}

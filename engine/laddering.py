@@ -111,3 +111,14 @@ def compute_market_ladders(
             spent_usd += price * shares
             spent_shares += shares
     return out
+
+
+def apply_double_sided_floor(ladders, min_price_double_cents):
+    """§8:若任一已定档价 < 阈值,则要求两边都有>0档;否则整市场清空。"""
+    threshold = min_price_double_cents / 100.0
+    has_sub = any(price < threshold for side in ladders.values() for (price, _) in side)
+    if not has_sub:
+        return ladders
+    if ladders.get("a") and ladders.get("b"):
+        return ladders
+    return {"a": [], "b": []}
