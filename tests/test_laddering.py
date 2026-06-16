@@ -82,3 +82,63 @@ def test_interval_selection_half_open_ascending():
     assert resolve_tier_share(4.9, rule, 0.30, 100, 1000) == 50
     assert resolve_tier_share(5.0, rule, 0.30, 100, 1000) == 100
     assert resolve_tier_share(9.0, rule, 0.30, 100, 1000) == 100
+
+
+from engine.laddering import compute_market_ladders
+
+
+def _side(bids, min_size=100, rmin=0.0, rmax=1.0):
+    return {
+        "bids": bids,
+        "reward_range_min": rmin,
+        "reward_range_max": rmax,
+        "min_size": min_size,
+    }
+
+
+def test_market_ladders_min_size_both_sides():
+    rules = [[{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)]
+    a = _side([_b(0.30, 300), _b(0.29, 300)])
+    b = _side([_b(0.30, 300)])
+    out = compute_market_ladders(a, b, rules, 1000.0, 10000)
+    assert out["a"] == [(0.30, 100), (0.29, 100)]
+    assert out["b"] == [(0.30, 100)]
+
+
+def test_market_ladders_usd_budget_caps_across_sides():
+    rules = [[{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)]
+    a = _side([_b(0.50, 300)])
+    b = _side([_b(0.50, 300)])
+    out = compute_market_ladders(a, b, rules, 80.0, 10000)
+    assert out["a"] == [(0.50, 100)]
+    assert out["b"] == [(0.50, 60)]
+
+
+def test_market_ladders_shares_budget_caps():
+    rules = [
+        [{"upper": None, "action": {"type": "fixed_shares", "shares": 400}}]
+        for _ in range(6)
+    ]
+    a = _side([_b(0.10, 1000)])
+    b = _side([_b(0.10, 1000)])
+    out = compute_market_ladders(a, b, rules, 100000.0, 500)
+    assert out["a"] == [(0.10, 400)]
+    assert out["b"] == [(0.10, 100)]
+
+
+def test_market_ladders_wallet_total_decrements_across_tiers():
+    rules = [[{"upper": None, "action": {"type": "wallet_total"}}] for _ in range(6)]
+    a = _side([_b(0.50, 1000), _b(0.40, 1000)])
+    b = None
+    out = compute_market_ladders(a, b, rules, 100.0, 100000)
+    assert out["a"] == [(0.50, 200)]
+    assert out["b"] == []
+
+
+def test_market_ladders_cross_side_order_a_before_b_same_tier():
+    rules = [[{"upper": None, "action": {"type": "wallet_total"}}] for _ in range(6)]
+    a = _side([_b(0.50, 1000)])
+    b = _side([_b(0.50, 1000)])
+    out = compute_market_ladders(a, b, rules, 100.0, 100000)
+    assert out["a"] == [(0.50, 200)]
+    assert out["b"] == []
