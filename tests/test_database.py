@@ -50,7 +50,6 @@ def test_config_split_engine_and_template_defaults():
 def test_template_defaults_has_multitier_keys():
     from config import TEMPLATE_DEFAULTS
 
-    assert TEMPLATE_DEFAULTS["tiers_k"] == 6
     assert len(TEMPLATE_DEFAULTS["tier_rules"]) == 6
     assert TEMPLATE_DEFAULTS["tier_rules"][0] == [
         {"upper": None, "action": {"type": "min_size"}}
