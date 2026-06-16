@@ -625,6 +625,12 @@ class EngineManager:
     def _do_scan(self):
         """采集一次候选池,每钱包按自己模板精筛+下单。"""
         candidate_pool = self._scan_with_status()
+        if not candidate_pool:
+            # 采集成功但本轮 0 市场(可能是奖励端点瞬时抖动)。此时绝不下单:否则
+            # place_orders(cancel_dropouts=True) 会把全部在挂买单当「跌出 eligible」
+            # 一锅端掉。空池跳过,等下轮重采。(某钱包模板筛后为空属正常,仍下单。)
+            logger.warning("_do_scan: 候选池为空,本轮跳过下单(避免误撤全部买单)")
+            return
         for address, worker in self.engines.items():
             if not worker.running:
                 continue

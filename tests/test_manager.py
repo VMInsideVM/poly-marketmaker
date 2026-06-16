@@ -325,7 +325,33 @@ class TestSharedScanWithStatus:
             manager._do_scan()
         assert manager.scan_status == "done"
         assert manager.last_scan_time > 0
-        worker.place_orders.assert_called_once_with([{"market_id": "m9", "tags": []}], cancel_dropouts=True)
+        worker.place_orders.assert_called_once_with(
+            [{"market_id": "m9", "tags": []}], cancel_dropouts=True
+        )
+
+    def test_auto_do_scan_empty_pool_skips_placement(self):
+        # 采集成功但 0 市场(瞬时抖动)-> 不下单,避免 cancel_dropouts 误撤全部买单。
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xABC": worker}
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
+                return []
+
+            def filter_for_template(self, pool, tmpl, addr):
+                return pool
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._do_scan()
+        worker.place_orders.assert_not_called()
 
     def test_auto_do_scan_distributes_sorted_by_competitiveness(self):
         manager, db = _make_manager()
