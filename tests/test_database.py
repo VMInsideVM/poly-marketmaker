@@ -451,6 +451,13 @@ def test_template_defaults_has_exit_keys():
     assert "stop_loss_pct" not in TEMPLATE_DEFAULTS
 
 
+def test_template_defaults_has_per_share_thresholds():
+    from config import TEMPLATE_DEFAULTS
+
+    t = TEMPLATE_DEFAULTS["per_share_reward_thresholds"]
+    assert t == {"20": 0.30, "50": 0.30, "100": 0.30, "200": 0.30, "250": 0.30}
+
+
 class TestTemplateCRUD:
     def test_create_and_list_templates(self, db):
         tid = db.create_template("保守")
