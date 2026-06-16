@@ -163,3 +163,51 @@ def test_double_sided_sub_threshold_both_sides_kept():
 def test_double_sided_sub_threshold_one_side_cleared():
     ladders = {"a": [(0.08, 100)], "b": []}
     assert apply_double_sided_floor(ladders, 10) == {"a": [], "b": []}
+
+
+from engine.laddering import reconcile_buy_orders
+
+
+def _ob_order(oid, price, size):
+    return {"id": oid, "price": str(price), "original_size": str(size)}
+
+
+def test_reconcile_empty_resting_places_all():
+    cancel_ids, to_place = reconcile_buy_orders([(0.30, 100), (0.29, 100)], [])
+    assert cancel_ids == []
+    assert to_place == [(0.30, 100), (0.29, 100)]
+
+
+def test_reconcile_keeps_matching_price_and_size():
+    resting = [_ob_order("o1", 0.30, 100)]
+    cancel_ids, to_place = reconcile_buy_orders([(0.30, 100), (0.29, 100)], resting)
+    assert cancel_ids == []
+    assert to_place == [(0.29, 100)]
+
+
+def test_reconcile_cancels_price_drift():
+    resting = [_ob_order("o1", 0.30, 100)]
+    cancel_ids, to_place = reconcile_buy_orders([(0.29, 100)], resting)
+    assert cancel_ids == ["o1"]
+    assert to_place == [(0.29, 100)]
+
+
+def test_reconcile_cancels_size_mismatch():
+    resting = [_ob_order("o1", 0.30, 100)]
+    cancel_ids, to_place = reconcile_buy_orders([(0.30, 200)], resting)
+    assert cancel_ids == ["o1"]
+    assert to_place == [(0.30, 200)]
+
+
+def test_reconcile_size_tolerance_keeps():
+    resting = [_ob_order("o1", 0.30, 100)]
+    cancel_ids, to_place = reconcile_buy_orders([(0.30, 100.5)], resting)
+    assert cancel_ids == []
+    assert to_place == []
+
+
+def test_reconcile_empty_target_cancels_all():
+    resting = [_ob_order("o1", 0.30, 100), _ob_order("o2", 0.29, 100)]
+    cancel_ids, to_place = reconcile_buy_orders([], resting)
+    assert set(cancel_ids) == {"o1", "o2"}
+    assert to_place == []

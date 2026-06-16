@@ -97,7 +97,11 @@ class WalletWorker:
         eligible_markets = filter_for_template 的轻量 per-token 条目。
         limit 设置时,达到该数量的成功下单后停止。
         """
-        from engine.laddering import compute_market_ladders, apply_double_sided_floor
+        from engine.laddering import (
+            compute_market_ladders,
+            apply_double_sided_floor,
+            reconcile_buy_orders,
+        )
         from engine.strategy import reward_price_range
 
         try:
@@ -135,19 +139,10 @@ class WalletWorker:
         min_price_double_cents = float(tmpl.get("min_price_double_cents", 10))
 
         buy_orders = [o for o in open_orders if o.get("side") == "BUY"]
-        exposure_usd, exposure_shares = {}, {}
-        open_price_keys, markets_with_open = set(), set()
+        buys_by_token, markets_with_open = {}, set()
         for o in buy_orders:
+            buys_by_token.setdefault(o.get("asset_id", ""), []).append(o)
             mkt = o.get("market", "")
-            aid = o.get("asset_id", "")
-            try:
-                p = float(o.get("price", 0) or 0)
-                sz = float(o.get("original_size", o.get("size", 0)) or 0)
-            except (TypeError, ValueError):
-                p, sz = 0.0, 0.0
-            exposure_usd[mkt] = exposure_usd.get(mkt, 0.0) + p * sz
-            exposure_shares[mkt] = exposure_shares.get(mkt, 0) + int(sz)
-            open_price_keys.add((aid, round(p, 4)))
             if mkt:
                 markets_with_open.add(mkt)
 
@@ -210,8 +205,8 @@ class WalletWorker:
             side_a = sides[0]
             side_b = sides[1] if len(sides) > 1 else None
             balance = self.api.get_balance()
-            budget = min(balance, max_exposure_usd) - exposure_usd.get(mid, 0.0)
-            shares_budget = max_exposure_shares - exposure_shares.get(mid, 0)
+            budget = min(balance, max_exposure_usd)
+            shares_budget = max_exposure_shares
             if budget <= 0 or shares_budget <= 0:
                 continue
             ladders = compute_market_ladders(
@@ -222,28 +217,41 @@ class WalletWorker:
             for key, side in (("a", side_a), ("b", side_b)):
                 if side is None:
                     continue
-                for price, shares in ladders.get(key, []):
-                    pk = (side["token_id"], round(price, 4))
-                    if pk in open_price_keys:
-                        continue
+                token_id = side["token_id"]
+                ladder = ladders.get(key, [])
+                resting = buys_by_token.get(token_id, [])
+                cancel_ids, to_place = reconcile_buy_orders(ladder, resting)
+                if cancel_ids:
+                    try:
+                        self.api.cancel_orders(cancel_ids)
+                        self.db.record_action(
+                            wallet=self.wallet_address,
+                            market_id=mid,
+                            action_type="buy_reconcile_cancel",
+                            side="-",
+                            price=-1,
+                            size=0,
+                            reason="撤改收敛:撤掉价漂移/量不符的旧买单(目标多档梯已变)",
+                            price_basis=f"撤 {len(cancel_ids)} 笔 BUY；来源：CLOB get_open_orders",
+                        )
+                    except Exception as ex:
+                        logger.warning("Reconcile cancel %s failed: %s", token_id, ex)
+                for price, shares in to_place:
                     try:
                         self.api.place_limit_buy(
-                            side["token_id"],
+                            token_id,
                             price,
                             shares,
                             tick_size=side["tick_size_str"],
                             neg_risk=side["neg_risk"],
                         )
                         placed += 1
-                        open_price_keys.add(pk)
                         markets_with_open.add(mid)
                         self._record_place_buy_tier(mid, side, price, shares)
                         if limit is not None and placed >= limit:
                             return
                     except Exception as ex:
-                        logger.error(
-                            "place_limit_buy failed %s: %s", side["token_id"], ex
-                        )
+                        logger.error("place_limit_buy failed %s: %s", token_id, ex)
 
     def _record_place_buy_tier(self, market_id, side, price, shares):
         """记一档买单到 actions(不抛异常)。"""

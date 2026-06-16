@@ -122,3 +122,30 @@ def apply_double_sided_floor(ladders, min_price_double_cents):
     if ladders.get("a") and ladders.get("b"):
         return ladders
     return {"a": [], "b": []}
+
+
+def reconcile_buy_orders(ladder, resting_buys):
+    """撤改收敛(v4 §6):把某 token 的现挂买单收敛到目标 ladder。
+
+    ladder: [(price, shares), ...] 该 token 的目标多档。
+    resting_buys: [{"id","price","original_size"/"size"}, ...] 该 token 当前在挂买单。
+    返回 (cancel_ids, to_place):
+      - 现挂单价不在目标、或同价但量不符(容差 max(1,1%)) -> 撤(进 cancel_ids)。
+      - 价量都符 -> 保持(不撤不挂)。
+      - 目标档里没被任何现挂单保持到的价 -> 挂(进 to_place)。
+    """
+    target = {round(float(p), 4): s for (p, s) in ladder}
+    keep = set()
+    cancel_ids = []
+    for o in resting_buys:
+        op = round(float(o.get("price", 0) or 0), 4)
+        osize = float(o.get("original_size", o.get("size", 0)) or 0)
+        tgt = target.get(op)
+        if tgt is not None and abs(osize - tgt) <= max(1.0, 0.01 * tgt):
+            keep.add(op)
+        else:
+            oid = o.get("id")
+            if oid is not None:
+                cancel_ids.append(oid)
+    to_place = [(p, s) for (p, s) in ladder if round(float(p), 4) not in keep]
+    return cancel_ids, to_place
