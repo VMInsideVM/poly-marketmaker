@@ -841,6 +841,7 @@ class TestCheckSellOrders:
         }
 
     def test_keep_compliant_order(self):
+        # price 0.48, mid=0.50, max_spread=3 → band [0.47, 0.53] → in-band → keep
         monitor, api, db = _make_monitor()
         api.get_open_orders.return_value = [
             {
@@ -856,12 +857,12 @@ class TestCheckSellOrders:
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
 
-        with patch("engine.monitor.needs_replace", return_value="keep"):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
 
         api.cancel_orders.assert_not_called()
 
-    def test_replace_non_compliant_order(self):
+    def test_cancel_outofband_order(self):
+        # price 0.40 is outside reward band [0.47, 0.53] → cancel, no re-place
         monitor, api, db = _make_monitor()
         api.get_open_orders.return_value = [
             {
@@ -877,36 +878,8 @@ class TestCheckSellOrders:
         ]
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        api.place_limit_buy.return_value = {"orderID": "o2"}
 
-        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
-            "engine.monitor.determine_order_price", return_value=0.48
-        ):
-            monitor.check_sell_orders()
-
-        api.cancel_orders.assert_called_with(["o1"])
-        api.place_limit_buy.assert_called_once()
-
-    def test_cancel_non_compliant_order(self):
-        monitor, api, db = _make_monitor()
-        api.get_open_orders.return_value = [
-            {
-                "id": "o1",
-                "side": "BUY",
-                "asset_id": "tok1",
-                "market": "cid1",
-                "size_matched": "0",
-                "price": "0.40",
-                "original_size": "500",
-            }
-        ]
-        api.get_orderbook.return_value = self._ob()
-        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-
-        with patch("engine.monitor.needs_replace", return_value="cancel"), patch(
-            "engine.monitor.determine_order_price", return_value=0.48
-        ):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
 
         api.cancel_orders.assert_called_with(["o1"])
         api.place_limit_buy.assert_not_called()
@@ -970,6 +943,7 @@ class TestCheckSellOrders:
         api.cancel_orders.assert_not_called()
 
     def test_uses_real_max_spread_from_rewards_api(self):
+        # max_spread=3 from API: mid=0.50 → band [0.47, 0.53]; price 0.48 in-band → keep
         monitor, api, db = _make_monitor()
         api.get_open_orders.return_value = [
             {
@@ -985,12 +959,9 @@ class TestCheckSellOrders:
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
 
-        with patch("engine.monitor.needs_replace", return_value="keep"), patch(
-            "engine.monitor.determine_order_price", return_value=0.48
-        ) as dop:
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
 
-        assert dop.call_args.kwargs["max_spread"] == 3
+        api.cancel_orders.assert_not_called()
 
     def test_rewards_cache_hit_single_api_call(self):
         monitor, api, db = _make_monitor()
@@ -1017,8 +988,7 @@ class TestCheckSellOrders:
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
 
-        with patch("engine.monitor.needs_replace", return_value="keep"):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
 
         assert api.get_rewards_for_market.call_count == 1
 
@@ -1064,7 +1034,8 @@ class TestCheckSellOrders:
         api.cancel_orders.assert_not_called()
         api.place_limit_buy.assert_not_called()
 
-    def test_log_replace_has_detail(self, caplog):
+    def test_log_outofband_cancel_has_detail(self, caplog):
+        # price 0.40 out of reward band [0.47, 0.53] → logged cancel
         monitor, api, db = _make_monitor()
         api.get_open_orders.return_value = [
             {
@@ -1080,19 +1051,15 @@ class TestCheckSellOrders:
         ]
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        api.place_limit_buy.return_value = {"orderID": "o2"}
-        with caplog.at_level(logging.INFO, logger="engine.monitor"), patch(
-            "engine.monitor.needs_replace", return_value="replace"
-        ), patch("engine.monitor.determine_order_price", return_value=0.48):
+        with caplog.at_level(logging.INFO, logger="engine.monitor"):
             monitor.check_sell_orders()
         text = caplog.text
         assert "[Step3]" in text
         assert "o1" in text and "cid1" in text
-        assert "max_spread=3" in text
-        assert "replace" in text
-        assert "撤单并重挂" in text
+        assert "cancel" in text
 
     def test_log_keep_has_detail(self, caplog):
+        # price 0.48 in reward band [0.47, 0.53] → logged keep
         monitor, api, db = _make_monitor()
         api.get_open_orders.return_value = [
             {
@@ -1107,35 +1074,10 @@ class TestCheckSellOrders:
         ]
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        with caplog.at_level(logging.INFO, logger="engine.monitor"), patch(
-            "engine.monitor.needs_replace", return_value="keep"
-        ), patch("engine.monitor.determine_order_price", return_value=0.48):
+        with caplog.at_level(logging.INFO, logger="engine.monitor"):
             monitor.check_sell_orders()
         assert "[Step3]" in caplog.text
         assert "keep" in caplog.text
-
-    def test_log_cancel_has_detail(self, caplog):
-        monitor, api, db = _make_monitor()
-        api.get_open_orders.return_value = [
-            {
-                "id": "o1",
-                "side": "BUY",
-                "asset_id": "tok1",
-                "market": "cid1",
-                "size_matched": "0",
-                "price": "0.40",
-                "original_size": "500",
-            }
-        ]
-        api.get_orderbook.return_value = self._ob()
-        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        with caplog.at_level(logging.INFO, logger="engine.monitor"), patch(
-            "engine.monitor.needs_replace", return_value="cancel"
-        ), patch("engine.monitor.determine_order_price", return_value=None):
-            monitor.check_sell_orders()
-        assert "[Step3]" in caplog.text
-        assert "cancel" in caplog.text
-        assert "无" in caplog.text
 
     def test_log_skip_when_max_spread_unknown(self, caplog):
         monitor, api, db = _make_monitor()
@@ -1208,10 +1150,7 @@ class TestMonitorStatusSnapshot:
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
         monitor.begin_status_tick()
-        with patch("engine.monitor.needs_replace", return_value="keep"), patch(
-            "engine.monitor.determine_order_price", return_value=0.48
-        ):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
         monitor.publish_status()
         rows = get_snapshot()["rows"]
         r = next(x for x in rows if x.get("stage") == "Step3")
@@ -1492,50 +1431,28 @@ class TestStep3ActionLog:
             "neg_risk": False,
         }
 
-    def test_replace_records_cancel_old_and_replace_new(self):
+    def test_outofband_records_cancel_action(self):
+        # price 0.40 out of reward band → step3_cancel_outofband, no re-place
         monitor, api, db = _make_monitor()
         api.get_open_orders.return_value = [self._order()]
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        api.place_limit_buy.return_value = {"orderID": "o2"}
-        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
-            "engine.monitor.determine_order_price", return_value=0.48
-        ):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
-        assert ats == ["step3_cancel_old", "step3_replace_new"]
-        new = db.record_action.call_args_list[1]
-        assert new.kwargs["side"] == "买入"
-        assert new.kwargs["price"] == 0.48
-        assert "determine_order_price" in new.kwargs["price_basis"]
-        assert "奖励区间" in new.kwargs["reason"]
-
-    def test_cancel_nocompliant_records_single_action(self):
-        monitor, api, db = _make_monitor()
-        api.get_open_orders.return_value = [self._order()]
-        api.get_orderbook.return_value = self._ob()
-        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        with patch("engine.monitor.needs_replace", return_value="cancel"), patch(
-            "engine.monitor.determine_order_price", return_value=None
-        ):
-            monitor.check_sell_orders()
-        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
-        assert ats == ["step3_cancel_nocompliant"]
+        assert ats == ["step3_cancel_outofband"]
         call = db.record_action.call_args_list[0]
         assert call.kwargs["side"] == "-"
         assert call.kwargs["price"] == -1
-        assert "无合规价" in call.kwargs["reason"]
+        assert "奖励区间" in call.kwargs["reason"]
         api.place_limit_buy.assert_not_called()
 
-    def test_keep_records_no_action(self):
+    def test_inband_records_no_action(self):
+        # price 0.48 in reward band [0.47, 0.53] → keep, no action recorded
         monitor, api, db = _make_monitor()
         api.get_open_orders.return_value = [self._order(price="0.48")]
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        with patch("engine.monitor.needs_replace", return_value="keep"), patch(
-            "engine.monitor.determine_order_price", return_value=0.48
-        ):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
         db.record_action.assert_not_called()
 
     def test_empty_orderbook_records_no_action(self):
@@ -1569,18 +1486,15 @@ class TestStep3ActionLog:
         monitor.check_sell_orders()
         db.record_action.assert_not_called()
 
-    def test_replace_place_fails_records_only_cancel_old(self):
+    def test_cancel_failure_records_no_action(self):
+        # If the cancel API call fails, no action should be recorded
         monitor, api, db = _make_monitor()
         api.get_open_orders.return_value = [self._order()]
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        api.place_limit_buy.side_effect = RuntimeError("network")
-        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
-            "engine.monitor.determine_order_price", return_value=0.48
-        ):
-            monitor.check_sell_orders()  # must not raise
-        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
-        assert ats == ["step3_cancel_old"]
+        api.cancel_orders.side_effect = RuntimeError("network")
+        monitor.check_sell_orders()  # must not raise
+        db.record_action.assert_not_called()
 
 
 class TestStep3PriceBand:
@@ -1607,16 +1521,13 @@ class TestStep3PriceBand:
             "neg_risk": False,
         }
 
-    def test_cancels_when_want_above_band(self):
-        # 目标价 0.55 = 55c > 50c 上限：撤单不重挂，即便策略判定 replace。
+    def test_cancels_when_price_above_band(self):
+        # 挂单价 0.55 = 55c > 50c 上限：price_band_cancel，不重挂。
         monitor, api, db = _make_monitor(self.SETTINGS)
-        api.get_open_orders.return_value = [self._order(price="0.48")]
-        api.get_orderbook.return_value = self._ob()
+        api.get_open_orders.return_value = [self._order(price="0.55")]
+        api.get_orderbook.return_value = self._ob(best_bid="0.55", best_ask="0.56")
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
-            "engine.monitor.determine_order_price", return_value=0.55
-        ):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
         api.cancel_orders.assert_called_once_with(["o1"])
         api.place_limit_buy.assert_not_called()
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
@@ -1626,59 +1537,47 @@ class TestStep3PriceBand:
         assert call.kwargs["price"] == -1
         assert "单价区间" in call.kwargs["reason"]
 
-    def test_cancels_when_want_below_band(self):
-        # 目标价 0.08 = 8c < 10c 下限：撤单不重挂。
+    def test_cancels_when_price_below_band(self):
+        # 挂单价 0.08 = 8c < 10c 下限：price_band_cancel，不重挂。
         monitor, api, db = _make_monitor(self.SETTINGS)
-        api.get_open_orders.return_value = [self._order(price="0.12")]
-        api.get_orderbook.return_value = self._ob(best_bid="0.09", best_ask="0.11")
+        api.get_open_orders.return_value = [self._order(price="0.08")]
+        api.get_orderbook.return_value = self._ob(best_bid="0.08", best_ask="0.09")
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
-            "engine.monitor.determine_order_price", return_value=0.08
-        ):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
         api.cancel_orders.assert_called_once_with(["o1"])
         api.place_limit_buy.assert_not_called()
 
-    def test_keeps_when_want_at_band_edge(self):
-        # 含端点：目标价 0.50 = 50c 恰在上限，合规，按 keep 不撤单。
+    def test_keeps_when_price_at_band_edge(self):
+        # 含端点：挂单价 0.50 = 50c 恰在上限，且在奖励区间内，保持不动。
+        # mid = (0.50+0.51)/2 = 0.505; max_spread=3 → band [0.475, 0.535]; 0.50 in-band.
         monitor, api, db = _make_monitor(self.SETTINGS)
         api.get_open_orders.return_value = [self._order(price="0.50")]
         api.get_orderbook.return_value = self._ob(best_bid="0.50", best_ask="0.51")
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        with patch("engine.monitor.needs_replace", return_value="keep"), patch(
-            "engine.monitor.determine_order_price", return_value=0.50
-        ):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
         api.cancel_orders.assert_not_called()
 
-    def test_within_band_replaces_normally(self):
-        # 目标价 0.48 在区间内：维持原有 replace 行为。
+    def test_within_price_band_and_reward_band_keeps(self):
+        # 挂单价 0.48 在单价区间 [10c,50c] 内，且在奖励区间内：保持不动。
         monitor, api, db = _make_monitor(self.SETTINGS)
-        api.get_open_orders.return_value = [self._order(price="0.40")]
+        api.get_open_orders.return_value = [self._order(price="0.48")]
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        api.place_limit_buy.return_value = {"orderID": "o2"}
-        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
-            "engine.monitor.determine_order_price", return_value=0.48
-        ):
-            monitor.check_sell_orders()
-        api.cancel_orders.assert_called_once_with(["o1"])
-        api.place_limit_buy.assert_called_once()
-        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
-        assert ats == ["step3_cancel_old", "step3_replace_new"]
+        monitor.check_sell_orders()
+        api.cancel_orders.assert_not_called()
+        api.place_limit_buy.assert_not_called()
 
     def test_no_band_keys_is_noop(self):
-        # 默认 settings 不含价格区间键：闸门为 no-op，目标价 0.55 仍按 replace。
+        # 默认 settings 不含价格区间键：price_band 闸门 no-op。
+        # 挂单价 0.40 在奖励区间外 → step3_cancel_outofband。
         monitor, api, db = _make_monitor()
         api.get_open_orders.return_value = [self._order(price="0.40")]
         api.get_orderbook.return_value = self._ob()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        api.place_limit_buy.return_value = {"orderID": "o2"}
-        with patch("engine.monitor.needs_replace", return_value="replace"), patch(
-            "engine.monitor.determine_order_price", return_value=0.55
-        ):
-            monitor.check_sell_orders()
-        api.place_limit_buy.assert_called_once()
+        monitor.check_sell_orders()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["step3_cancel_outofband"]
+        api.place_limit_buy.assert_not_called()
 
 
 class TestStep3EligibilityRecheck:
@@ -1734,29 +1633,32 @@ class TestStep3EligibilityRecheck:
         db.record_action.assert_not_called()
 
     def test_keeps_and_runs_compliance_when_spread_narrow(self):
+        # buy price=0.30, bid=0.30, ask=0.31 → mid=0.305, band [0.275, 0.335] → in-band → keep
         monitor, api, db = _make_monitor(self.SETTINGS)
         api.get_open_orders.return_value = self._buy()
         api.get_orderbook.return_value = self._ob(
             best_bid="0.30", best_ask="0.31"
         )  # 1c < 3c
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        with patch("engine.monitor.needs_replace", return_value="keep"):
-            monitor.check_sell_orders()
+        monitor.check_sell_orders()
         api.cancel_orders.assert_not_called()
 
     def test_dropped_dimensions_do_not_cause_cancel(self):
-        # reward / settlement / price-band are no longer checked: a market that
-        # would have failed those (e.g. bid far out of the old price band) must
-        # NOT be cancelled as long as the spread is within threshold.
+        # buy price=0.30, bid=0.60, ask=0.61 → 1c spread → passes eligibility.
+        # mid=0.605, max_spread=3 → band [0.575, 0.635]. Order price 0.30 is out
+        # of reward band → step3_cancel_outofband (not eligibility_cancel).
+        # The comment below preserves the original intent: spread check alone does
+        # not cancel when spread is narrow, even if the price seems off.
         monitor, api, db = _make_monitor(self.SETTINGS)
         api.get_open_orders.return_value = self._buy()
         api.get_orderbook.return_value = self._ob(
             best_bid="0.60", best_ask="0.61"
         )  # 1c spread
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
-        with patch("engine.monitor.needs_replace", return_value="keep"):
-            monitor.check_sell_orders()
-        api.cancel_orders.assert_not_called()
+        monitor.check_sell_orders()
+        # eligibility cancel must NOT fire (spread 1c < threshold 3c)
+        ats = [c.kwargs.get("action_type") for c in db.record_action.call_args_list]
+        assert "eligibility_cancel" not in ats
 
 
 class TestCostHelper:
