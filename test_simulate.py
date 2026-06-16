@@ -45,7 +45,8 @@ def main():
     private_key = decrypt(w["encrypted_key"], key)
 
     from api.polymarket_api import PolymarketAPI
-    from engine.strategy import determine_order_price
+
+    # determine_order_price retired in SP2; this script needs updating for laddering
 
     api = PolymarketAPI(private_key, funder=w.get("funder") or None)
     balance = safe_call(api.get_balance, 0)
@@ -159,20 +160,11 @@ def main():
                     marker = " ← > 2000, 挂下一档" if bid_size > 2000 else ""
                     print(f"    #{i+1} price={bid['price']} size={bid_size}{marker}")
 
-        # 计算挂单价格
-        try:
-            order_price = determine_order_price(
-                bids=bids,
-                max_spread=max_spread_reward,
-                tick_size=tick_size,
-                reward_range_min=reward_range_min,
-                reward_range_max=reward_range_max,
-            )
-        except Exception as e:
-            reason = f"策略计算异常: {e}"
-            print(f"\n  ✗ {reason}")
-            skipped_list.append({"market": market, "reason": reason})
-            continue
+        # TODO(SP2): 定价改用 laddering 引擎，此脚本暂未更新
+        reason = "test_simulate 需更新为多档引擎（determine_order_price 已退役）"
+        print(f"\n  ✗ {reason}")
+        skipped_list.append({"market": market, "reason": reason})
+        continue
 
         order_size = market["order_size"]
 

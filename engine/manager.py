@@ -13,7 +13,6 @@ from api.polymarket_api import PolymarketAPI
 from engine.scanner import MarketScanner
 from engine.monitor import OrderMonitor
 from engine.positions import held_condition_ids
-from engine.order_sizing import compute_order_size
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
@@ -94,14 +93,14 @@ class WalletWorker:
         self.monitor.publish_status()
 
     def place_orders(self, eligible_markets: list[dict], limit: int | None = None):
-        """Place orders on eligible markets; price recomputed at placement time.
+        """多档挂单:按市场分组,下单时算 K 档/边,整市场敞口共享,§8 <10¢ 双边。
 
-        If ``limit`` is set, stop after that many *successful* placements
-        (a placement counts only when ``place_limit_buy`` succeeds).
+        eligible_markets = filter_for_template 的轻量 per-token 条目。
+        limit 设置时,达到该数量的成功下单后停止。
         """
-        from engine.strategy import determine_order_price, reward_price_range
+        from engine.laddering import compute_market_ladders, apply_double_sided_floor
+        from engine.strategy import reward_price_range
 
-        placed = 0
         try:
             open_orders = self.api.get_open_orders()
         except Exception as e:
@@ -117,205 +116,150 @@ class WalletWorker:
             )
             return
         held = held_condition_ids(positions)
-        buy_orders = [o for o in open_orders if o.get("side") == "BUY"]
-
-        # Hard per-wallet cap on the TOTAL open buy orders. Read live from
-        # settings (not the constructor snapshot) so a config change takes
-        # effect on the next placement without restarting the engine.
+        blacklist = self.db.get_blacklist_ids()
         tmpl = self.db.get_template_for(self.wallet_address)
-        max_buys = int(tmpl.get("max_buy_orders_per_wallet", 5))
-        order_size_mode = tmpl.get("order_size_mode", "min")
-        order_size_custom_usd = float(tmpl.get("order_size_custom_usd", 0) or 0)
-
-        # If existing buys already exceed the cap (e.g. the user just lowered
-        # it), cancel the excess down to the cap. Keep the oldest orders
-        # (smallest created_at = longest queue priority / most rewards) and
-        # cancel the newest excess.
-        if len(buy_orders) > max_buys:
-            ordered = sorted(
-                buy_orders, key=lambda o: float(o.get("created_at", 0) or 0)
-            )
-            keep, excess = ordered[:max_buys], ordered[max_buys:]
-            excess_ids = [o["id"] for o in excess if o.get("id")]
-            if excess_ids:
-                try:
-                    self.api.cancel_orders(excess_ids)
-                    logger.info(
-                        "Cancelled %d excess buy orders for %s (cap %d)",
-                        len(excess_ids),
-                        self.wallet_address,
-                        max_buys,
-                    )
-                    self._record_cap_cancel(excess)
-                    buy_orders = keep
-                except Exception as e:
-                    logger.error(
-                        "Cancel excess buys for %s failed: %s", self.wallet_address, e
-                    )
-
-        open_buy_assets = {o.get("asset_id") for o in buy_orders}
-        # available slots = cap - existing buys. Recomputed each distribution
-        # from the live order count, so the total never exceeds the cap.
-        slots = max_buys - len(buy_orders)
-        if slots <= 0:
-            logger.info(
-                "Buy-order cap (%d) reached for %s, skipping placement",
-                max_buys,
+        tier_rules = tmpl.get("tier_rules") or []
+        if not tier_rules:
+            # 模板没配档位规则表 -> 一单都不会挂。显式告警,避免"引擎在跑却
+            # 静默不下单"被误认为"没机会",便于排查模板配置问题。
+            logger.warning(
+                "place_orders skipped for %s: empty tier_rules (模板未配档位规则表)",
                 self.wallet_address,
             )
             return
-        effective_limit = slots if limit is None else min(limit, slots)
+        # max_exposure_usd 是「单市场」敞口上限(YES+NO 合计);跨市场不设全局
+        # 美元锁(maker 买单不锁仓,一笔余额垫付所有挂单),总量由 max_concurrent
+        # _markets × 单市场敞口 约束。
+        max_exposure_usd = float(tmpl.get("max_exposure_usd", 250))
+        max_exposure_shares = int(tmpl.get("max_exposure_shares", 500))
+        max_concurrent = int(tmpl.get("max_concurrent_markets", 10))
+        min_price_double_cents = float(tmpl.get("min_price_double_cents", 10))
 
-        # 全局黑名单:任何钱包都不再挂这些 condition_id 的买单(一次性加载)。
-        blacklist = self.db.get_blacklist_ids()
-
-        for market in eligible_markets:
-            if market["market_id"] in blacklist:
-                continue
-            if market["market_id"] in held:
-                continue
-            if self.db.is_in_cooldown(self.wallet_address, market["market_id"]):
-                continue
-            if market["token_id"] in open_buy_assets:
-                continue
-
-            # Per-wallet balance gate: skip markets this wallet can't even
-            # afford the minimum reward-qualifying order on, before doing any
-            # detailed work (orderbook/strategy). min_cost is recorded at scan.
-            min_cost = float(market.get("min_cost", 0) or 0)
-            if self.api.get_balance() < min_cost:
-                logger.info(
-                    "Skip %s: balance below min_cost %.2f",
-                    market["market_name"],
-                    min_cost,
-                )
-                continue
-
+        buy_orders = [o for o in open_orders if o.get("side") == "BUY"]
+        exposure_usd, exposure_shares = {}, {}
+        open_price_keys, markets_with_open = set(), set()
+        for o in buy_orders:
+            mkt = o.get("market", "")
+            aid = o.get("asset_id", "")
             try:
-                ob = self.api.get_orderbook(market["token_id"])
-            except Exception as e:
-                logger.warning("Orderbook failed for %s: %s", market["market_name"], e)
+                p = float(o.get("price", 0) or 0)
+                sz = float(o.get("original_size", o.get("size", 0)) or 0)
+            except (TypeError, ValueError):
+                p, sz = 0.0, 0.0
+            exposure_usd[mkt] = exposure_usd.get(mkt, 0.0) + p * sz
+            exposure_shares[mkt] = exposure_shares.get(mkt, 0) + int(sz)
+            open_price_keys.add((aid, round(p, 4)))
+            if mkt:
+                markets_with_open.add(mkt)
+
+        grouped, order = {}, []
+        for e in eligible_markets:
+            mid = e["market_id"]
+            if mid not in grouped:
+                grouped[mid] = []
+                order.append(mid)
+            grouped[mid].append(e)
+
+        placed = 0
+        for mid in order:
+            if mid in blacklist or mid in held:
                 continue
-            bids = sorted(
-                ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True
-            )
-            asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))
-            if not bids or not asks:
+            if self.db.is_in_cooldown(self.wallet_address, mid):
                 continue
-            best_bid = float(bids[0]["price"])
-            best_ask = float(asks[0]["price"])
-            midpoint = (best_bid + best_ask) / 2
-            tick = float(ob.get("tick_size", "0.01"))
-            tick_str = ob.get("tick_size", "0.01")
-            # max_spread is in CENTS (e.g. 3, 4.5); the reward band is that many
-            # cents around the midpoint, NOT that many ticks. Keep it a float.
-            max_spread = float(market.get("rewards_max_spread", 2))
-            rmin, rmax = reward_price_range(midpoint, max_spread)
-            try:
-                order_price = determine_order_price(
-                    bids=bids,
-                    # int tick-count drives the 1-cent coarse-path choice
-                    # (1 cent == 1 tick); the band above carries full cents.
-                    max_spread=int(max_spread),
-                    tick_size=tick,
-                    reward_range_min=rmin,
-                    reward_range_max=rmax,
-                )
-            except Exception as e:
-                logger.warning("Strategy failed for %s: %s", market["market_name"], e)
-                continue
-            if order_price is None:
+            if (
+                mid not in markets_with_open
+                and len(markets_with_open) >= max_concurrent
+            ):
                 continue
 
+            sides = []
+            for e in grouped[mid]:
+                token_id = e["token_id"]
+                try:
+                    ob = self.api.get_orderbook(token_id)
+                except Exception as ex:
+                    logger.warning(
+                        "Orderbook failed for %s: %s", e.get("market_name", ""), ex
+                    )
+                    continue
+                bids = sorted(
+                    ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True
+                )
+                asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))
+                if not bids or not asks:
+                    continue
+                best_bid, best_ask = float(bids[0]["price"]), float(asks[0]["price"])
+                midpoint = (best_bid + best_ask) / 2
+                max_spread = float(e.get("rewards_max_spread", 2))
+                rmin, rmax = reward_price_range(midpoint, max_spread)
+                sides.append(
+                    {
+                        "token_id": token_id,
+                        "outcome": e.get("outcome", ""),
+                        "neg_risk": e.get("neg_risk", False),
+                        "tick_size_str": ob.get("tick_size", "0.01"),
+                        "min_size": int(e.get("rewards_min_size", 0) or 0),
+                        "bids": bids,
+                        "reward_range_min": rmin,
+                        "reward_range_max": rmax,
+                        "max_spread": max_spread,
+                    }
+                )
+            if not sides:
+                continue
+
+            side_a = sides[0]
+            side_b = sides[1] if len(sides) > 1 else None
             balance = self.api.get_balance()
-            # 下单份额按设置的模式决定(min=最小合格份额 / custom=美元上限 /
-            # balance=全额)。maker 买单不锁仓,同一笔余额垫付所有挂着的买单,
-            # 所以跨市场循环时刻意 *不* 递减余额。
-            min_size = int(
-                market.get("rewards_min_size", market.get("order_size", 0)) or 0
-            )
-            order_size = compute_order_size(
-                order_size_mode,
-                order_price,
-                balance,
-                min_size,
-                order_size_custom_usd,
-            )
-            if order_size is None:
-                logger.info(
-                    "Skip %s: order_size=None "
-                    "(mode=%s balance=%.2f price=%.4f min_size=%d cap=%.2f)",
-                    market["market_name"],
-                    order_size_mode,
-                    balance,
-                    order_price,
-                    min_size,
-                    order_size_custom_usd,
-                )
+            budget = min(balance, max_exposure_usd) - exposure_usd.get(mid, 0.0)
+            shares_budget = max_exposure_shares - exposure_shares.get(mid, 0)
+            if budget <= 0 or shares_budget <= 0:
                 continue
-            try:
-                self.api.place_limit_buy(
-                    market["token_id"],
-                    order_price,
-                    order_size,
-                    tick_size=tick_str,
-                    neg_risk=market.get("neg_risk", False),
-                )
-                logger.info(
-                    "Placed buy %s [%s] @ %.4f x %d",
-                    market["market_name"],
-                    market["outcome"],
-                    order_price,
-                    order_size,
-                )
-                placed += 1
-                self._record_place_buy(
-                    market, order_price, order_size, max_spread, rmin, rmax
-                )
-                if placed >= effective_limit:
-                    break
-            except Exception as e:
-                logger.error("Error placing order for %s: %s", market["market_name"], e)
+            ladders = compute_market_ladders(
+                side_a, side_b, tier_rules, budget, shares_budget
+            )
+            ladders = apply_double_sided_floor(ladders, min_price_double_cents)
 
-    def _record_cap_cancel(self, excess: list):
-        """Log each buy order cancelled for exceeding the per-wallet cap."""
-        for o in excess:
-            try:
-                self.db.record_action(
-                    wallet=self.wallet_address,
-                    market_id=o.get("market", ""),
-                    action_type="cap_cancel_excess",
-                    side="-",
-                    price=-1,
-                    size=int(float(o.get("original_size", 0) or 0)),
-                    reason=(
-                        "超过每钱包挂买单上限，撤销多余买单"
-                        "（保留挂得最久的，丢失队列优先级最小）"
-                    ),
-                    price_basis=(
-                        f"撤 order_id={o.get('id')}；上限=max_buy_orders_per_wallet；"
-                        f"来源：CLOB get_open_orders"
-                    ),
-                )
-            except Exception as e:
-                logger.warning("record_action(cap_cancel_excess) failed: %s", e)
+            for key, side in (("a", side_a), ("b", side_b)):
+                if side is None:
+                    continue
+                for price, shares in ladders.get(key, []):
+                    pk = (side["token_id"], round(price, 4))
+                    if pk in open_price_keys:
+                        continue
+                    try:
+                        self.api.place_limit_buy(
+                            side["token_id"],
+                            price,
+                            shares,
+                            tick_size=side["tick_size_str"],
+                            neg_risk=side["neg_risk"],
+                        )
+                        placed += 1
+                        open_price_keys.add(pk)
+                        markets_with_open.add(mid)
+                        self._record_place_buy_tier(mid, side, price, shares)
+                        if limit is not None and placed >= limit:
+                            return
+                    except Exception as ex:
+                        logger.error(
+                            "place_limit_buy failed %s: %s", side["token_id"], ex
+                        )
 
-    def _record_place_buy(
-        self, market, order_price, order_size, max_spread, rmin, rmax
-    ):
-        """Log a successful buy placement to the actions table (never raises)."""
+    def _record_place_buy_tier(self, market_id, side, price, shares):
+        """记一档买单到 actions(不抛异常)。"""
         try:
             self.db.record_action(
                 wallet=self.wallet_address,
-                market_id=market["market_id"],
+                market_id=market_id,
                 action_type="place_buy",
                 side="买入",
-                price=order_price,
-                size=order_size,
-                reason="按策略在奖励区间内挂买单（贴最优买价深度，最大化奖励占比）",
+                price=price,
+                size=shares,
+                reason="多档:在奖励区间内按累加厚度规则表挂买单",
                 price_basis=(
-                    f"应挂价 {order_price:.4f}=determine_order_price(bids, "
-                    f"ms{max_spread}, 区间[{rmin:.4f},{rmax:.4f}])；"
+                    f"档价 {price:.4f}（{side.get('outcome','')}）；"
+                    f"奖励区间[{side['reward_range_min']:.4f},{side['reward_range_max']:.4f}]；"
                     f"来源：CLOB get_orderbook"
                 ),
             )

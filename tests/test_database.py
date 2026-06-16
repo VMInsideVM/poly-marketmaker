@@ -46,6 +46,23 @@ def test_config_split_engine_and_template_defaults():
     assert set(ENGINE_DEFAULTS) & set(TEMPLATE_DEFAULTS) == set()
 
 
+def test_template_defaults_has_multitier_keys():
+    from config import TEMPLATE_DEFAULTS
+
+    assert TEMPLATE_DEFAULTS["tiers_k"] == 6
+    assert len(TEMPLATE_DEFAULTS["tier_rules"]) == 6
+    assert TEMPLATE_DEFAULTS["tier_rules"][0] == [
+        {"upper": None, "action": {"type": "min_size"}}
+    ]
+    assert TEMPLATE_DEFAULTS["max_exposure_usd"] == 250
+    assert TEMPLATE_DEFAULTS["max_exposure_shares"] == 500
+    assert TEMPLATE_DEFAULTS["max_concurrent_markets"] == 10
+    assert TEMPLATE_DEFAULTS["min_price_double_cents"] == 10
+    assert "order_size_mode" not in TEMPLATE_DEFAULTS
+    assert "order_size_custom_usd" not in TEMPLATE_DEFAULTS
+    assert "max_buy_orders_per_wallet" not in TEMPLATE_DEFAULTS
+
+
 @pytest.fixture
 def db(tmp_path):
     db_path = str(tmp_path / "test.db")
@@ -101,7 +118,7 @@ class TestSettingsToTemplateMigration:
         t = db.get_template(db.get_default_template_id())
         assert t["stop_loss_pct"] == 10.0
         assert t["min_reward_usd"] == 200.0
-        assert t["order_size_mode"] == "balance"
+        # order_size_mode was retired (SP2); migration no longer moves it
 
     def test_engine_keys_stay_in_settings(self, db):
         self._make_legacy_state(db)

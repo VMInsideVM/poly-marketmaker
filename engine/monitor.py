@@ -10,10 +10,9 @@ from engine.take_profit import (
     describe_cost_basis,
     take_profit_price,
 )
-from engine.strategy_check import needs_replace
 from engine.eligibility import recheck_resting_buy
 from engine.risk import stop_loss_triggered
-from engine.strategy import determine_order_price, reward_price_range
+from engine.strategy import reward_price_range
 from engine.rewards import extract_max_spread
 from engine import monitor_status
 
@@ -631,7 +630,7 @@ class OrderMonitor:
             )
             return
 
-        # --- price compliance (unchanged behavior) ---
+        # --- 奖励区间合规检查（SP2：不重挂，多档引擎在下次下单周期重挂）---
         if not bids or not asks:
             logger.info(
                 "[Step3] 单 %s 市场 %s | 盘口为空，本轮跳过",
@@ -650,8 +649,6 @@ class OrderMonitor:
             )
             return
         midpoint = (best_bid + best_ask) / 2
-        tick = float(ob.get("tick_size", "0.01"))
-        tick_str = ob.get("tick_size", "0.01")
         max_spread = self._market_max_spread(cid)
         if max_spread is None:
             logger.info(
@@ -675,29 +672,16 @@ class OrderMonitor:
         # Reward band is max_spread CENTS around the midpoint, NOT max_spread
         # ticks (the tick form is ~10x too narrow on 0.1-cent markets).
         rmin, rmax = reward_price_range(midpoint, max_spread)
-        try:
-            want = determine_order_price(
-                bids=bids,
-                # int tick-count drives the 1-cent coarse-path choice
-                # (1 cent == 1 tick); the band above carries full cents.
-                max_spread=int(max_spread),
-                tick_size=tick,
-                reward_range_min=rmin,
-                reward_range_max=rmax,
-            )
-        except Exception as e:
-            logger.warning("determine_order_price failed for %s: %s", o.get("id"), e)
-            return
-        # 价格区间护栏:调单算出的目标价若超出配置「单价区间」[min,max]美分,撤该
-        # 买单不重挂(与 scanner 价格区间初筛口径一致,含端点)。缺失阈值时安全默认
-        # 0/100,使该闸门成为 no-op(不影响未设区间的旧测试与场景)。
+        cur_price = float(o.get("price", 0) or 0)
+        osize = int(float(o.get("original_size", 0) or 0))
+
+        # 价格区间护栏：挂单价若超出配置「单价区间」[min,max]美分，撤该买单不重挂。
+        # 缺失阈值时安全默认 0/100，使该闸门成为 no-op。
         min_pc = float(settings.get("min_price_cents", 0.0))
         max_pc = float(settings.get("max_price_cents", 100.0))
-        if want is not None and (want * 100 < min_pc or want * 100 > max_pc):
-            old_price = float(o.get("price", 0) or 0)
-            osize = int(float(o.get("original_size", 0) or 0))
+        if cur_price * 100 < min_pc or cur_price * 100 > max_pc:
             reason = (
-                f"调单目标价 {want * 100:.1f}c 不在单价区间 "
+                f"挂单价 {cur_price * 100:.1f}c 不在单价区间 "
                 f"[{min_pc:.0f}c, {max_pc:.0f}c]，撤买单不重挂"
             )
             try:
@@ -713,111 +697,93 @@ class OrderMonitor:
                 size=osize,
                 reason=reason,
                 price_basis=(
-                    f"调单目标价={want:.4f}；单价区间[{min_pc:.0f}c,{max_pc:.0f}c]；"
+                    f"挂单价={cur_price:.4f}；单价区间[{min_pc:.0f}c,{max_pc:.0f}c]；"
                     f"来源：CLOB get_orderbook + get_rewards_for_market + 设置"
                 ),
             )
             self._status_add(
                 market=cid,
                 side="买入",
-                price=f"{old_price:.4f}",
+                price=f"{cur_price:.4f}",
                 size=str(o.get("original_size", "")),
                 matched=str(o.get("size_matched", "0")),
                 stage="Step3",
-                action="撤单(目标价超区间)",
+                action="撤单(价格超区间)",
                 detail=reason,
             )
             logger.info(
                 "[Step3] price-band cancel %s market %s: %s", o.get("id"), cid, reason
             )
             return
-        action = needs_replace(float(o.get("price", 0)), want, tick)
-        want_str = "无" if want is None else f"{want:.4f}"
-        action_zh = {
-            "keep": "keep → 保持不动",
-            "replace": f"replace → 撤单并重挂 {want_str}",
-            "cancel": "cancel → 撤单不重挂",
-        }.get(action, action)
+
+        # 挂单价不在奖励区间 → 撤单不重挂（多档引擎下次 place_orders 重挂）。
+        if not (rmin <= cur_price <= rmax):
+            reason = (
+                f"挂单价 {cur_price:.4f} 不在奖励区间 "
+                f"[{rmin:.4f},{rmax:.4f}]，撤买单不重挂"
+            )
+            try:
+                self.api.cancel_orders([o.get("id")])
+            except Exception as e:
+                logger.warning("Cancel out-of-band %s failed: %s", o.get("id"), e)
+                return
+            self._record_action(
+                market_id=cid,
+                action_type="step3_cancel_outofband",
+                side="-",
+                price=-1,
+                size=osize,
+                reason=reason,
+                price_basis=(
+                    f"挂单价={cur_price:.4f}；奖励区间[{rmin:.4f},{rmax:.4f}] "
+                    f"mid{midpoint:.4f} ms{max_spread}；"
+                    f"来源：CLOB get_orderbook + get_rewards_for_market"
+                ),
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price=f"{cur_price:.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="撤单(价格出奖励区间)",
+                detail=reason,
+            )
+            logger.info(
+                "[Step3] out-of-band cancel %s market %s | price %.4f not in [%.4f,%.4f]",
+                o.get("id"),
+                cid,
+                cur_price,
+                rmin,
+                rmax,
+            )
+            return
+
+        # 挂单价在奖励区间内 → 保持不动。
         logger.info(
-            "[Step3] 单 %s 市场 %s 现价 %.4f | 盘口 bid %.4f ask %.4f mid %.4f "
-            "tick %.4f | max_spread=%s 区间[%.4f,%.4f] | 应挂价 %s | 判定 %s",
+            "[Step3] 单 %s 市场 %s 现价 %.4f | bid %.4f ask %.4f mid %.4f "
+            "max_spread=%s 区间[%.4f,%.4f] | keep",
             o.get("id"),
             cid,
-            float(o.get("price", 0) or 0),
+            cur_price,
             best_bid,
             best_ask,
             midpoint,
-            tick,
             max_spread,
             rmin,
             rmax,
-            ("无" if want is None else f"{want:.4f}"),
-            action_zh,
         )
         self._status_add(
             market=cid,
             side="买入",
-            price=f"{float(o.get('price', 0) or 0):.4f}",
+            price=f"{cur_price:.4f}",
             size=str(o.get("original_size", "")),
             matched=str(o.get("size_matched", "0")),
             stage="Step3",
-            action=action_zh,
+            action="keep → 保持不动",
             detail=(
                 f"bid{best_bid:.4f} ask{best_ask:.4f} mid{midpoint:.4f} "
-                f"ms{max_spread} 区间[{rmin:.4f},{rmax:.4f}] 应挂{want_str}"
+                f"ms{max_spread} 区间[{rmin:.4f},{rmax:.4f}]"
             ),
         )
-        if action == "keep":
-            return
-        old_price = float(o.get("price", 0) or 0)
-        osize = int(float(o.get("original_size", 0) or 0))
-        basis = (
-            f"旧价 {old_price:.4f}；区间[{rmin:.4f},{rmax:.4f}] "
-            f"mid{midpoint:.4f} ms{max_spread} tick{tick:.4f}；"
-            f"来源：CLOB get_orderbook + get_rewards_for_market"
-        )
-        try:
-            self.api.cancel_orders([o["id"]])
-        except Exception as e:
-            logger.warning("Cancel %s failed: %s", o.get("id"), e)
-            return
-        if action == "replace":
-            self._record_action(
-                market_id=cid,
-                action_type="step3_cancel_old",
-                side="-",
-                price=-1,
-                size=osize,
-                reason=f"挂单价 {old_price:.4f} 不在最新奖励区间内，撤旧买单准备重挂",
-                price_basis=basis,
-            )
-            neg_risk = bool(o.get("neg_risk", False))
-            self.api.place_limit_buy(
-                token_id, want, osize, tick_size=tick_str, neg_risk=neg_risk
-            )
-            self._record_action(
-                market_id=cid,
-                action_type="step3_replace_new",
-                side="买入",
-                price=want,
-                size=osize,
-                reason="按策略在奖励区间内重挂买单（贴最优买价深度，最大化奖励占比）",
-                price_basis=(
-                    f"应挂价 {want:.4f}=determine_order_price(bids, "
-                    f"ms{max_spread}, tick{tick:.4f}, "
-                    f"区间[{rmin:.4f},{rmax:.4f}])；"
-                    f"来源：CLOB get_orderbook + get_rewards_for_market"
-                ),
-            )
-            logger.info("Replaced buy %s -> %.4f", o.get("id"), want)
-        else:
-            self._record_action(
-                market_id=cid,
-                action_type="step3_cancel_nocompliant",
-                side="-",
-                price=-1,
-                size=osize,
-                reason="奖励区间内无合规价，撤该买单（不重挂）",
-                price_basis=basis,
-            )
-            logger.info("Cancelled non-compliant buy %s (no valid price)", o.get("id"))

@@ -5,7 +5,8 @@ import hashlib
 from models.database import Database
 from utils.crypto import decrypt, derive_key
 from config import DB_PATH
-from engine.strategy import determine_order_price
+
+# determine_order_price retired in SP2; this script needs updating for laddering
 
 
 def safe_call(fn, default=None, retries=3):
@@ -122,22 +123,11 @@ def main():
         reward_range_min = midpoint - max_spread_reward * tick_size
         reward_range_max = midpoint + max_spread_reward * tick_size
 
-        # 重新计算挂单价格
-        try:
-            order_price = determine_order_price(
-                bids=bids,
-                max_spread=max_spread_reward,
-                tick_size=tick_size,
-                reward_range_min=reward_range_min,
-                reward_range_max=reward_range_max,
-            )
-        except Exception as e:
-            print(f"\n  跳过: {market['market_name'][:40]} — 策略错误: {e}")
-            continue
-
-        if order_price is None:
-            print(f"\n  跳过: {market['market_name'][:40]} — 策略未找到合适价格")
-            continue
+        # TODO(SP2): 挂单定价改用 laddering 引擎，此脚本暂未更新
+        print(
+            f"\n  跳过: {market['market_name'][:40]} — test_real_order 需更新为多档引擎"
+        )
+        continue
 
         order_size = market["order_size"]
         neg_risk = bool(market.get("neg_risk", 0))
