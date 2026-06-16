@@ -238,596 +238,6 @@ class TestInitWatermark:
 
 
 # ---------------------------------------------------------------------------
-# Step 1b: check_take_profit — position-driven take-profit (one sell at cost)
-# ---------------------------------------------------------------------------
-
-
-class TestCheckTakeProfit:
-    def _pos(self, size=222.08, avg=0.30, asset="tok1", cid="mkt1"):
-        return {
-            "asset": asset,
-            "size": size,
-            "avgPrice": avg,
-            "curPrice": avg,
-            "conditionId": cid,
-        }
-
-    def _sell(self, oid, price, original, asset="tok1", matched=0):
-        return {
-            "id": oid,
-            "asset_id": asset,
-            "side": "SELL",
-            "price": str(price),
-            "original_size": str(original),
-            "size_matched": str(matched),
-        }
-
-    def _buy(self, price=0.30, size=222.08, asset="tok1", ts="100"):
-        return {
-            "id": f"t-{ts}",
-            "market": "mkt1",
-            "match_time": ts,
-            "maker_orders": [
-                {
-                    "order_id": f"o-{ts}",
-                    "maker_address": "0xFUNDER",
-                    "side": "BUY",
-                    "matched_amount": str(size),
-                    "price": str(price),
-                    "asset_id": asset,
-                }
-            ],
-        }
-
-    def test_places_one_sell_at_cost_when_none_exist(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos()]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = [self._buy()]
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.check_take_profit()
-
-        api.place_limit_sell.assert_called_once_with(
-            "tok1", 0.30, 222.08, tick_size="0.01"
-        )
-        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
-        assert "take_profit_sell" in ats
-        tp = next(
-            c
-            for c in db.record_action.call_args_list
-            if c.kwargs["action_type"] == "take_profit_sell"
-        )
-        assert tp.kwargs["price"] == 0.30
-        assert "get_trades" in tp.kwargs["price_basis"]
-
-    def test_keeps_correct_single_sell(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos()]
-        api.get_open_orders.return_value = [self._sell("s1", 0.30, 222.08)]
-        api.get_trades.return_value = [self._buy()]
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.check_take_profit()
-
-        api.cancel_orders.assert_not_called()
-        api.place_limit_sell.assert_not_called()
-
-    def test_replaces_phantom_and_split_sells_with_one(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos()]
-        api.get_open_orders.return_value = [
-            self._sell("a", 0.38, 177.77),
-            self._sell("b", 0.38, 22.23),
-            self._sell("c", 0.30, 25.0),
-            self._sell("d", 0.30, 22.857),
-            self._sell("e", 0.30, 8.171),
-            self._sell("f", 0.30, 7.471),
-            self._sell("g", 0.30, 7.28),
-            self._sell("h", 0.30, 7.128),
-        ]
-        api.get_trades.return_value = [self._buy()]
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.check_take_profit()
-
-        cancelled = api.cancel_orders.call_args[0][0]
-        assert set(cancelled) == {"a", "b", "c", "d", "e", "f", "g", "h"}
-        api.place_limit_sell.assert_called_once_with(
-            "tok1", 0.30, 222.08, tick_size="0.01"
-        )
-        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
-        assert "take_profit_recancel" in ats
-        assert "take_profit_sell" in ats
-
-    def test_positions_api_failure_skips(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.side_effect = Exception("Data API down")
-
-        monitor.check_take_profit()  # must not raise
-
-        api.place_limit_sell.assert_not_called()
-
-    def test_open_orders_failure_skips(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos()]
-        api.get_open_orders.side_effect = Exception("timeout")
-
-        monitor.check_take_profit()  # must not raise
-
-        api.place_limit_sell.assert_not_called()
-
-    def test_zero_size_position_skipped(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos(size=0.0)]
-        api.get_open_orders.return_value = []
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.check_take_profit()
-
-        api.place_limit_sell.assert_not_called()
-
-    def test_orderbook_failure_falls_back_to_default_tick(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos(avg=0.30)]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = [self._buy()]
-        api.get_orderbook.side_effect = Exception("ob down")
-
-        monitor.check_take_profit()
-
-        api.place_limit_sell.assert_called_once_with(
-            "tok1", 0.30, 222.08, tick_size="0.01"
-        )
-
-    def test_ignores_other_assets_and_buy_orders(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos(asset="tok1")]
-        api.get_open_orders.return_value = [
-            self._sell("other", 0.50, 100.0, asset="tok2"),  # different asset
-            {  # our asset but a BUY — must not be cancelled/counted
-                "id": "buy1",
-                "asset_id": "tok1",
-                "side": "BUY",
-                "price": "0.30",
-                "original_size": "222.08",
-                "size_matched": "0",
-            },
-        ]
-        api.get_trades.return_value = [self._buy(asset="tok1")]
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.check_take_profit()
-
-        # No matching SELL for tok1 -> place one; never cancel the other-asset
-        # sell or our own buy.
-        api.place_limit_sell.assert_called_once_with(
-            "tok1", 0.30, 222.08, tick_size="0.01"
-        )
-        if api.cancel_orders.called:
-            cancelled = api.cancel_orders.call_args[0][0]
-            assert "other" not in cancelled
-            assert "buy1" not in cancelled
-
-    def test_lifts_sell_above_bid_when_in_profit(self):
-        # 事故场景:成本 0.21 < 买一 0.27 -> 卖价上移到 0.28,绝不穿价市价清仓
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos(size=361.0)]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = [self._buy(price=0.21, size=361.0)]
-        api.get_orderbook.return_value = {
-            "tick_size": "0.01",
-            "bids": [{"price": "0.27", "size": "9999"}],
-            "asks": [{"price": "0.29", "size": "9999"}],
-        }
-
-        monitor.check_take_profit()
-
-        api.place_limit_sell.assert_called_once_with(
-            "tok1", pytest.approx(0.28), 361.0, tick_size="0.01"
-        )
-
-    def test_skips_when_no_buy_fills_and_no_avg(self):
-        # get_trades 无成交 -> 跳过(不动卖单)。avgPrice 已不参与,此处 avg=0 仅占位
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos(avg=0.0)]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = []
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.check_take_profit()
-
-        api.place_limit_sell.assert_not_called()
-        api.cancel_orders.assert_not_called()
-
-    def test_skips_and_warns_when_no_buy_fills(self):
-        # get_trades 取不到买入成交 -> 不挂卖单,写 ⚠️裸奔 状态行(avgPrice 不再兜底)
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos(size=222.08, avg=0.30)]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = []  # 无成交
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.begin_status_tick()
-        monitor.check_take_profit()
-        monitor.publish_status()
-
-        api.place_limit_sell.assert_not_called()
-        api.cancel_orders.assert_not_called()
-        rows = get_snapshot()["rows"]
-        assert any("裸奔" in r.get("action", "") for r in rows)
-
-    def test_uses_get_trades_cost_with_composition_in_basis(self):
-        # get_trades 有成交 -> 用加权成本(0.30),理由含逐笔构成,绝不出现 avgPrice
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos(size=222.08, avg=0.99)]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = [self._buy(price=0.30, size=222.08)]
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.check_take_profit()
-
-        api.place_limit_sell.assert_called_once_with(
-            "tok1", 0.30, 222.08, tick_size="0.01"  # 0.30 来自 get_trades,非 avg 0.99
-        )
-        tp = next(
-            c
-            for c in db.record_action.call_args_list
-            if c.kwargs["action_type"] == "take_profit_sell"
-        )
-        basis = tp.kwargs["price_basis"]
-        assert "加权自1笔买入成交" in basis
-        assert "×" in basis and "trade" in basis and "共取" in basis
-        assert "avgPrice" not in basis
-
-    def _taker_buy(self, price=0.33, size=100.0, asset="tok1", ts="200"):
-        # 我们当 taker 的买入:成交在顶层,maker_orders 是对手方
-        return {
-            "id": f"tt-{ts}",
-            "market": "mkt1",
-            "match_time": ts,
-            "trader_side": "TAKER",
-            "side": "BUY",
-            "asset_id": asset,
-            "size": str(size),
-            "price": str(price),
-            "maker_orders": [
-                {
-                    "order_id": f"cp-{ts}",
-                    "maker_address": "0xCOUNTERPARTY",
-                    "side": "SELL",
-                    "matched_amount": str(size),
-                    "price": str(price),
-                    "asset_id": asset,
-                }
-            ],
-        }
-
-    def test_cost_query_uses_market_not_asset_filter(self):
-        # 成本查询按 market(conditionId)过滤,不传 asset_id(服务端 asset 过滤失效)、
-        # 不传 maker_address(我们在该市场的 taker 成交也要一并带回给 extract_fills)。
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos()]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = [self._buy()]
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.check_take_profit()
-
-        params = api.get_trades.call_args.args[0]
-        assert params.maker_address is None
-        assert params.asset_id is None
-        assert params.market == "mkt1"
-
-    def test_places_sell_for_taker_acquired_position(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [self._pos(size=100.0, avg=0.33)]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = [self._taker_buy(price=0.33, size=100.0)]
-        api.get_orderbook.return_value = {"tick_size": "0.01"}
-
-        monitor.check_take_profit()
-
-        api.place_limit_sell.assert_called_once_with(
-            "tok1", 0.33, 100.0, tick_size="0.01"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Step 2: check_stop_loss — Data API positions
-# ---------------------------------------------------------------------------
-
-
-class TestStopLoss:
-    def test_triggers_stop_loss_when_price_drops(self):
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        # Position: bought at 0.30, now at 0.24 (20% drop > 15% threshold)
-        api.get_user_positions.return_value = [
-            {
-                "asset": "tok1",
-                "size": 1000.0,
-                "avgPrice": 0.30,
-                "curPrice": 0.24,
-                "conditionId": "mkt1",
-            }
-        ]
-        api.get_open_orders.return_value = [
-            {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
-        ]
-        # F5: 止损需实时盘口买一二次确认,提供一个买一已跌破成本的盘口。
-        api.get_orderbook.return_value = {
-            "tick_size": "0.01",
-            "bids": [{"price": "0.24", "size": "500"}],
-            "asks": [{"price": "0.26", "size": "500"}],
-        }
-        api.get_trades.return_value = [
-            {
-                "id": "t",
-                "market": "mkt1",
-                "match_time": "1",
-                "maker_orders": [
-                    {
-                        "order_id": "o",
-                        "maker_address": "0xFUNDER",
-                        "side": "BUY",
-                        "matched_amount": "1000",
-                        "price": "0.30",
-                        "asset_id": "tok1",
-                    }
-                ],
-            }
-        ]
-
-        with patch("engine.monitor.stop_loss_triggered", return_value=True):
-            monitor.check_stop_loss()
-
-        api.cancel_orders.assert_called_with(["sell1"])
-        api.place_market_sell.assert_called_with("tok1", 1000.0)
-        db.record_trade.assert_called_once()
-        sl = next(
-            c
-            for c in db.record_action.call_args_list
-            if c.kwargs["action_type"] == "stoploss_market_sell"
-        )
-        assert "加权自1笔买入成交" in sl.kwargs["price_basis"]
-        assert "avgPrice" not in sl.kwargs["price_basis"]
-
-    def test_curprice_glitch_does_not_dump_when_book_healthy(self):
-        # F5: Data API curPrice 瞬时偏低(glitch)触发止损,但实时买一仍健康时,
-        # 绝不能市价砸盘——用真实成本 0.30、curPrice 0.24(触发)、买一 0.29(健康)。
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        api.get_user_positions.return_value = [
-            {
-                "asset": "tok1",
-                "size": 1000.0,
-                "avgPrice": 0.30,
-                "curPrice": 0.24,  # glitch 触发(<0.30*0.85=0.255)
-                "conditionId": "mkt1",
-            }
-        ]
-        api.get_open_orders.return_value = []
-        api.get_orderbook.return_value = {
-            "tick_size": "0.01",
-            "bids": [{"price": "0.29", "size": "500"}],  # 真实买一健康
-            "asks": [{"price": "0.31", "size": "500"}],
-        }
-        api.get_trades.return_value = [
-            {
-                "id": "t",
-                "market": "mkt1",
-                "match_time": "1",
-                "maker_orders": [
-                    {
-                        "order_id": "o",
-                        "maker_address": "0xFUNDER",
-                        "side": "BUY",
-                        "matched_amount": "1000",
-                        "price": "0.30",
-                        "asset_id": "tok1",
-                    }
-                ],
-            }
-        ]
-
-        monitor.check_stop_loss()
-
-        api.place_market_sell.assert_not_called()
-        db.record_trade.assert_not_called()
-
-    def test_rejected_market_sell_records_no_phantom_trade(self):
-        # F2: 市价止损被交易所拒/未成交(OrderRejected)时,绝不能记一笔幻影止损成交。
-        from api.polymarket_api import OrderRejected
-
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        api.get_user_positions.return_value = [
-            {
-                "asset": "tok1",
-                "size": 1000.0,
-                "avgPrice": 0.30,
-                "curPrice": 0.24,
-                "conditionId": "mkt1",
-            }
-        ]
-        api.get_open_orders.return_value = []
-        api.get_orderbook.return_value = {
-            "tick_size": "0.01",
-            "bids": [{"price": "0.24", "size": "500"}],
-            "asks": [{"price": "0.26", "size": "500"}],
-        }
-        api.get_trades.return_value = [
-            {
-                "id": "t",
-                "market": "mkt1",
-                "match_time": "1",
-                "maker_orders": [
-                    {
-                        "order_id": "o",
-                        "maker_address": "0xFUNDER",
-                        "side": "BUY",
-                        "matched_amount": "1000",
-                        "price": "0.30",
-                        "asset_id": "tok1",
-                    }
-                ],
-            }
-        ]
-        api.place_market_sell.side_effect = OrderRejected("市价卖单 未成交")
-
-        with patch("engine.monitor.stop_loss_triggered", return_value=True):
-            monitor.check_stop_loss()  # must not raise
-
-        db.record_trade.assert_not_called()
-
-    def test_no_stop_loss_when_price_stable(self):
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        api.get_user_positions.return_value = [
-            {
-                "asset": "tok1",
-                "size": 1000.0,
-                "avgPrice": 0.30,
-                "curPrice": 0.28,
-                "conditionId": "mkt1",
-            }
-        ]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = [
-            {
-                "id": "t",
-                "market": "mkt1",
-                "match_time": "1",
-                "maker_orders": [
-                    {
-                        "order_id": "o",
-                        "maker_address": "0xFUNDER",
-                        "side": "BUY",
-                        "matched_amount": "1000",
-                        "price": "0.30",
-                        "asset_id": "tok1",
-                    }
-                ],
-            }
-        ]
-
-        with patch("engine.monitor.stop_loss_triggered", return_value=False):
-            monitor.check_stop_loss()
-
-        api.cancel_orders.assert_not_called()
-        api.place_market_sell.assert_not_called()
-
-    def test_positions_api_failure_skips_stop_loss(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.side_effect = Exception("Data API down")
-
-        monitor.check_stop_loss()  # must not raise
-
-        api.place_market_sell.assert_not_called()
-
-    def test_open_orders_failure_skips_stop_loss_tick(self):
-        # F8: 取不到挂单(get_open_orders 报错)时,本 tick 不做止损——否则会在不知道
-        # 既有止盈卖单的情况下直接市价卖,可能与残留限价卖单瞬间双挂。下个 tick 自愈。
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        api.get_user_positions.return_value = [
-            {
-                "asset": "tok1",
-                "size": 1000.0,
-                "avgPrice": 0.30,
-                "curPrice": 0.24,
-                "conditionId": "mkt1",
-            }
-        ]
-        api.get_open_orders.side_effect = Exception("CLOB down")
-        api.get_orderbook.return_value = {
-            "tick_size": "0.01",
-            "bids": [{"price": "0.24", "size": "500"}],
-            "asks": [{"price": "0.26", "size": "500"}],
-        }
-        api.get_trades.return_value = [
-            {
-                "id": "t",
-                "market": "mkt1",
-                "match_time": "1",
-                "maker_orders": [
-                    {
-                        "order_id": "o",
-                        "maker_address": "0xFUNDER",
-                        "side": "BUY",
-                        "matched_amount": "1000",
-                        "price": "0.30",
-                        "asset_id": "tok1",
-                    }
-                ],
-            }
-        ]
-
-        with patch("engine.monitor.stop_loss_triggered", return_value=True):
-            monitor.check_stop_loss()  # must not raise
-
-        api.place_market_sell.assert_not_called()
-
-    def test_zero_size_position_skipped(self):
-        monitor, api, db = _make_monitor()
-        api.get_user_positions.return_value = [
-            {
-                "asset": "tok1",
-                "size": 0.0,
-                "avgPrice": 0.30,
-                "curPrice": 0.10,
-                "conditionId": "mkt1",
-            }
-        ]
-        api.get_open_orders.return_value = []
-
-        monitor.check_stop_loss()
-
-        api.place_market_sell.assert_not_called()
-
-    def test_skips_stop_loss_when_no_buy_fills(self):
-        # get_trades 无成交 -> 不止损(avgPrice 不再参与)
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        api.get_user_positions.return_value = [
-            {
-                "asset": "tok1",
-                "size": 1000.0,
-                "avgPrice": 0.0,
-                "curPrice": 0.10,
-                "conditionId": "mkt1",
-            }
-        ]
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = []
-
-        monitor.check_stop_loss()
-
-        api.place_market_sell.assert_not_called()
-
-    def test_stop_loss_skips_and_warns_when_no_buy_fills(self):
-        # get_trades 取不到买入成交 -> 不止损(不撤单/不市价平仓),写 ⚠️ 状态行
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        api.get_user_positions.return_value = [
-            {
-                "asset": "tok1",
-                "size": 1000.0,
-                "avgPrice": 0.30,
-                "curPrice": 0.24,
-                "conditionId": "mkt1",
-            }
-        ]
-        api.get_open_orders.return_value = [
-            {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
-        ]
-        api.get_trades.return_value = []  # 无成交 -> 不再回落 avgPrice
-
-        monitor.begin_status_tick()
-        monitor.check_stop_loss()
-        monitor.publish_status()
-
-        api.place_market_sell.assert_not_called()
-        api.cancel_orders.assert_not_called()
-        rows = get_snapshot()["rows"]
-        assert any("无成本" in r.get("action", "") for r in rows)
-
-
-# ---------------------------------------------------------------------------
 # Step 3: check_sell_orders — strategy compliance on resting buys
 # ---------------------------------------------------------------------------
 
@@ -1292,125 +702,6 @@ class TestStep1ActionLog:
         api.cancel_orders.assert_called_once_with(["o1"])
 
 
-class TestStep2ActionLog:
-    def _pos(self):
-        return [
-            {
-                "asset": "tok1",
-                "size": 1000.0,
-                "avgPrice": 0.30,
-                "curPrice": 0.24,
-                "conditionId": "mkt1",
-            }
-        ]
-
-    def _book(self):
-        # F5: 买一已跌破成本止损阈值,确认止损可执行。
-        return {
-            "tick_size": "0.01",
-            "bids": [{"price": "0.24", "size": "500"}],
-            "asks": [{"price": "0.26", "size": "500"}],
-        }
-
-    def test_stop_loss_records_cancel_and_market_sell(self):
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        api.get_user_positions.return_value = self._pos()
-        api.get_orderbook.return_value = self._book()
-        api.get_open_orders.return_value = [
-            {"id": "sell1", "asset_id": "tok1", "side": "SELL"},
-        ]
-        api.get_trades.return_value = [
-            {
-                "id": "t",
-                "market": "mkt1",
-                "match_time": "1",
-                "maker_orders": [
-                    {
-                        "order_id": "o",
-                        "maker_address": "0xFUNDER",
-                        "side": "BUY",
-                        "matched_amount": "1000",
-                        "price": "0.30",
-                        "asset_id": "tok1",
-                    }
-                ],
-            }
-        ]
-        with patch("engine.monitor.stop_loss_triggered", return_value=True):
-            monitor.check_stop_loss()
-        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
-        assert "stoploss_cancel_sell" in ats
-        assert "stoploss_market_sell" in ats
-        ms = next(
-            c
-            for c in db.record_action.call_args_list
-            if c.kwargs["action_type"] == "stoploss_market_sell"
-        )
-        assert ms.kwargs["side"] == "卖出"
-        assert ms.kwargs["price"] == 0.24
-        assert "加权自1笔买入成交" in ms.kwargs["price_basis"]
-        assert "avgPrice" not in ms.kwargs["price_basis"]
-        assert "止损阈值" in ms.kwargs["reason"]
-
-    def test_no_cancel_action_when_no_sell_orders(self):
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        api.get_user_positions.return_value = self._pos()
-        api.get_orderbook.return_value = self._book()
-        api.get_open_orders.return_value = []
-        api.get_trades.return_value = [
-            {
-                "id": "t",
-                "market": "mkt1",
-                "match_time": "1",
-                "maker_orders": [
-                    {
-                        "order_id": "o",
-                        "maker_address": "0xFUNDER",
-                        "side": "BUY",
-                        "matched_amount": "1000",
-                        "price": "0.30",
-                        "asset_id": "tok1",
-                    }
-                ],
-            }
-        ]
-        with patch("engine.monitor.stop_loss_triggered", return_value=True):
-            monitor.check_stop_loss()
-        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
-        assert "stoploss_cancel_sell" not in ats
-        assert "stoploss_market_sell" in ats
-
-    def test_no_action_when_not_triggered(self):
-        monitor, api, db = _make_monitor(settings={"stop_loss_pct": 15.0})
-        api.get_user_positions.return_value = self._pos()
-        api.get_open_orders.return_value = []
-        # Provide a real BUY trade so _cost() returns a non-None value and the
-        # code reaches the stop_loss_triggered() branch (patched to False).
-        # Without this, _cost() returns None (no fills) and the method returns
-        # early — never reaching the patched check, so the test was passing for
-        # the wrong reason.
-        api.get_trades.return_value = [
-            {
-                "id": "t-notriggered",
-                "market": "mkt1",
-                "match_time": "1",
-                "maker_orders": [
-                    {
-                        "order_id": "o-notriggered",
-                        "maker_address": "0xFUNDER",
-                        "side": "BUY",
-                        "matched_amount": "1000",
-                        "price": "0.30",
-                        "asset_id": "tok1",
-                    }
-                ],
-            }
-        ]
-        with patch("engine.monitor.stop_loss_triggered", return_value=False):
-            monitor.check_stop_loss()
-        db.record_action.assert_not_called()
-
-
 class TestStep3ActionLog:
     def _ob(self):
         return {
@@ -1752,15 +1043,15 @@ class TestStep3Blacklist:
 
 
 class TestMonitorReadsTemplate:
-    def test_stop_loss_pct_from_template(self):
+    def test_check_exit_reads_template(self):
         from engine.monitor import OrderMonitor
         from unittest.mock import MagicMock
 
         db = MagicMock()
         db.get_template_for.return_value = {
-            "stop_loss_pct": 8.0,
-            "min_price_cents": 10.0,
-            "max_price_cents": 90.0,
+            "theta_loss_cents": 2,
+            "theta_stop_cents": 5,
+            "case_a_mode": "ask",
         }
         db.get_settings.return_value = {
             "cooldown_minutes": 20,
@@ -1769,5 +1060,108 @@ class TestMonitorReadsTemplate:
         api = MagicMock()
         api.get_user_positions.return_value = []
         mon = OrderMonitor(api, db, "0xW")
-        mon.check_stop_loss()
+        mon.check_exit()
         db.get_template_for.assert_called_with("0xW")
+
+
+class TestCheckExit:
+    def _setup(
+        self,
+        cost,
+        size,
+        bids,
+        asks,
+        sells=None,
+        mode="ask",
+        theta_loss=2,
+        theta_stop=5,
+    ):
+        monitor, api, db = _make_monitor(
+            settings={
+                "theta_loss_cents": theta_loss,
+                "theta_stop_cents": theta_stop,
+                "case_a_mode": mode,
+            }
+        )
+        api.get_user_positions.return_value = [
+            {
+                "asset": "A-y",
+                "size": size,
+                "curPrice": (bids[0][0] if bids else 0),
+                "conditionId": "A",
+            }
+        ]
+        api.get_open_orders.return_value = sells or []
+        api.get_orderbook.return_value = {
+            "bids": [{"price": str(p), "size": str(s)} for p, s in bids],
+            "asks": [{"price": str(p), "size": str(s)} for p, s in asks],
+            "tick_size": "0.01",
+        }
+        monitor._cost_lots = lambda a, s, c: (
+            cost,
+            [{"price": cost, "take": s, "ts": 0, "trade_id": "t"}],
+        )
+        return monitor, api, db
+
+    def test_case_a_rests_one_sell_at_ask(self):
+        monitor, api, db = self._setup(0.30, 100, [(0.31, 500)], [(0.33, 500)])
+        monitor.check_exit()
+        api.place_limit_sell.assert_called_once()
+        a, k = api.place_limit_sell.call_args
+        assert a[0] == "A-y" and abs(a[1] - 0.33) < 1e-9 and a[2] == 100
+        api.place_market_sell.assert_not_called()
+
+    def test_case_a_market_mode_clears(self):
+        monitor, api, db = self._setup(
+            0.30, 100, [(0.31, 500)], [(0.33, 500)], mode="market"
+        )
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once_with("A-y", 100)
+        api.place_limit_sell.assert_not_called()
+
+    def test_b0_market_clear_and_record(self):
+        monitor, api, db = self._setup(0.40, 100, [(0.35, 500)], [(0.36, 500)])
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once_with("A-y", 100)
+        db.record_trade.assert_called_once()
+
+    def test_b_sweep_marketable_limit_at_floor(self):
+        monitor, api, db = self._setup(0.40, 100, [(0.39, 500)], [(0.41, 500)])
+        monitor.check_exit()
+        api.place_marketable_limit_sell.assert_called_once()
+        a, k = api.place_marketable_limit_sell.call_args
+        assert a[0] == "A-y" and abs(a[1] - 0.38) < 1e-9 and a[2] == 100
+
+    def test_b_park_rests_at_ask(self):
+        monitor, api, db = self._setup(0.40, 100, [(0.37, 500)], [(0.41, 500)])
+        monitor.check_exit()
+        api.place_limit_sell.assert_called_once()
+        a, k = api.place_limit_sell.call_args
+        assert abs(a[1] - 0.41) < 1e-9
+        api.place_market_sell.assert_not_called()
+
+    def test_naked_skips_no_sell(self):
+        monitor, api, db = self._setup(0.30, 100, [(0.31, 500)], [(0.33, 500)])
+        monitor._cost_lots = lambda a, s, c: (None, [])
+        monitor.check_exit()
+        api.place_limit_sell.assert_not_called()
+        api.place_market_sell.assert_not_called()
+        api.place_marketable_limit_sell.assert_not_called()
+
+    def test_rest_keeps_existing_matching_sell(self):
+        sells = [
+            {
+                "id": "s1",
+                "asset_id": "A-y",
+                "side": "SELL",
+                "price": "0.33",
+                "original_size": "100",
+                "size_matched": "0",
+            }
+        ]
+        monitor, api, db = self._setup(
+            0.30, 100, [(0.31, 500)], [(0.33, 500)], sells=sells
+        )
+        monitor.check_exit()
+        api.place_limit_sell.assert_not_called()
+        api.cancel_orders.assert_not_called()

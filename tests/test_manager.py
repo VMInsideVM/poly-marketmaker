@@ -93,7 +93,7 @@ class TestEngineLifecycle:
 
 
 class TestWalletWorkerTick:
-    def test_tick_runs_take_profit_between_fills_and_stoploss(self):
+    def test_tick_runs_check_exit_between_fills_and_compliance(self):
         worker = WalletWorker(
             MagicMock(), MagicMock(), "0xABC", {"fill_check_interval_sec": 5}
         )
@@ -103,8 +103,7 @@ class TestWalletWorkerTick:
 
         worker.monitor.begin_status_tick.assert_called_once()
         worker.monitor.check_buy_orders.assert_called_once()
-        worker.monitor.check_take_profit.assert_called_once()
-        worker.monitor.check_stop_loss.assert_called_once()
+        worker.monitor.check_exit.assert_called_once()
         worker.monitor.check_sell_orders.assert_called_once()
         worker.monitor.publish_status.assert_called_once()
 

@@ -82,13 +82,12 @@ class WalletWorker:
             self._stop_event.wait(timeout=check_interval)
 
     def _tick(self):
-        """One monitor pass: detect fills, maintain take-profit sells, stop-loss,
-        strategy compliance. check_take_profit runs right after fill detection so
-        the position-driven sell reflects the latest fills."""
+        """One monitor pass: detect fills, run three-tier exit, strategy
+        compliance. check_exit runs right after fill detection so the exit
+        decision reflects the latest fills."""
         self.monitor.begin_status_tick()
         self.monitor.check_buy_orders()
-        self.monitor.check_take_profit()
-        self.monitor.check_stop_loss()
+        self.monitor.check_exit()
         self.monitor.check_sell_orders()
         self.monitor.publish_status()
 

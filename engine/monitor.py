@@ -8,10 +8,9 @@ from engine.take_profit import (
     plan_take_profit,
     position_cost_with_lots,
     describe_cost_basis,
-    take_profit_price,
+    plan_exit,
 )
 from engine.eligibility import recheck_resting_buy
-from engine.risk import stop_loss_triggered
 from engine.strategy import reward_price_range
 from engine.rewards import extract_max_spread
 from engine import monitor_status
@@ -204,175 +203,47 @@ class OrderMonitor:
             detail=f"成交{size}，止盈由持仓维护",
         )
 
-    # --- Step 1b: position-driven take-profit (one resting sell at cost) ---
-    def check_take_profit(self):
-        """Maintain exactly one resting SELL per position at a cost-based price.
-
-        Cost is the weighted average of our real CLOB get_trades buy fills; the
-        Data API position is used only for size. The sell price adds a 穿价护栏
-        (max(cost, best_bid+tick)) so it always rests as a maker and never
-        crosses the book.
-        """
-        funder = self._funder()
-        try:
-            positions = self.api.get_user_positions(funder)
-        except Exception as e:
-            logger.warning(
-                "Data API positions failed for %s (skip take-profit): %s",
-                self.wallet_address,
-                e,
-            )
-            return
-        try:
-            open_orders = self.api.get_open_orders()
-        except Exception as e:
-            logger.error("get_open_orders failed for %s: %s", self.wallet_address, e)
-            return
-        for pos in positions:
-            try:
-                self._reconcile_take_profit(pos, open_orders)
-            except Exception as e:
-                logger.error("Take-profit error on %s: %s", pos.get("asset"), e)
-
     def _sell_book(self, asset_id: str):
-        """(tick_float, tick_str, best_bid) for an asset;
-        失败/盘口空时回 (0.01, "0.01", None)。"""
+        """(tick_float, tick_str, best_bid, best_ask);失败/空时缺的位回 None。"""
         try:
             ob = self.api.get_orderbook(asset_id)
             tick_str = ob.get("tick_size", "0.01")
             bids = sorted(
                 ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True
             )
+            asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))
             best_bid = float(bids[0]["price"]) if bids else None
-            return float(tick_str), tick_str, best_bid
+            best_ask = float(asks[0]["price"]) if asks else None
+            return float(tick_str), tick_str, best_bid, best_ask
         except Exception as e:
-            logger.warning(
-                "orderbook for %s failed (take-profit tick=0.01): %s", asset_id, e
-            )
-            return 0.01, "0.01", None
+            logger.warning("orderbook for %s failed (exit tick=0.01): %s", asset_id, e)
+            return 0.01, "0.01", None, None
 
-    def _reconcile_take_profit(self, pos: dict, open_orders: list):
-        asset_id = pos.get("asset", "")
-        size = float(pos.get("size", 0) or 0)
-        cid = pos.get("conditionId", "")
-        if size <= 0:
-            return
-        cost, lots = self._cost_lots(asset_id, size, cid)
-        if cost is None or cost <= 0:
-            logger.warning(
-                "Take-profit skipped (no buy fills) asset=%s size=%s — UNPROTECTED",
-                asset_id,
-                size,
-            )
-            self._status_add(
-                market=cid,
-                side="卖出",
-                price="-",
-                size=str(size),
-                matched="-",
-                stage="止盈卖单",
-                action="⚠️跳过·裸奔",
-                detail="get_trades 无买入成交、无法算成本，未挂止盈，该持仓未受保护",
-            )
-            return
-        tick, tick_str, best_bid = self._sell_book(asset_id)
-        want = take_profit_price(cost, best_bid, tick)
-        sells = [
-            o
-            for o in open_orders
-            if o.get("asset_id") == asset_id and o.get("side") == "SELL"
-        ]
-        plan = plan_take_profit(size, want, tick, sells)
-        if plan["action"] in ("noop", "keep"):
-            self._status_add(
-                market=cid,
-                side="卖出",
-                price=f"{want:.4f}",
-                size=str(size),
-                matched="-",
-                stage="止盈卖单",
-                action="保持(成本/护栏价)",
-                detail=f"成本{cost:.4f} 持仓{size} 已挂一笔 {want:.4f}",
-            )
-            return
-        if plan["cancel_ids"]:
-            try:
-                self.api.cancel_orders(plan["cancel_ids"])
-                self._record_action(
-                    market_id=cid,
-                    action_type="take_profit_recancel",
-                    side="-",
-                    price=-1,
-                    size=size,
-                    reason="撤销与持仓不符的旧止盈卖单（价格/数量不符或被拆成多笔），改为按持仓挂单一笔",
-                    price_basis=(
-                        f"撤 {len(plan['cancel_ids'])} 笔 SELL；"
-                        f"来源：CLOB get_open_orders（asset={asset_id} 的 SELL）"
-                    ),
-                )
-            except Exception as e:
-                logger.warning("Cancel stale sells for %s failed: %s", asset_id, e)
-                return
-        try:
-            self.api.place_limit_sell(asset_id, want, size, tick_size=tick_str)
-        except Exception as e:
-            logger.warning("Place take-profit sell for %s failed: %s", asset_id, e)
-            return
-        self._record_action(
-            market_id=cid,
-            action_type="take_profit_sell",
-            side="卖出",
-            price=want,
-            size=size,
-            reason="按真实成交加权成本挂止盈卖单，并加穿价护栏（不亏本金、不穿价市价清仓、赚流动性奖励）",
-            price_basis=(
-                f"{describe_cost_basis(cost, lots)}；"
-                f"卖价=max(成本,买一+1tick)={want:.4f}；来源：CLOB get_trades + get_orderbook"
-            ),
-        )
-        self._status_add(
-            market=cid,
-            side="卖出",
-            price=f"{want:.4f}",
-            size=str(size),
-            matched="-",
-            stage="止盈卖单",
-            action="按成本挂单",
-            detail=f"成本{cost:.4f} 持仓{size} 挂卖{want:.4f}",
-        )
-
-    # --- Step 2: stop-loss via Data API positions ---
-    def check_stop_loss(self):
-        settings = self.db.get_template_for(self.wallet_address)
+    def check_exit(self):
+        """三段式离场(v4 §7):合并原止盈+止损。每持仓按 plan_exit 决策执行。"""
+        tmpl = self.db.get_template_for(self.wallet_address)
+        theta_loss = float(tmpl.get("theta_loss_cents", 2)) / 100.0
+        theta_stop = float(tmpl.get("theta_stop_cents", 5)) / 100.0
+        case_a_mode = tmpl.get("case_a_mode", "ask")
         try:
             positions = self.api.get_user_positions(self._funder())
         except Exception as e:
-            logger.warning(
-                "Data API positions failed for %s (skip stop-loss): %s",
-                self.wallet_address,
-                e,
-            )
+            logger.warning("Data API positions failed (skip exit): %s", e)
             return
         try:
             open_orders = self.api.get_open_orders()
         except Exception as e:
-            # F8: 取不到挂单就跳过本 tick 止损,绝不在不知道既有止盈卖单的情况下市价
-            # 平仓(会与残留限价卖单瞬间双挂)。与 check_take_profit 的失败处理一致,
-            # 下个 tick 自愈。
-            logger.error(
-                "get_open_orders failed for %s (skip stop-loss): %s",
-                self.wallet_address,
-                e,
-            )
+            logger.error("get_open_orders failed (skip exit): %s", e)
             return
         for pos in positions:
             try:
-                self._check_pos_sl(pos, open_orders, settings)
+                self._exit_position(
+                    pos, open_orders, theta_loss, theta_stop, case_a_mode
+                )
             except Exception as e:
-                logger.error("Stop-loss error on %s: %s", pos.get("asset"), e)
+                logger.error("Exit error on %s: %s", pos.get("asset"), e)
 
-    def _check_pos_sl(self, pos: dict, open_orders: list, settings: dict):
-        # Confirmed Data API position fields: asset / size / curPrice / conditionId.
+    def _exit_position(self, pos, open_orders, theta_loss, theta_stop, case_a_mode):
         asset_id = pos.get("asset", "")
         size = float(pos.get("size", 0) or 0)
         cur = float(pos.get("curPrice", 0) or 0)
@@ -380,10 +251,9 @@ class OrderMonitor:
         if size <= 0:
             return
         cost, lots = self._cost_lots(asset_id, size, cid)
-        # 成本只认 get_trades 加权;取不到 -> 不做止损。
         if cost is None or cost <= 0:
             logger.warning(
-                "Stop-loss skipped (no buy fills) asset=%s size=%s — no cost basis",
+                "Exit skipped (no buy fills) asset=%s size=%s — UNPROTECTED",
                 asset_id,
                 size,
             )
@@ -393,93 +263,162 @@ class OrderMonitor:
                 price="-",
                 size=str(size),
                 matched="-",
-                stage="Step2",
-                action="⚠️跳过·无成本",
-                detail="get_trades 无买入成交、无法算成本，未做止损保护",
+                stage="离场",
+                action="⚠️跳过·裸奔",
+                detail="get_trades 无买入成交、无法算成本，未离场，该持仓未受保护",
             )
             return
-        if not stop_loss_triggered(cur, cost, settings["stop_loss_pct"]):
-            return
-        # F5: 实时盘口买一二次确认。Data API curPrice 与已被禁用的 avgPrice 同源,
-        # 可能瞬时 glitch;只有当真正能卖到的价(best_bid)也跌破成本止损阈值,才市价
-        # 平仓,否则视为数据 glitch,跳过(不砸盘)并标一行可见状态,下个 tick 自愈。
-        _, _, best_bid = self._sell_book(asset_id)
-        if best_bid is None or not stop_loss_triggered(
-            best_bid, cost, settings["stop_loss_pct"]
-        ):
+        tick, tick_str, best_bid, best_ask = self._sell_book(asset_id)
+        plan = plan_exit(
+            cost, best_bid, best_ask, tick, theta_loss, theta_stop, case_a_mode, size
+        )
+        sells = [
+            o
+            for o in open_orders
+            if o.get("asset_id") == asset_id and o.get("side") == "SELL"
+        ]
+        action = plan["action"]
+        basis = describe_cost_basis(cost, lots)
+
+        if action == "noop":
             self._status_add(
                 market=cid,
                 side="卖出",
                 price="-",
                 size=str(size),
                 matched="-",
-                stage="Step2",
-                action="⚠️跳过·盘口未确认",
-                detail=(
-                    f"curPrice{cur:.4f}触发但买一"
-                    f"{'无' if best_bid is None else f'{best_bid:.4f}'}"
-                    f"未跌破成本{cost:.4f}止损阈值,疑似数据glitch,不砸盘"
-                ),
+                stage="离场",
+                action="跳过(盘口空)",
+                detail="无买盘无卖盘，本轮跳过",
             )
             return
-        sell_ids = [
-            o["id"]
-            for o in open_orders
-            if o.get("asset_id") == asset_id and o.get("side") == "SELL"
-        ]
+
+        if action == "rest":
+            want = plan["price"]
+            p = plan_take_profit(size, want, tick, sells)
+            if p["action"] in ("noop", "keep"):
+                self._status_add(
+                    market=cid,
+                    side="卖出",
+                    price=f"{want:.4f}",
+                    size=str(size),
+                    matched="-",
+                    stage="离场",
+                    action=f"保持({plan['tier']})",
+                    detail=f"成本{cost:.4f} 挂卖一{want:.4f}",
+                )
+                return
+            if p["cancel_ids"]:
+                try:
+                    self.api.cancel_orders(p["cancel_ids"])
+                    self._record_action(
+                        market_id=cid,
+                        action_type="exit_recancel",
+                        side="-",
+                        price=-1,
+                        size=size,
+                        reason="撤与持仓不符的旧卖单，改按持仓挂一笔",
+                        price_basis=f"撤 {len(p['cancel_ids'])} 笔 SELL",
+                    )
+                except Exception as e:
+                    logger.warning("Cancel stale sells %s failed: %s", asset_id, e)
+                    return
+            self.api.place_limit_sell(asset_id, want, size, tick_size=tick_str)
+            self._record_action(
+                market_id=cid,
+                action_type="exit_rest",
+                side="卖出",
+                price=want,
+                size=size,
+                reason=f"{plan['tier']}：挂卖一离场",
+                price_basis=f"{basis}；卖一{want:.4f}；来源：CLOB get_trades+get_orderbook",
+            )
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price=f"{want:.4f}",
+                size=str(size),
+                matched="-",
+                stage="离场",
+                action=f"挂卖一({plan['tier']})",
+                detail=f"成本{cost:.4f}",
+            )
+            return
+
+        sell_ids = [o["id"] for o in sells]
         if sell_ids:
             try:
                 self.api.cancel_orders(sell_ids)
                 self._record_action(
                     market_id=cid,
-                    action_type="stoploss_cancel_sell",
+                    action_type="exit_cancel_sell",
                     side="-",
                     price=-1,
                     size=size,
-                    reason="触发止损，先撤该持仓全部止盈卖单以便市价平仓",
-                    price_basis=f"撤 {len(sell_ids)} 笔 SELL；来源：CLOB get_open_orders（asset={asset_id} 的 SELL）",
+                    reason=f"{plan['tier']}：先撤全部止盈卖单以便清仓",
+                    price_basis=f"撤 {len(sell_ids)} 笔 SELL",
                 )
             except Exception as e:
-                logger.warning("Cancel sell orders for %s failed: %s", asset_id, e)
-        self.api.place_market_sell(asset_id, size)
-        self.db.record_trade(
-            wallet=self.wallet_address,
-            market_id=cid,
-            market_name="",
-            side="stop_loss",
-            price=cur,
-            size=size,
-            pnl=(cur - cost) * size,
-        )
-        self._record_action(
-            market_id=cid,
-            action_type="stoploss_market_sell",
-            side="卖出",
-            price=cur,
-            size=size,
-            reason=f"现价 {cur:.4f} 跌破成本价 {cost:.4f} 的止损阈值 成本×(1-止损比例{settings['stop_loss_pct']}%)，市价平仓止损",
-            price_basis=(
-                f"{describe_cost_basis(cost, lots)}、现价 curPrice={cur:.4f}；"
-                f"来源：CLOB get_trades + Data API /positions"
-            ),
-        )
-        logger.warning(
-            "Stop-loss executed: asset=%s size=%s cur=%.4f cost=%.4f",
-            asset_id,
-            size,
-            cur,
-            cost,
-        )
-        self._status_add(
-            market=cid,
-            side="卖出",
-            price=f"{cur:.4f}",
-            size=str(size),
-            matched="-",
-            stage="Step2",
-            action="止损→市价平仓",
-            detail=f"cur{cur:.4f}<成本{cost:.4f} 触发",
-        )
+                logger.warning("Cancel sells %s failed: %s", asset_id, e)
+
+        if action == "market":
+            self.api.place_market_sell(asset_id, size)
+            if plan["tier"] == "B0":
+                self.db.record_trade(
+                    wallet=self.wallet_address,
+                    market_id=cid,
+                    market_name="",
+                    side="stop_loss",
+                    price=cur,
+                    size=size,
+                    pnl=(cur - cost) * size,
+                )
+            self._record_action(
+                market_id=cid,
+                action_type="exit_market",
+                side="卖出",
+                price=cur,
+                size=size,
+                reason=f"{plan['tier']}：市价清仓离场",
+                price_basis=f"{basis}；现价{cur:.4f}；来源：CLOB get_trades+Data API",
+            )
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price=f"{cur:.4f}",
+                size=str(size),
+                matched="-",
+                stage="离场",
+                action=f"市价清仓({plan['tier']})",
+                detail=f"成本{cost:.4f}",
+            )
+            return
+
+        if action == "sweep":
+            want = plan["price"]
+            self.api.place_marketable_limit_sell(
+                asset_id, want, size, tick_size=tick_str
+            )
+            self._record_action(
+                market_id=cid,
+                action_type="exit_sweep",
+                side="卖出",
+                price=want,
+                size=size,
+                reason="B：以最低卖出价 FAK 扫单(剩余下轮再评估)",
+                price_basis=f"{basis}；最低卖出价{want:.4f}；来源：CLOB get_trades+get_orderbook",
+            )
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price=f"{want:.4f}",
+                size=str(size),
+                matched="-",
+                stage="离场",
+                action="FAK扫单(B)",
+                detail=f"成本{cost:.4f} 扫到{want:.4f}",
+            )
+            return
 
     # --- Step 3: strategy compliance on resting buy orders ---
     def check_sell_orders(self):
