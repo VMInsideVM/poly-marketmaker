@@ -178,3 +178,48 @@ def describe_cost_basis(cost, lots: list[dict], max_lots: int = 6) -> str:
         f"成本={cost:.4f}（加权自{n}笔买入成交："
         f"{' '.join(parts)}{more} 共取{_fmt_share(total_take)}股）"
     )
+
+
+def plan_exit(
+    cost, best_bid, best_ask, tick, theta_loss, theta_stop, case_a_mode, size
+):
+    """三段式离场决策(v4 §7)。theta_loss/theta_stop 为价位单位(=¢/100)。
+
+    返回 {"tier","action","price","size"};action ∈ {"rest","market","sweep","noop"}。
+    cost>0、size>0 由调用方在调用前保证(成本取不到 -> 裸奔跳过,不进此函数)。
+    - rest 价 = 卖一(best_ask),无则回退 ceil_to_tick(cost)。
+    - sweep 价 = ceil_to_tick(最低卖出价)(限价卖向上取整,绝不卖穿到下限以下)。
+    """
+
+    def _rest_price():
+        if best_ask is not None and best_ask > 0:
+            return best_ask
+        return ceil_to_tick(cost, tick)
+
+    if best_bid is None:
+        if best_ask is not None and best_ask > 0:
+            return {
+                "tier": "B_park",
+                "action": "rest",
+                "price": _rest_price(),
+                "size": size,
+            }
+        return {"tier": "none", "action": "noop", "price": None, "size": 0.0}
+
+    if cost <= best_bid:
+        if case_a_mode == "market":
+            return {"tier": "A", "action": "market", "price": None, "size": size}
+        return {"tier": "A", "action": "rest", "price": _rest_price(), "size": size}
+
+    loss = cost - best_bid
+    if loss >= theta_stop:
+        return {"tier": "B0", "action": "market", "price": None, "size": size}
+    floor = cost - theta_loss
+    if best_bid >= floor:
+        return {
+            "tier": "B_sweep",
+            "action": "sweep",
+            "price": ceil_to_tick(floor, tick),
+            "size": size,
+        }
+    return {"tier": "B_park", "action": "rest", "price": _rest_price(), "size": size}
