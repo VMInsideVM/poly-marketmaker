@@ -5,6 +5,7 @@ import re
 import sys
 import hashlib
 import logging
+import sqlite3
 from functools import wraps
 from flask import (
     Flask,
@@ -269,6 +270,82 @@ def api_save_settings():
             "message": "参数已保存。如需立即生效，请重启引擎；否则将在下次启动时生效。",
         }
     )
+
+
+# --- API: Templates (多模板 CRUD + 钱包绑定) ---
+
+
+@app.route("/api/templates", methods=["GET"])
+@login_required
+def api_list_templates():
+    default_id = db.get_default_template_id()
+    return jsonify(
+        [
+            {"id": t["id"], "name": t["name"], "is_default": t["id"] == default_id}
+            for t in db.list_templates()
+        ]
+    )
+
+
+@app.route("/api/templates", methods=["POST"])
+@login_required
+def api_create_template():
+    name = ((request.get_json() or {}).get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "模板名不能为空"}), 400
+    try:
+        tid = db.create_template(name)
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "模板名已存在"}), 400
+    return jsonify({"id": tid, "name": name})
+
+
+@app.route("/api/templates/<int:tid>", methods=["GET"])
+@login_required
+def api_get_template(tid):
+    return jsonify(db.get_template(tid))
+
+
+@app.route("/api/templates/<int:tid>", methods=["PUT"])
+@login_required
+def api_save_template(tid):
+    from config import TEMPLATE_DEFAULTS
+
+    data = request.get_json() or {}
+    strategy = {k: v for k, v in data.items() if k in TEMPLATE_DEFAULTS}
+    db.save_template(tid, strategy)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/templates/<int:tid>/name", methods=["PUT"])
+@login_required
+def api_rename_template(tid):
+    name = ((request.get_json() or {}).get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "模板名不能为空"}), 400
+    try:
+        db.rename_template(tid, name)
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "模板名已存在"}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/templates/<int:tid>", methods=["DELETE"])
+@login_required
+def api_delete_template(tid):
+    try:
+        db.delete_template(tid)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/wallets/<address>/template", methods=["POST"])
+@login_required
+def api_set_wallet_template(address):
+    tid = (request.get_json() or {}).get("template_id")
+    db.set_wallet_template(address, int(tid))
+    return jsonify({"ok": True})
 
 
 # --- API: Wallets ---
