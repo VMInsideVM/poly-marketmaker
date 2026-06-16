@@ -31,6 +31,7 @@ def _make_manager():
         "scan_interval_sec": 30,
         "fill_check_interval_sec": 5,
         "cooldown_minutes": 20,
+        "discovery_interval_sec": 14400,
         "min_reward_usd": 100.0,
         "max_spread_cents": 3.0,
         "min_price_cents": 10.0,
@@ -302,84 +303,154 @@ class TestSharedScanWithStatus:
         assert manager.eligible_markets == [{"market_id": "m1"}]
         db.save_eligible_markets.assert_called_once_with([{"market_id": "m1"}])
 
-    def test_auto_do_scan_filters_per_wallet_and_places(self):
+    def test_place_round_filters_per_wallet_and_places(self):
         manager, db = _make_manager()
         manager._scanner_api = MagicMock()
         worker = MagicMock()
         worker.running = True
         manager.engines = {"0xABC": worker}
+        manager.eligible_markets = [{"market_id": "m9", "tags": []}]
 
         class FakeScanner:
             def __init__(self, api, db, addr):
                 pass
 
-            def fetch_candidates(
-                self, templates, on_progress=None, on_found=None, **kw
-            ):
-                return [{"market_id": "m9", "tags": []}]
+            def refresh_orderbooks(self, pool):
+                pass
 
             def filter_for_template(self, pool, tmpl, addr):
                 return pool
 
         with patch("engine.manager.MarketScanner", FakeScanner):
-            manager._do_scan()
-        assert manager.scan_status == "done"
-        assert manager.last_scan_time > 0
+            manager._place_round()
         worker.place_orders.assert_called_once_with(
             [{"market_id": "m9", "tags": []}], cancel_dropouts=True
         )
 
-    def test_auto_do_scan_empty_pool_skips_placement(self):
-        # 采集成功但 0 市场(瞬时抖动)-> 不下单,避免 cancel_dropouts 误撤全部买单。
+    def test_place_round_empty_pool_skips_placement(self):
+        # 空候选池 -> 不下单,避免 cancel_dropouts 误撤全部买单。
         manager, db = _make_manager()
         manager._scanner_api = MagicMock()
         worker = MagicMock()
         worker.running = True
         manager.engines = {"0xABC": worker}
-
-        class FakeScanner:
-            def __init__(self, api, db, addr):
-                pass
-
-            def fetch_candidates(
-                self, templates, on_progress=None, on_found=None, **kw
-            ):
-                return []
-
-            def filter_for_template(self, pool, tmpl, addr):
-                return pool
-
-        with patch("engine.manager.MarketScanner", FakeScanner):
-            manager._do_scan()
+        manager.eligible_markets = []
+        manager._place_round()
         worker.place_orders.assert_not_called()
 
-    def test_auto_do_scan_distributes_sorted_by_competitiveness(self):
+    def test_place_round_distributes_sorted_by_competitiveness(self):
         manager, db = _make_manager()
         manager._scanner_api = MagicMock()
         worker = MagicMock()
         worker.running = True
         manager.engines = {"0xABC": worker}
+        manager.eligible_markets = [
+            {"market_id": "hi", "market_competitiveness": 0.9},
+            {"market_id": "lo", "market_competitiveness": 0.1},
+            {"market_id": "mid", "market_competitiveness": 0.5},
+        ]
 
         class FakeScanner:
             def __init__(self, api, db, addr):
                 pass
 
-            def fetch_candidates(
-                self, templates, on_progress=None, on_found=None, **kw
-            ):
-                return [
-                    {"market_id": "hi", "market_competitiveness": 0.9},
-                    {"market_id": "lo", "market_competitiveness": 0.1},
-                    {"market_id": "mid", "market_competitiveness": 0.5},
-                ]
+            def refresh_orderbooks(self, pool):
+                pass
 
             def filter_for_template(self, pool, tmpl, addr):
                 return list(pool)
 
         with patch("engine.manager.MarketScanner", FakeScanner):
-            manager._do_scan()
+            manager._place_round()
         distributed = worker.place_orders.call_args[0][0]
         assert [m["market_id"] for m in distributed] == ["lo", "mid", "hi"]
+
+    def test_should_discover_empty_pool_true(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = []
+        manager.last_scan_time = 1000.0
+        assert manager._should_discover(1000.0) is True
+
+    def test_should_discover_recent_false(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = [{"market_id": "m1"}]
+        manager.last_scan_time = 1000.0
+        assert manager._should_discover(1030.0) is False
+
+    def test_should_discover_stale_true(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = [{"market_id": "m1"}]
+        manager.last_scan_time = 1000.0
+        assert manager._should_discover(1000.0 + 14401) is True
+
+    def test_discover_skips_orderbook(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        captured = {}
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
+                captured.update(kw)
+                return [{"market_id": "m1"}]
+
+            def filter_for_template(self, pool, tmpl, addr):
+                return pool
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._discover()
+        assert captured.get("skip_orderbook") is True
+        assert manager.eligible_markets == [{"market_id": "m1"}]
+        assert manager.last_scan_time > 0
+
+    def test_should_discover_at_interval_boundary_true(self):
+        manager, db = _make_manager()
+        manager.eligible_markets = [{"market_id": "m1"}]
+        manager.last_scan_time = 1000.0
+        # 恰好等于间隔 -> >= -> 该发现
+        assert manager._should_discover(1000.0 + 14400) is True
+
+    def test_discovery_fail_then_place_uses_prev_pool(self):
+        # 发现失败保留上一份缓存池,本轮 _place_round 仍用它刷簿下单。
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xABC": worker}
+        manager.eligible_markets = [{"market_id": "prev", "tags": []}]
+        manager.last_scan_time = 1000.0
+        refreshed = {}
+
+        class FlakyScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
+                raise RuntimeError("discovery down")
+
+            def refresh_orderbooks(self, pool):
+                refreshed["pool"] = pool
+
+            def filter_for_template(self, pool, tmpl, addr):
+                return pool
+
+        with patch("engine.manager.MarketScanner", FlakyScanner):
+            try:
+                manager._discover()  # raises; _scan_with_status 恢复 prev_eligible
+            except RuntimeError:
+                pass
+            manager._place_round()
+        assert manager.eligible_markets == [{"market_id": "prev", "tags": []}]
+        assert refreshed["pool"] == [{"market_id": "prev", "tags": []}]
+        worker.place_orders.assert_called_once_with(
+            [{"market_id": "prev", "tags": []}], cancel_dropouts=True
+        )
 
     def test_scan_failure_resets_status_and_keeps_last_scan_time(self):
         manager, db = _make_manager()

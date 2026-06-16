@@ -35,6 +35,7 @@ def test_config_split_engine_and_template_defaults():
         "fill_check_interval_sec",
         "cooldown_minutes",
         "rewards_cache_ttl_sec",
+        "discovery_interval_sec",
     }
     assert TEMPLATE_DEFAULTS["excluded_categories"] == ["sports", "esports", "weather"]
     assert TEMPLATE_DEFAULTS["min_reward_usd"] == 100.0
@@ -43,6 +44,7 @@ def test_config_split_engine_and_template_defaults():
     assert DEFAULTS["scan_interval_sec"] == 30
     assert DEFAULTS["min_reward_usd"] == 100.0
     assert set(ENGINE_DEFAULTS) & set(TEMPLATE_DEFAULTS) == set()
+    assert ENGINE_DEFAULTS["discovery_interval_sec"] == 14400
 
 
 def test_template_defaults_has_multitier_keys():

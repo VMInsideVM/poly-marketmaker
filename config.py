@@ -9,6 +9,7 @@ ENGINE_DEFAULTS = {
     "fill_check_interval_sec": 5,
     "cooldown_minutes": 20,
     "rewards_cache_ttl_sec": 600,
+    "discovery_interval_sec": 14400,
 }
 
 # 策略级参数:每钱包/每模板取值,存 template_settings 表。
