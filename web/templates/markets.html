@@ -37,6 +37,7 @@ let marketsData = [];
 let lastScanTime = 0;
 let scanPollTimer = null;
 let expanded = {};   // market_id -> true(已展开)
+let ladderCache = {};   // market_id -> 已渲染梯队 HTML(展开期缓存,收起清,避免轮询反复 fetch)
 
 function relTime(sec) {
     if (!sec) return '';
@@ -92,15 +93,17 @@ function renderMarkets() {
             <td><span class="expand-btn" onclick="toggleLadder('${mid}', ${i})">${open ? '▾ 收起' : '▸ 展开'}</span></td>
         </tr>`;
     }).join('');
+    // 跨刷新保持展开:为仍展开的市场按当前行位重插梯队(命中缓存即显,否则占位)(F10)
+    marketsData.forEach((m, i) => {
+        if (expanded[m.market_id]) {
+            insertLadderRow(i, ladderCache[m.market_id]
+                || (firstWallet
+                    ? '<span class="metric-note">预演中…</span>'
+                    : '<span class="metric-note">需要先启用一个钱包才能预演梯队</span>'));
+        }
+    });
 }
 
-function setBtn(i, open) {
-    const row = document.getElementById('mrow-' + i);
-    if (row) {
-        const btn = row.querySelector('.expand-btn');
-        if (btn) btn.textContent = open ? '▾ 收起' : '▸ 展开';
-    }
-}
 function insertLadderRow(i, html) {
     const row = document.getElementById('mrow-' + i);
     if (!row) return;
@@ -108,10 +111,6 @@ function insertLadderRow(i, html) {
     tr.id = 'ladder-' + i;
     tr.innerHTML = `<td colspan="10" style="padding:0"><div class="ladder-wrap">${html}</div></td>`;
     row.parentNode.insertBefore(tr, row.nextSibling);
-}
-function setLadder(i, html) {
-    const tr = document.getElementById('ladder-' + i);
-    if (tr) tr.querySelector('.ladder-wrap').innerHTML = html;
 }
 
 function renderLadder(data) {
@@ -146,30 +145,25 @@ function renderLadder(data) {
 }
 
 async function toggleLadder(mid, i) {
-    if (document.getElementById('ladder-' + i)) {
-        document.getElementById('ladder-' + i).remove();
+    if (expanded[mid]) {                 // 收起:清缓存(再展开时重新预演)
         expanded[mid] = false;
-        setBtn(i, false);
+        delete ladderCache[mid];
+        renderMarkets();
         return;
     }
-    expanded[mid] = true;
-    setBtn(i, true);
-    if (!firstWallet) {
-        insertLadderRow(i, '<span class="metric-note">需要先启用一个钱包才能预演梯队</span>');
-        return;
-    }
-    insertLadderRow(i, '<span class="metric-note">预演中…</span>');
+    expanded[mid] = true;                // 展开:先重渲染插入占位
+    renderMarkets();
+    if (ladderCache[mid] || !firstWallet) return;
     try {
         const r = await fetch(`/api/markets/${encodeURIComponent(mid)}/ladder?wallet=${encodeURIComponent(firstWallet)}`);
         const data = await r.json();
-        if (!r.ok) {
-            setLadder(i, `<span class="loss">预演失败：${escapeHtml(data.error || ('HTTP ' + r.status))}</span>`);
-            return;
-        }
-        setLadder(i, renderLadder(data));
+        ladderCache[mid] = r.ok
+            ? renderLadder(data)
+            : `<span class="loss">预演失败：${escapeHtml(data.error || ('HTTP ' + r.status))}</span>`;
     } catch (e) {
-        setLadder(i, `<span class="loss">预演失败：${escapeHtml(String(e))}</span>`);
+        ladderCache[mid] = `<span class="loss">预演失败：${escapeHtml(String(e))}</span>`;
     }
+    if (expanded[mid]) renderMarkets();  // 回填结果(若仍展开)
 }
 
 function scanMarkets() {
@@ -197,7 +191,7 @@ function pollScan() {
         }
         marketsData = data.markets || [];
         if (data.last_scan_time) lastScanTime = data.last_scan_time;
-        expanded = {};   // 数据刷新，收起所有展开
+        // 不再清 expanded:renderMarkets 按 market_id 重插展开的梯队,展开态跨轮保持(F10)
         renderScanLine();
         renderMarkets();
     });

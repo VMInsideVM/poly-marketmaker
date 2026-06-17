@@ -397,6 +397,15 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
         document.querySelectorAll('#tier-rules-editor .interval-row:not(.catch-all) .upper-input')
     ).some(inp => inp.value === '' || isNaN(parseFloat(inp.value)));
     if (badUpper) { alert('请填写每个区间的厚度上限'); return; }
+    const badParam = Array.from(
+        document.querySelectorAll('#tier-rules-editor .interval-row')
+    ).some(row => {
+        const sel = row.querySelector('.action-select');
+        if (!sel || (sel.value !== 'fixed_shares' && sel.value !== 'fixed_amount')) return false;
+        const v = parseFloat(row.querySelector('.param-input').value);
+        return isNaN(v) || v <= 0;
+    });
+    if (badParam) { alert('「固定份数 / 固定金额」必须填写大于 0 的数值'); return; }
     data.tier_rules = serializeTierRules();
     fetch(`/api/templates/${currentTemplateId}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
