@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>市场发现</h1>
+    <div class="controls">
+        <button class="btn btn-sm btn-primary" onclick="scanMarkets()">扫描市场</button>
+    </div>
+</div>
+<p id="scan-time" class="metric-note"></p>
+<div id="scan-progress" class="metric-note" style="display:none;margin-bottom:8px"></div>
+
+<table class="data-table" id="markets-table">
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>市场</th>
+            <th>方向</th>
+            <th>每日奖励</th>
+            <th>最低份数</th>
+            <th>单份奖励</th>
+            <th>奖励范围</th>
+            <th>盘口价差</th>
+            <th>competitiveness</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody id="markets-body"></tbody>
+</table>
+<p class="metric-note">市场级 4 指标(最低份数 / 单份奖励 / 奖励范围 / 盘口价差)扫描时即有;点「展开」实时拉订单簿、跑 v4 推演看梯队(订单厚度 / 累加厚度 / 有效价格)。</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let firstWallet = null;
+let maxSpread = null;
+let marketsData = [];
+let lastScanTime = 0;
+let scanPollTimer = null;
+let expanded = {};   // market_id -> true(已展开)
+
+function relTime(sec) {
+    if (!sec) return '';
+    const d = Math.floor(Date.now() / 1000 - sec);
+    if (d < 60) return '刚刚';
+    if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+    return Math.floor(d / 3600) + ' 小时前';
+}
+function renderScanLine() {
+    const el = document.getElementById('scan-time');
+    if (!lastScanTime) { el.textContent = '尚未扫描'; return; }
+    const abs = new Date(lastScanTime * 1000).toLocaleString('zh-CN');
+    el.textContent = `上次扫描：${abs}（${relTime(lastScanTime)}，共 ${marketsData.length} 个）`;
+}
+
+function fmtP(p) { return (+Number(p).toFixed(4)).toString(); }
+
+function perShareCell(m) {
+    if (m.per_share == null) return '—';
+    const mark = m.per_share_ok ? '✓' : '✗';
+    const note = `档${m.per_share_bracket}·≥${Number(m.per_share_threshold).toFixed(2)} ${mark}`;
+    return `<span class="metric">$${m.per_share.toFixed(2)}</span> <span class="metric-note">${note}</span>`;
+}
+function rangeCell(m) {
+    if (m.reward_range_min == null || m.reward_range_max == null) return '—';
+    return `[${Number(m.reward_range_min).toFixed(2)}, ${Number(m.reward_range_max).toFixed(2)}]`;
+}
+function spreadCell(m) {
+    if (m.spread_cents == null || m.spread_cents < 0) return '—';
+    const note = (maxSpread != null) ? ` <span class="metric-note">≤${maxSpread}¢ ✓</span>` : '';
+    return `<span class="metric">${m.spread_cents.toFixed(0)}¢</span>${note}`;
+}
+
+function renderMarkets() {
+    const tb = document.getElementById('markets-body');
+    tb.innerHTML = marketsData.map((m, i) => {
+        const mid = m.market_id;
+        const open = !!expanded[mid];
+        return `<tr id="mrow-${i}">
+            <td>${i + 1}</td>
+            <td>${marketCell(m.market_name, m.market_id, m.market_url)}</td>
+            <td>${m.outcome || ''}</td>
+            <td>$${(m.daily_reward || 0).toFixed(2)}/天</td>
+            <td class="metric">${m.rewards_min_size ?? '—'}</td>
+            <td>${perShareCell(m)}</td>
+            <td class="metric">${rangeCell(m)}</td>
+            <td>${spreadCell(m)}</td>
+            <td>${m.market_competitiveness != null ? Number(m.market_competitiveness).toFixed(2) : '—'}</td>
+            <td><span class="expand-btn" onclick="toggleLadder('${mid}', ${i})">${open ? '▾ 收起' : '▸ 展开'}</span></td>
+        </tr>`;
+    }).join('');
+}
+
+function setBtn(i, open) {
+    const row = document.getElementById('mrow-' + i);
+    if (row) {
+        const btn = row.querySelector('.expand-btn');
+        if (btn) btn.textContent = open ? '▾ 收起' : '▸ 展开';
+    }
+}
+function insertLadderRow(i, html) {
+    const row = document.getElementById('mrow-' + i);
+    if (!row) return;
+    const tr = document.createElement('tr');
+    tr.id = 'ladder-' + i;
+    tr.innerHTML = `<td colspan="10" style="padding:0"><div class="ladder-wrap">${html}</div></td>`;
+    row.parentNode.insertBefore(tr, row.nextSibling);
+}
+function setLadder(i, html) {
+    const tr = document.getElementById('ladder-' + i);
+    if (tr) tr.querySelector('.ladder-wrap').innerHTML = html;
+}
+
+function renderLadder(data) {
+    if (!data.sides || !data.sides.length) {
+        return '<span class="metric-note">无可预演的方向（订单簿缺失或预算为 0）</span>';
+    }
+    return data.sides.map(s => {
+        const rows = s.levels.map(L => {
+            const tier = L.tier_index != null
+                ? `<span class="tier-label">档${L.tier_index + 1}${L.tier_index === 0 ? '（买一）' : ''}</span>`
+                : '— 跳过 —';
+            const last = L.skip_reason
+                ? `<td colspan="2">${escapeHtml(L.skip_reason)}</td>`
+                : `<td><b>${L.shares}</b></td><td>$${L.amount.toFixed(2)}</td>`;
+            return `<tr class="${L.skip_reason ? 'skip' : ''}">
+                <td>${tier}</td>
+                <td>${fmtP(L.price)}</td>
+                <td>${L.size}</td>
+                <td>${L.thickness.toFixed(2)}</td>
+                <td>${L.cumulative_thickness.toFixed(2)}</td>
+                ${last}</tr>`;
+        }).join('');
+        return `<div class="metric-note" style="margin-bottom:6px">${escapeHtml(s.outcome)} 方向 · 奖励范围 [${s.reward_range[0].toFixed(2)}, ${s.reward_range[1].toFixed(2)}] · 盘口价差 ${s.spread_cents.toFixed(0)}¢</div>
+        <table class="data-table">
+            <thead><tr>
+                <th>档</th><th>有效价格</th><th>盘口量</th><th>订单厚度</th><th>累加厚度</th><th>命中 → 份额</th><th>金额</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <div class="metric-note" style="margin-top:6px">合计 ${s.total_tiers} 档 · ${s.total_shares} 份 · $${s.total_amount.toFixed(2)}</div>`;
+    }).join('<div style="height:12px"></div>');
+}
+
+async function toggleLadder(mid, i) {
+    if (document.getElementById('ladder-' + i)) {
+        document.getElementById('ladder-' + i).remove();
+        expanded[mid] = false;
+        setBtn(i, false);
+        return;
+    }
+    expanded[mid] = true;
+    setBtn(i, true);
+    if (!firstWallet) {
+        insertLadderRow(i, '<span class="metric-note">需要先启用一个钱包才能预演梯队</span>');
+        return;
+    }
+    insertLadderRow(i, '<span class="metric-note">预演中…</span>');
+    try {
+        const r = await fetch(`/api/markets/${encodeURIComponent(mid)}/ladder?wallet=${encodeURIComponent(firstWallet)}`);
+        const data = await r.json();
+        if (!r.ok) {
+            setLadder(i, `<span class="loss">预演失败：${escapeHtml(data.error || ('HTTP ' + r.status))}</span>`);
+            return;
+        }
+        setLadder(i, renderLadder(data));
+    } catch (e) {
+        setLadder(i, `<span class="loss">预演失败：${escapeHtml(String(e))}</span>`);
+    }
+}
+
+function scanMarkets() {
+    fetch('/api/engine/scan', { method: 'POST' });
+    ensurePoll();
+}
+function ensurePoll() {
+    if (scanPollTimer) return;
+    scanPollTimer = setInterval(pollScan, 2000);
+    pollScan();
+}
+function pollScan() {
+    fetch('/api/eligible').then(r => r.json()).then(data => {
+        const status = data.scan_status || 'idle';
+        const box = document.getElementById('scan-progress');
+        if (status === 'scanning') {
+            const checked = data.scan_checked || 0, total = data.scan_total || 0;
+            box.style.display = 'block';
+            box.textContent = total > 0
+                ? `扫描中 ${checked}/${total}，已找到 ${(data.markets || []).length} 个`
+                : `正在初筛… 已找到 ${(data.markets || []).length} 个`;
+        } else {
+            box.style.display = 'none';
+            if (scanPollTimer) { clearInterval(scanPollTimer); scanPollTimer = null; }
+        }
+        marketsData = data.markets || [];
+        if (data.last_scan_time) lastScanTime = data.last_scan_time;
+        expanded = {};   // 数据刷新，收起所有展开
+        renderScanLine();
+        renderMarkets();
+    });
+}
+function refreshEligible() {
+    fetch('/api/eligible').then(r => r.json()).then(data => {
+        marketsData = data.markets || [];
+        lastScanTime = data.last_scan_time || 0;
+        renderScanLine();
+        renderMarkets();
+        if (data.scan_status === 'scanning') ensurePoll();
+    });
+}
+
+fetch('/api/settings').then(r => r.json()).then(d => { maxSpread = d.max_spread_cents; }).catch(() => {});
+fetch('/api/wallets').then(r => r.json()).then(ws => {
+    const en = (ws || []).filter(w => w.enabled);
+    firstWallet = en.length ? en[0].address : null;
+}).catch(() => {});
+refreshEligible();
+</script>
+{% endblock %}

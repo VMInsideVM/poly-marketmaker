@@ -110,6 +110,7 @@ class Database:
                 neg_risk INTEGER DEFAULT 0,
                 reward_range_min REAL DEFAULT 0,
                 reward_range_max REAL DEFAULT 1,
+                spread_cents REAL DEFAULT -1,
                 order_price REAL NOT NULL,
                 order_size INTEGER NOT NULL,
                 min_cost REAL DEFAULT 0,
@@ -167,6 +168,13 @@ class Database:
         em_cols2 = {row[1] for row in c.fetchall()}
         if em_cols2 and "tags" not in em_cols2:
             c.execute("ALTER TABLE eligible_markets ADD COLUMN tags TEXT DEFAULT '[]'")
+            self.conn.commit()
+        c.execute("PRAGMA table_info(eligible_markets)")
+        em_cols3 = {row[1] for row in c.fetchall()}
+        if em_cols3 and "spread_cents" not in em_cols3:
+            c.execute(
+                "ALTER TABLE eligible_markets ADD COLUMN spread_cents REAL DEFAULT -1"
+            )
             self.conn.commit()
         c.execute("PRAGMA table_info(wallets)")
         wcols = {row[1] for row in c.fetchall()}
@@ -583,9 +591,9 @@ class Database:
                 (market_id, token_id, market_name, outcome, market_competitiveness,
                  daily_reward, rewards_max_spread, rewards_min_size,
                  tick_size, tick_size_str, neg_risk,
-                 reward_range_min, reward_range_max,
+                 reward_range_min, reward_range_max, spread_cents,
                  order_price, order_size, min_cost, end_date, tags, scanned_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     m.get("market_id", ""),
                     m.get("token_id", ""),
@@ -600,6 +608,7 @@ class Database:
                     1 if m.get("neg_risk", False) else 0,
                     m.get("reward_range_min", 0),
                     m.get("reward_range_max", 1),
+                    m.get("spread_cents", -1),
                     m.get("order_price", 0),
                     m.get("order_size", 0),
                     m.get("min_cost", 0),

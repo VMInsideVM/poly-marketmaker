@@ -23,6 +23,7 @@ from utils.crypto import derive_key, encrypt, decrypt
 from engine.monitor_status import get_snapshot
 from engine.market_links import enrich_with_market_meta, ensure_market_meta
 from engine.blacklist_ops import buy_order_ids_for_condition
+from engine.scanner import reward_bracket
 from config import DB_PATH, HOST, PORT
 from web import update as updater
 from version import __version__
@@ -124,6 +125,58 @@ def _enrich_rows(rows, id_key):
     enrich_with_market_meta(rows, meta, id_key)
 
 
+def _derive_per_share(markets):
+    """给 eligible 行派生展示指标(不落库):单份奖励(含是否达阈值)、奖励范围、盘口价差、方向。
+
+    单份奖励 = 每日奖励 ÷ 最低份数,阈值取默认模板(取不到兜 0.30)。奖励范围/盘口价差由候选池
+    内存中的 _orderbooks 现算(扫描/下单轮刷过书才有);无书(闲时或 DB 行)置 None,前端显「—」,
+    避免落库占位值 0/1/-1 被误读。盘口价差对二元市场两侧相等;奖励范围/方向取首个有订单簿的
+    token 作代表(完整两侧见展开预演)。最后剥掉 _orderbooks 以免撑大响应。"""
+    from engine.strategy import reward_price_range
+
+    try:
+        thr = db.get_template(db.get_default_template_id()).get(
+            "per_share_reward_thresholds", {}
+        )
+    except Exception:
+        thr = {}
+    for m in markets:
+        ms = float(m.get("rewards_min_size", 0) or 0)
+        ps = (float(m.get("daily_reward", 0) or 0) / ms) if ms > 0 else None
+        bracket = reward_bracket(int(ms)) if ms > 0 else None
+        threshold = float(thr.get(str(bracket), 0.30)) if bracket else None
+        m["per_share"] = ps
+        m["per_share_bracket"] = bracket
+        m["per_share_threshold"] = threshold
+        m["per_share_ok"] = ps is not None and threshold is not None and ps >= threshold
+
+        rr_min = rr_max = sp = None
+        books = m.get("_orderbooks") or {}
+        for tok in m.get("tokens", []) or []:
+            b = books.get(tok.get("token_id", ""))
+            if not b:
+                continue
+            bids = sorted(
+                b.get("bids", []), key=lambda x: float(x["price"]), reverse=True
+            )
+            asks = sorted(b.get("asks", []), key=lambda x: float(x["price"]))
+            if not bids or not asks:
+                continue
+            bb, ba = float(bids[0]["price"]), float(asks[0]["price"])
+            rr_min, rr_max = reward_price_range(
+                (bb + ba) / 2, float(m.get("rewards_max_spread", 2))
+            )
+            sp = (ba - bb) * 100
+            if not m.get("outcome"):
+                m["outcome"] = tok.get("outcome", "")
+            break
+        m["reward_range_min"] = rr_min
+        m["reward_range_max"] = rr_max
+        m["spread_cents"] = sp
+        m.pop("_orderbooks", None)
+    return markets
+
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -199,6 +252,12 @@ def logout():
 @login_required
 def dashboard():
     return render_template("dashboard.html")
+
+
+@app.route("/markets")
+@login_required
+def markets_page():
+    return render_template("markets.html")
 
 
 @app.route("/config")
@@ -826,6 +885,7 @@ def api_eligible_markets():
         # No manager yet, try loading from database
         markets = [dict(m) for m in db.get_eligible_markets()]
         _enrich_rows(markets, "market_id")
+        _derive_per_share(markets)
         return jsonify({"markets": markets, "last_scan_time": 0, "scan_status": "idle"})
 
     # During scanning, use memory (real-time updates)
@@ -843,6 +903,7 @@ def api_eligible_markets():
     # (mutated by the scanner thread) or the DB rows.
     markets = [dict(m) for m in markets]
     _enrich_rows(markets, "market_id")
+    _derive_per_share(markets)
 
     return jsonify(
         {
@@ -852,6 +913,79 @@ def api_eligible_markets():
             "scan_progress": manager.scan_progress,
             "scan_checked": manager.scan_checked,
             "scan_total": manager.scan_total,
+        }
+    )
+
+
+@app.route("/api/markets/<market_id>/ladder", methods=["GET"])
+@login_required
+def api_market_ladder(market_id):
+    from engine.laddering import preview_market_ladders
+    from engine.strategy import reward_price_range
+    from engine.positions import held_side_info
+
+    wallet = request.args.get("wallet")
+    apis = _wallet_apis(wallet)
+    if not apis:
+        return jsonify({"error": "钱包不可用"}), 404
+    addr, api = next(iter(apis.items()))
+    tmpl = db.get_template_for(addr)
+    tier_rules = tmpl.get("tier_rules") or []
+    max_exposure_usd = float(tmpl.get("max_exposure_usd", 250))
+    max_exposure_shares = int(tmpl.get("max_exposure_shares", 500))
+
+    src = (
+        manager.eligible_markets
+        if (manager and manager.eligible_markets)
+        else db.get_eligible_markets()
+    )
+    rows = [dict(m) for m in src if m.get("market_id") == market_id]
+    if not rows:
+        return jsonify({"error": "市场不在 eligible 列表"}), 404
+
+    try:
+        positions = api.get_user_positions(api.get_funder())
+    except Exception:
+        positions = []
+    _, held_value, held_shares = held_side_info(positions)
+    balance = api.get_balance()
+    budget = max(0.0, min(balance, max_exposure_usd) - held_value.get(market_id, 0.0))
+    shares_budget = max(0, max_exposure_shares - int(held_shares.get(market_id, 0.0)))
+
+    sides_in = []
+    for r in rows[:2]:
+        ob = api.get_orderbook(r["token_id"])
+        bids = sorted(ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True)
+        asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))
+        if not bids or not asks:
+            continue
+        bb, ba = float(bids[0]["price"]), float(asks[0]["price"])
+        mid = (bb + ba) / 2
+        rmin, rmax = reward_price_range(mid, float(r.get("rewards_max_spread", 2)))
+        sides_in.append(
+            {
+                "outcome": r.get("outcome", ""),
+                "token_id": r["token_id"],
+                "min_size": int(r.get("rewards_min_size", 0) or 0),
+                "reward_range_min": rmin,
+                "reward_range_max": rmax,
+                "best_bid": bb,
+                "best_ask": ba,
+                "spread_cents": (ba - bb) * 100,
+                "bids": bids,
+            }
+        )
+    a = sides_in[0] if sides_in else None
+    b = sides_in[1] if len(sides_in) > 1 else None
+    preview = preview_market_ladders(a, b, tier_rules, budget, shares_budget)
+    sides = [preview[k] for k in ("a", "b") if preview.get(k)]
+    return jsonify(
+        {
+            "market_id": market_id,
+            "market_name": rows[0].get("market_name", ""),
+            "budget_usd": budget,
+            "shares_budget": shares_budget,
+            "sides": sides,
         }
     )
 

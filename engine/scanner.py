@@ -24,6 +24,7 @@ from engine.categories import (
     queried_categories,
     partition_candidates,
 )
+from engine.strategy import reward_price_range
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +243,8 @@ class MarketScanner:
                 if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
                     continue
                 tick_size_str = book.get("tick_size", "0.01")
+                midpoint = (best_bid + best_ask) / 2
+                rmin, rmax = reward_price_range(midpoint, max_spread_reward)
                 eligible.append(
                     {
                         "market_id": condition_id,
@@ -258,6 +261,9 @@ class MarketScanner:
                         "tick_size_str": tick_size_str,
                         "neg_risk": neg_risk,
                         "tags": market.get("tags", []),
+                        "reward_range_min": rmin,
+                        "reward_range_max": rmax,
+                        "spread_cents": spread_val * 100,
                     }
                 )
         logger.info(

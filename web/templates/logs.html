@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>监控状态</h1>
+<h1>监控</h1>
+<p class="metric-note">每 4 秒刷新的实时监控快照（瞬时状态，非持久记录）。动作历史在「历史」页。</p>
 
 <div class="filter-bar">
     <label>钱包：</label>
-    <select id="wallet-filter" onchange="refreshStatus(); refreshActions();">
+    <select id="wallet-filter" onchange="refreshStatus()">
         <option value="">全部</option>
     </select>
     <span id="updated">最后更新：-</span>
@@ -23,36 +24,6 @@
     <tbody id="status-body"></tbody>
 </table>
 </div>
-
-<h2 style="margin-top:2rem;">操作记录</h2>
-<div class="filter-bar">
-    <span class="hint">（按上方所选钱包过滤）</span>
-    <label>动作：</label>
-    <select id="act-type" onchange="refreshActions()">
-        <option value="">全部</option>
-    </select>
-    <label>开始日期：</label>
-    <input type="date" id="act-start" onchange="refreshActions()">
-    <label>结束日期：</label>
-    <input type="date" id="act-end" onchange="refreshActions()">
-</div>
-<div class="table-scroll">
-<table class="data-table" style="table-layout:fixed;width:100%">
-    <colgroup>
-        <col style="width:13%"><col style="width:8%"><col style="width:11%">
-        <col style="width:9%"><col style="width:6%"><col style="width:7%">
-        <col style="width:6%"><col style="width:18%"><col style="width:22%">
-    </colgroup>
-    <thead>
-        <tr>
-            <th>时间</th><th>钱包</th><th>市场</th><th>动作</th>
-            <th>方向</th><th>价格</th><th>数量</th>
-            <th>原因</th><th>价格依据/来源</th>
-        </tr>
-    </thead>
-    <tbody id="actions-body"></tbody>
-</table>
-</div>
 {% endblock %}
 
 {% block scripts %}
@@ -60,7 +31,6 @@
 function shortWallet(w) {
     return w && w.length > 12 ? w.slice(0, 6) + '..' + w.slice(-4) : (w || '');
 }
-
 function actionClass(a) {
     a = a || '';
     if (/replace|cancel|止损|跳过|stoploss/.test(a)) return 'loss';
@@ -100,53 +70,6 @@ function refreshStatus() {
     });
 }
 
-const ACTION_LABELS = {
-    place_buy: '挂买单',
-    take_profit_sell: '止盈挂卖单',
-    take_profit_recancel: '止盈撤旧改一笔',
-    cancel_remainder: '撤成交剩余',
-    stoploss_cancel_sell: '止损撤止盈卖',
-    stoploss_market_sell: '止损市价卖',
-    step3_cancel_old: 'Step3撤旧单',
-    step3_replace_new: 'Step3重挂买',
-    step3_cancel_nocompliant: 'Step3撤单(无合规价)',
-    eligibility_cancel: '复查撤单(市场不合格)',
-    blacklist_cancel: '黑名单撤单',
-};
-
-function refreshActions() {
-    const wallet = document.getElementById('wallet-filter').value;
-    const type = document.getElementById('act-type').value;
-    const s = document.getElementById('act-start').value;
-    const e = document.getElementById('act-end').value;
-    const params = new URLSearchParams();
-    if (wallet) params.set('wallet', wallet);
-    if (type) params.set('types', type);
-    if (s) params.set('start', new Date(s).getTime() / 1000);
-    if (e) params.set('end', new Date(e + 'T23:59:59').getTime() / 1000);
-
-    fetch(`/api/actions?${params}`).then(r => r.json()).then(rows => {
-        const body = document.getElementById('actions-body');
-        if (!rows.length) {
-            body.innerHTML = '<tr><td colspan="9">暂无操作记录</td></tr>';
-            return;
-        }
-        body.innerHTML = rows.map(a => `
-            <tr>
-                <td>${escapeHtml(new Date(a.created_at * 1000).toLocaleString('zh-CN'))}</td>
-                <td title="${escapeHtml(a.wallet)}">${escapeHtml(shortWallet(a.wallet))}</td>
-                <td>${marketCell(a.market_name, a.market_id, a.market_url)}</td>
-                <td class="${actionClass(a.action_type)}">${escapeHtml(ACTION_LABELS[a.action_type] || a.action_type)}</td>
-                <td>${escapeHtml(a.side)}</td>
-                <td>${a.price < 0 ? '-' : escapeHtml(a.price.toFixed(4))}</td>
-                <td>${escapeHtml(a.size)}</td>
-                <td>${escapeHtml(a.reason)}</td>
-                <td>${escapeHtml(a.price_basis)}</td>
-            </tr>
-        `).join('');
-    });
-}
-
 fetch('/api/wallets').then(r => r.json()).then(wallets => {
     const select = document.getElementById('wallet-filter');
     wallets.forEach(w => {
@@ -157,19 +80,7 @@ fetch('/api/wallets').then(r => r.json()).then(wallets => {
     });
 });
 
-// Populate the 动作 (action-type) filter from the known labels.
-(function () {
-    const sel = document.getElementById('act-type');
-    Object.entries(ACTION_LABELS).forEach(([k, v]) => {
-        const opt = document.createElement('option');
-        opt.value = k;
-        opt.textContent = v;
-        sel.appendChild(opt);
-    });
-})();
-
 refreshStatus();
-refreshActions();
-setInterval(() => { refreshStatus(); refreshActions(); }, 4000);
+setInterval(refreshStatus, 4000);
 </script>
 {% endblock %}

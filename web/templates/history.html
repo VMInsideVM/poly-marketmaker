@@ -1,104 +1,100 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>历史记录</h1>
+<h1>历史</h1>
+<p class="metric-note">引擎动作记录：挂买、止盈/止损卖、撤改、复查/黑名单撤单等，按时间序，含逐笔成本构成（价格依据）。当前持仓在「挂单与持仓」页。</p>
 
 <div class="filter-bar">
     <label>钱包：</label>
-    <select id="wallet-filter" onchange="refreshHistory()">
+    <select id="wallet-filter" onchange="refreshActions()">
+        <option value="">全部</option>
+    </select>
+    <label>动作：</label>
+    <select id="act-type" onchange="refreshActions()">
         <option value="">全部</option>
     </select>
     <label>开始日期：</label>
-    <input type="date" id="start-date" onchange="refreshHistory()">
+    <input type="date" id="start-date" onchange="refreshActions()">
     <label>结束日期：</label>
-    <input type="date" id="end-date" onchange="refreshHistory()">
+    <input type="date" id="end-date" onchange="refreshActions()">
+    <button class="btn btn-sm" onclick="refreshActions()">刷新</button>
 </div>
 
-<h2>当前持仓（成本均价）</h2>
-<p class="hint">数据来自 Polymarket 实时持仓（Data API）。成本价为该持仓的真实加权均价 avgPrice；已平仓的仓位不在此表，平仓动作见下方“卖单记录”。</p>
-<table class="data-table">
-    <thead>
-        <tr>
-            <th>钱包</th><th>市场</th><th>方向</th>
-            <th>成本价</th><th>数量</th><th>现价</th><th>浮动盈亏</th><th>止损价</th>
-        </tr>
-    </thead>
-    <tbody id="history-body"></tbody>
-</table>
-
-<h2 style="margin-top:2rem;">卖单记录</h2>
-<table class="data-table">
+<div class="table-scroll">
+<table class="data-table" style="table-layout:fixed;width:100%">
+    <colgroup>
+        <col style="width:13%"><col style="width:8%"><col style="width:11%">
+        <col style="width:9%"><col style="width:6%"><col style="width:7%">
+        <col style="width:6%"><col style="width:18%"><col style="width:22%">
+    </colgroup>
     <thead>
         <tr>
             <th>时间</th><th>钱包</th><th>市场</th><th>动作</th>
-            <th>价格</th><th>原因</th><th>价格依据/来源</th>
+            <th>方向</th><th>价格</th><th>数量</th>
+            <th>原因</th><th>价格依据/来源</th>
         </tr>
     </thead>
-    <tbody id="sell-reasons-body"></tbody>
+    <tbody id="actions-body"></tbody>
 </table>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function refreshHistory() {
-    const wallet = document.getElementById('wallet-filter').value;
-    const params = new URLSearchParams();
-    if (wallet) params.set('wallet', wallet);
-
-    fetch(`/api/positions?${params}`).then(r => r.json()).then(rows => {
-        const body = document.getElementById('history-body');
-        if (!rows.length) {
-            body.innerHTML = '<tr><td colspan="8">暂无持仓</td></tr>';
-        } else {
-            body.innerHTML = rows.map(p => `
-            <tr>
-                <td title="${p.wallet}">${p.wallet.slice(0,6)}...${p.wallet.slice(-4)}</td>
-                <td>${marketCell(p.market_name, p.condition_id, p.market_url)}</td>
-                <td class="buy-side">${p.outcome || '持有'}</td>
-                <td>${p.buy_price.toFixed(4)}</td>
-                <td>${p.size}</td>
-                <td>${p.current_price.toFixed(4)}</td>
-                <td class="${p.pnl >= 0 ? 'profit' : 'loss'}">${p.pnl.toFixed(2)}</td>
-                <td>${p.stop_price.toFixed(4)}</td>
-            </tr>
-        `).join('');
-        }
-    });
-    refreshSellReasons();
+function shortWallet(w) {
+    return w && w.length > 12 ? w.slice(0, 6) + '..' + w.slice(-4) : (w || '');
+}
+function actionClass(a) {
+    a = a || '';
+    if (/replace|cancel|止损|跳过|stoploss/.test(a)) return 'loss';
+    if (/成交|挂买|place_buy/.test(a)) return 'profit';
+    return '';
 }
 
 const ACTION_LABELS = {
+    place_buy: '挂买单',
     take_profit_sell: '止盈挂卖单',
     take_profit_recancel: '止盈撤旧改一笔',
-    stoploss_market_sell: '止损市价卖',
     cancel_remainder: '撤成交剩余',
     stoploss_cancel_sell: '止损撤止盈卖',
+    stoploss_market_sell: '止损市价卖',
     step3_cancel_old: 'Step3撤旧单',
     step3_replace_new: 'Step3重挂买',
     step3_cancel_nocompliant: 'Step3撤单(无合规价)',
     eligibility_cancel: '复查撤单(市场不合格)',
+    dropout_cancel: '跌出eligible撤单',
+    side_pause_cancel: '成交后单侧暂停撤单',
+    buy_reconcile_cancel: '撤改收敛撤单',
+    blacklist_cancel: '黑名单撤单',
 };
 
-function refreshSellReasons() {
+function refreshActions() {
     const wallet = document.getElementById('wallet-filter').value;
-    const startDate = document.getElementById('start-date').value;
-    const endDate = document.getElementById('end-date').value;
+    const type = document.getElementById('act-type').value;
+    const s = document.getElementById('start-date').value;
+    const e = document.getElementById('end-date').value;
     const params = new URLSearchParams();
-    params.set('types',
-        'take_profit_sell,take_profit_recancel,stoploss_market_sell,stoploss_cancel_sell');
     if (wallet) params.set('wallet', wallet);
-    if (startDate) params.set('start', new Date(startDate).getTime() / 1000);
-    if (endDate) params.set('end', new Date(endDate + 'T23:59:59').getTime() / 1000);
+    if (type) params.set('types', type);
+    if (s) params.set('start', new Date(s).getTime() / 1000);
+    if (e) params.set('end', new Date(e + 'T23:59:59').getTime() / 1000);
 
     fetch(`/api/actions?${params}`).then(r => r.json()).then(rows => {
-        document.getElementById('sell-reasons-body').innerHTML = rows.map(a => `
+        const body = document.getElementById('actions-body');
+        if (!rows.length) {
+            body.innerHTML = '<tr><td colspan="9">暂无动作记录</td></tr>';
+            return;
+        }
+        body.innerHTML = rows.map(a => `
             <tr>
-                <td>${new Date(a.created_at * 1000).toLocaleString('zh-CN')}</td>
-                <td title="${a.wallet}">${a.wallet.slice(0,6)}...${a.wallet.slice(-4)}</td>
+                <td>${escapeHtml(new Date(a.created_at * 1000).toLocaleString('zh-CN'))}</td>
+                <td title="${escapeHtml(a.wallet)}">${escapeHtml(shortWallet(a.wallet))}</td>
                 <td>${marketCell(a.market_name, a.market_id, a.market_url)}</td>
-                <td>${ACTION_LABELS[a.action_type] || a.action_type}</td>
-                <td>${a.price < 0 ? '-' : a.price.toFixed(4)}</td>
-                <td>${a.reason}</td>
-                <td>${a.price_basis}</td>
+                <td class="${actionClass(a.action_type)}">${escapeHtml(ACTION_LABELS[a.action_type] || a.action_type)}</td>
+                <td>${escapeHtml(a.side)}</td>
+                <td>${a.price < 0 ? '-' : escapeHtml(a.price.toFixed(4))}</td>
+                <td>${escapeHtml(a.size)}</td>
+                <td>${escapeHtml(a.reason)}</td>
+                <td>${escapeHtml(a.price_basis)}</td>
             </tr>
         `).join('');
     });
@@ -114,6 +110,16 @@ fetch('/api/wallets').then(r => r.json()).then(wallets => {
     });
 });
 
-refreshHistory();
+(function () {
+    const sel = document.getElementById('act-type');
+    Object.entries(ACTION_LABELS).forEach(([k, v]) => {
+        const opt = document.createElement('option');
+        opt.value = k;
+        opt.textContent = v;
+        sel.appendChild(opt);
+    });
+})();
+
+refreshActions();
 </script>
 {% endblock %}
