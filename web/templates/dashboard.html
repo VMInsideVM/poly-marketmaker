@@ -9,8 +9,8 @@
     </div>
 </div>
 
-<div class="config-section" style="margin-bottom:16px;">
-    <h3>手动调试</h3>
+<div class="config-section">
+    <h2>手动调试</h2>
     <div class="controls">
         <button class="btn btn-sm btn-primary" onclick="engineAction('start-monitors')">启动监控</button>
         <button class="btn btn-sm btn-primary" onclick="scanMarkets()">扫描市场</button>
@@ -20,11 +20,12 @@
     </div>
 </div>
 
-<div class="summary-cards" id="summary">
-    <div class="card"><h3>引擎状态</h3><p id="engine-status">-</p></div>
-    <div class="card"><h3>总挂单</h3><p id="total-orders">-</p></div>
-    <div class="card"><h3>总持仓</h3><p id="total-positions">-</p></div>
-    <div class="card"><h3>总盈亏</h3><p id="total-pnl">-</p></div>
+<div class="stat-cards">
+    <div class="stat-card"><h3>引擎状态</h3><div class="v" id="engine-status">-</div></div>
+    <div class="stat-card"><h3>总挂单</h3><div class="v" id="total-orders">-</div></div>
+    <div class="stat-card"><h3>总持仓</h3><div class="v" id="total-positions">-</div></div>
+    <div class="stat-card"><h3>总盈亏</h3><div class="v" id="total-pnl">-</div></div>
+    <div class="stat-card"><h3>合格市场</h3><div class="v" id="eligible-count">-</div></div>
 </div>
 
 <h2>钱包状态</h2>
@@ -41,46 +42,11 @@
     </thead>
     <tbody id="wallet-body"></tbody>
 </table>
-
-<h2>符合条件的市场 (Eligible Markets)</h2>
-<p id="scan-time" style="color:#888; font-size:13px;"></p>
-<div id="scan-progress" style="display:none; color:#888; font-size:13px; margin-bottom:8px;"></div>
-<table class="data-table" id="eligible-table">
-    <thead>
-        <tr>
-            <th onclick="sortEligible('#')" style="cursor:pointer"># ⇅</th>
-            <th onclick="sortEligible('market_name')" style="cursor:pointer">市场名称 ⇅</th>
-            <th onclick="sortEligible('outcome')" style="cursor:pointer">方向 ⇅</th>
-            <th onclick="sortEligible('daily_reward')" style="cursor:pointer">每日奖励 ⇅</th>
-            <th onclick="sortEligible('order_price')" style="cursor:pointer">挂单价格 ⇅</th>
-            <th onclick="sortEligible('order_size')" style="cursor:pointer">挂单数量 ⇅</th>
-            <th onclick="sortEligible('market_competitiveness')" style="cursor:pointer">Competitiveness ⇅</th>
-        </tr>
-    </thead>
-    <tbody id="eligible-body"></tbody>
-</table>
+<p class="metric-note">合格市场的明细与梯队预演在「市场发现」页查看。</p>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let lastScanTime = 0;
-let lastScanCount = 0;
-
-function relTime(sec) {
-    if (!sec) return '';
-    const d = Math.floor(Date.now() / 1000 - sec);
-    if (d < 60) return '刚刚';
-    if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
-    return Math.floor(d / 3600) + ' 小时前';
-}
-
-function renderScanLine() {
-    const el = document.getElementById('scan-time');
-    if (!lastScanTime) { el.textContent = '尚未扫描'; return; }
-    const abs = new Date(lastScanTime * 1000).toLocaleString('zh-CN');
-    el.textContent = `上次扫描：${abs}（${relTime(lastScanTime)}，共 ${lastScanCount} 个）`;
-}
-
 function refreshDashboard() {
     fetch('/api/dashboard').then(r => r.json()).then(data => {
         document.getElementById('total-orders').textContent = data.total_orders;
@@ -90,12 +56,12 @@ function refreshDashboard() {
         document.getElementById('engine-status').innerHTML =
             `<span class="status ${engineRunning ? 'running' : 'stopped'}">${engineRunning ? '运行中' : '已停止'}</span>`;
         const tbody = document.getElementById('wallet-body');
-        tbody.innerHTML = data.wallets.map(w => `
+        tbody.innerHTML = (data.wallets || []).map(w => `
             <tr>
                 <td title="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</td>
                 <td>${w.balance != null ? w.balance.toFixed(2) : '-'}</td>
-                <td>${w.open_orders}</td>
-                <td>${w.positions}</td>
+                <td>${w.open_orders ?? '-'}</td>
+                <td>${w.positions ?? '-'}</td>
                 <td><span class="status ${w.running ? 'running' : 'stopped'}">${w.running ? '运行中' : '已停止'}</span></td>
                 <td>
                     ${w.running
@@ -108,6 +74,12 @@ function refreshDashboard() {
     });
 }
 
+function refreshEligibleCount() {
+    fetch('/api/eligible').then(r => r.json()).then(d => {
+        document.getElementById('eligible-count').textContent = (d.markets || []).length;
+    }).catch(() => {});
+}
+
 function engineAction(action, confirmMsg) {
     if (confirmMsg && !confirm(confirmMsg)) return;
     fetch(`/api/engine/${action}`, {method: 'POST'}).then(r => r.json()).then(data => {
@@ -116,100 +88,15 @@ function engineAction(action, confirmMsg) {
     });
 }
 
-let scanPollTimer = null;
-let eligibleData = [];
-let eligibleSortKey = 'market_competitiveness';
-let eligibleSortAsc = false;
-
-function sortEligible(key) {
-    if (key === '#') {
-        // Reset to default order
-        eligibleSortKey = null;
-        renderEligibleTable();
-        return;
-    }
-    if (eligibleSortKey === key) {
-        eligibleSortAsc = !eligibleSortAsc;
-    } else {
-        eligibleSortKey = key;
-        eligibleSortAsc = false;
-    }
-    renderEligibleTable();
-}
-
-function renderEligibleTable() {
-    let sorted = [...eligibleData];
-    if (eligibleSortKey) {
-        sorted.sort((a, b) => {
-            let va = a[eligibleSortKey] ?? '';
-            let vb = b[eligibleSortKey] ?? '';
-            if (typeof va === 'string') va = va.toLowerCase();
-            if (typeof vb === 'string') vb = vb.toLowerCase();
-            if (va < vb) return eligibleSortAsc ? -1 : 1;
-            if (va > vb) return eligibleSortAsc ? 1 : -1;
-            return 0;
-        });
-    }
-    const tbody = document.getElementById('eligible-body');
-    tbody.innerHTML = sorted.map((m, i) => `
-        <tr>
-            <td>${i + 1}</td>
-            <td>${marketCell(m.market_name, m.market_id, m.market_url)}</td>
-            <td>${m.outcome || ''}</td>
-            <td>$${(m.daily_reward ?? 0).toFixed(2)}/天</td>
-            <td>${m.order_price != null ? m.order_price.toFixed(4) : '—'}</td>
-            <td>${m.order_size ?? '—'}</td>
-            <td>${m.market_competitiveness || '-'}</td>
-        </tr>
-    `).join('');
-}
-
-function ensureScanPolling() {
-    if (scanPollTimer) return;
-    scanPollTimer = setInterval(pollScanProgress, 2000);
-    pollScanProgress();
-}
-
 function scanMarkets() {
+    // 触发扫描后跳到「市场发现」页看进度与结果
     fetch('/api/engine/scan', {method: 'POST'});
-    ensureScanPolling();
-}
-
-function pollScanProgress() {
-    fetch('/api/eligible').then(r => r.json()).then(data => {
-        const status = data.scan_status || 'idle';
-        const checked = data.scan_checked || 0;
-        const total = data.scan_total || 0;
-        const markets = data.markets || [];
-        const box = document.getElementById('scan-progress');
-
-        if (status === 'scanning') {
-            const bar = total > 0
-                ? `<progress value="${checked}" max="${total}"></progress>`
-                : `<progress></progress>`;
-            box.innerHTML = total > 0
-                ? `扫描中 ${bar} ${checked}/${total}，已找到 ${markets.length} 个`
-                : `正在初筛… ${bar} 已找到 ${markets.length} 个`;
-            box.style.display = 'block';
-        } else {
-            box.style.display = 'none';
-            box.innerHTML = '';
-            if (scanPollTimer) {
-                clearInterval(scanPollTimer);
-                scanPollTimer = null;
-            }
-        }
-
-        eligibleData = markets;
-        renderEligibleTable();
-    });
+    window.location.href = '/markets';
 }
 
 function placeOrders() {
     if (!confirm('确定将 eligible 列表分发到所有钱包挂单？')) return;
-    fetch('/api/engine/place-orders', {method: 'POST'}).then(r => r.json()).then(data => {
-        refreshDashboard();
-    });
+    fetch('/api/engine/place-orders', {method: 'POST'}).then(r => r.json()).then(() => refreshDashboard());
 }
 
 function testPlaceOrders() {
@@ -222,9 +109,7 @@ function testPlaceOrders() {
 
 function cancelAllOrders() {
     if (!confirm('确定撤销所有钱包的全部买单？')) return;
-    fetch('/api/engine/cancel-all', {method: 'POST'}).then(r => r.json()).then(data => {
-        refreshDashboard();
-    });
+    fetch('/api/engine/cancel-all', {method: 'POST'}).then(r => r.json()).then(() => refreshDashboard());
 }
 
 function walletAction(address, action) {
@@ -235,39 +120,9 @@ function walletAction(address, action) {
     });
 }
 
-function refreshEligible() {
-    fetch('/api/eligible').then(r => r.json()).then(data => {
-        const markets = data.markets || [];
-        const scanTime = data.last_scan_time;
-        if (scanTime) {
-            lastScanTime = scanTime;
-            lastScanCount = markets.length;
-        } else {
-            lastScanTime = 0;
-            lastScanCount = 0;
-        }
-        renderScanLine();
-        if (data.scan_status === 'scanning') ensureScanPolling();
-        eligibleData = markets;
-        renderEligibleTable();
-    });
-}
-
 refreshDashboard();
-refreshEligible();
+refreshEligibleCount();
 setInterval(refreshDashboard, 5000);
-setInterval(renderScanLine, 5000);
-
-// eligible 列表跟随后端扫描节奏：检测 last_scan_time 变化才刷新
-let lastKnownScanTime = 0;
-setInterval(() => {
-    fetch('/api/eligible').then(r => r.json()).then(data => {
-        if (data.scan_status === 'scanning') ensureScanPolling();
-        if (data.last_scan_time && data.last_scan_time !== lastKnownScanTime) {
-            lastKnownScanTime = data.last_scan_time;
-            refreshEligible();
-        }
-    });
-}, 10000);
+setInterval(refreshEligibleCount, 30000);
 </script>
 {% endblock %}
