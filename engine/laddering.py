@@ -141,7 +141,13 @@ def reconcile_buy_orders(ladder, resting_buys):
         op = round(float(o.get("price", 0) or 0), 4)
         osize = float(o.get("original_size", o.get("size", 0)) or 0)
         tgt = target.get(op)
-        if tgt is not None and abs(osize - tgt) <= max(1.0, 0.01 * tgt):
+        # 每个目标价只保留一笔:价量符且该价尚未保留过 -> 留;否则(价漂/量不符/
+        # 同价重复)-> 撤。漏掉 op not in keep 会让同价的重复单都被 keep、量翻倍。
+        if (
+            tgt is not None
+            and op not in keep
+            and abs(osize - tgt) <= max(1.0, 0.01 * tgt)
+        ):
             keep.add(op)
         else:
             oid = o.get("id")
