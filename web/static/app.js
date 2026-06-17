@@ -59,3 +59,17 @@ function marketCell(name, conditionId, url) {
     : '';
   return `<span title="${escapeHtml(cid)}">${inner}${copyBtn}</span>`;
 }
+
+// 全局拦截:任一 fetch 被重定向到登录/设置页(会话失效,典型场景=自动更新重启后
+// 旧标签页仍开着)时,直接跳登录,避免页面静默停更 + .json() 解析登录 HTML 报错(F12)。
+(function () {
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (...args) {
+    return _origFetch(...args).then((resp) => {
+      if (resp && resp.redirected && /\/(login|setup)(\?|$)/.test(resp.url)) {
+        window.location.href = '/login';
+      }
+      return resp;
+    });
+  };
+})();

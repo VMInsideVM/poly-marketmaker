@@ -18,4 +18,7 @@ def pick_port(host: str, preferred: int) -> int:
             except OSError:
                 continue
             return s.getsockname()[1]
-    return preferred
+    raise OSError(
+        f"无法绑定任何端口(首选 {preferred} 与系统分配端口均失败);"
+        f"请检查 {host} 上的端口占用/保留情况"
+    )
