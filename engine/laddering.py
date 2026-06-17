@@ -149,3 +149,109 @@ def reconcile_buy_orders(ladder, resting_buys):
                 cancel_ids.append(oid)
     to_place = [(p, s) for (p, s) in ladder if round(float(p), 4) not in keep]
     return cancel_ids, to_place
+
+
+def _verbose_levels(side, tiers_k):
+    """每个 bid 价位 -> 标注 dict;合格档(in_range 且厚度>=1)按序给 tier_index(<tiers_k)。"""
+    min_size = side["min_size"]
+    rmin, rmax = side["reward_range_min"], side["reward_range_max"]
+    levels, running, tier_no = [], 0.0, 0
+    for lvl in side["bids"]:
+        price, size = float(lvl["price"]), float(lvl["size"])
+        thickness = size / min_size if min_size > 0 else 0.0
+        running += thickness
+        in_range = rmin <= price <= rmax
+        qualifies = in_range and thickness >= 1
+        tier_index, skip_reason = None, None
+        if not qualifies:
+            skip_reason = "超出奖励范围" if not in_range else "厚度<1"
+        elif tier_no < tiers_k:
+            tier_index, tier_no = tier_no, tier_no + 1
+        else:
+            skip_reason = "超过最大档数"
+        levels.append(
+            {
+                "price": price,
+                "size": size,
+                "thickness": thickness,
+                "cumulative_thickness": running,
+                "in_range": in_range,
+                "qualifies": qualifies,
+                "tier_index": tier_index,
+                "shares": 0,
+                "amount": 0.0,
+                "skip_reason": skip_reason,
+            }
+        )
+    return levels
+
+
+def preview_market_ladders(side_a, side_b, tier_rules, budget_usd, max_shares):
+    """两边共享敞口的逐档预演(只读、不下单)。
+
+    分配口径与 compute_market_ladders 一致(档序升序、同档先 a 后 b、resolve_tier_share
+    同款规则、按 USD/份额封顶);保留全部 bid 价位并标注 skip_reason。不应用 §8 双边地板。
+    side_x:{"outcome","token_id","min_size","reward_range_min","reward_range_max",
+            "best_bid","best_ask","spread_cents","bids":[{price,size}...]} 或 None。
+    返回 {"a":<side|None>,"b":<side|None>};
+    side = {"outcome","token_id","best_bid","best_ask","spread_cents","reward_range":[min,max],
+            "levels":[...],"total_tiers","total_shares","total_amount","double_sided_warn"}。
+    """
+    tiers_k = len(tier_rules)
+    out, lv = {}, {}
+    for key, side in (("a", side_a), ("b", side_b)):
+        if side is None:
+            out[key], lv[key] = None, []
+            continue
+        lv[key] = _verbose_levels(side, tiers_k)
+        out[key] = {
+            "outcome": side.get("outcome", ""),
+            "token_id": side.get("token_id", ""),
+            "best_bid": side.get("best_bid"),
+            "best_ask": side.get("best_ask"),
+            "spread_cents": side.get("spread_cents"),
+            "reward_range": [side["reward_range_min"], side["reward_range_max"]],
+            "levels": lv[key],
+            "total_tiers": 0,
+            "total_shares": 0,
+            "total_amount": 0.0,
+            "double_sided_warn": False,
+        }
+    by_tier = {"a": {}, "b": {}}
+    for key in ("a", "b"):
+        for L in lv[key]:
+            if L["tier_index"] is not None:
+                by_tier[key][L["tier_index"]] = L
+    spent_usd, spent_shares = 0.0, 0
+    for j in range(tiers_k):
+        for key, side in (("a", side_a), ("b", side_b)):
+            if side is None:
+                continue
+            L = by_tier[key].get(j)
+            if L is None:
+                continue
+            price, ct = L["price"], L["cumulative_thickness"]
+            remaining_usd = budget_usd - spent_usd
+            shares = resolve_tier_share(
+                ct, tier_rules[j], price, side["min_size"], remaining_usd
+            )
+            if shares <= 0:
+                L["skip_reason"] = "规则判定不挂"
+                continue
+            cap_usd = int(remaining_usd / price) if price > 0 else 0
+            cap_shares = max_shares - spent_shares
+            shares = min(shares, cap_usd, cap_shares)
+            if shares <= 0 or shares < side["min_size"]:
+                L["skip_reason"] = "预算/敞口用尽"
+                continue
+            L["shares"], L["amount"] = shares, price * shares
+            spent_usd += price * shares
+            spent_shares += shares
+    for key in ("a", "b"):
+        if out[key] is None:
+            continue
+        placed = [L for L in lv[key] if L["shares"] > 0]
+        out[key]["total_tiers"] = len(placed)
+        out[key]["total_shares"] = sum(L["shares"] for L in placed)
+        out[key]["total_amount"] = sum(L["amount"] for L in placed)
+    return out
