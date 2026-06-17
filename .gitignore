@@ -9,3 +9,4 @@ installer/
 *.spec
 
 .worktrees/
+.superpowers/
