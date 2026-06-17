@@ -126,7 +126,14 @@ def _enrich_rows(rows, id_key):
 
 
 def _derive_per_share(markets):
-    """给 eligible 行派生单份奖励注解(不落库)。阈值取默认模板,取不到兜 0.30。"""
+    """给 eligible 行派生展示指标(不落库):单份奖励(含是否达阈值)、奖励范围、盘口价差、方向。
+
+    单份奖励 = 每日奖励 ÷ 最低份数,阈值取默认模板(取不到兜 0.30)。奖励范围/盘口价差由候选池
+    内存中的 _orderbooks 现算(扫描/下单轮刷过书才有);无书(闲时或 DB 行)置 None,前端显「—」,
+    避免落库占位值 0/1/-1 被误读。盘口价差对二元市场两侧相等;奖励范围/方向取首个有订单簿的
+    token 作代表(完整两侧见展开预演)。最后剥掉 _orderbooks 以免撑大响应。"""
+    from engine.strategy import reward_price_range
+
     try:
         thr = db.get_template(db.get_default_template_id()).get(
             "per_share_reward_thresholds", {}
@@ -135,13 +142,38 @@ def _derive_per_share(markets):
         thr = {}
     for m in markets:
         ms = float(m.get("rewards_min_size", 0) or 0)
-        m["per_share"] = (float(m.get("daily_reward", 0) or 0) / ms) if ms > 0 else None
-        m["per_share_bracket"] = reward_bracket(int(ms)) if ms > 0 else None
-        m["per_share_threshold"] = (
-            float(thr.get(str(m["per_share_bracket"]), 0.30))
-            if m.get("per_share_bracket")
-            else None
-        )
+        ps = (float(m.get("daily_reward", 0) or 0) / ms) if ms > 0 else None
+        bracket = reward_bracket(int(ms)) if ms > 0 else None
+        threshold = float(thr.get(str(bracket), 0.30)) if bracket else None
+        m["per_share"] = ps
+        m["per_share_bracket"] = bracket
+        m["per_share_threshold"] = threshold
+        m["per_share_ok"] = ps is not None and threshold is not None and ps >= threshold
+
+        rr_min = rr_max = sp = None
+        books = m.get("_orderbooks") or {}
+        for tok in m.get("tokens", []) or []:
+            b = books.get(tok.get("token_id", ""))
+            if not b:
+                continue
+            bids = sorted(
+                b.get("bids", []), key=lambda x: float(x["price"]), reverse=True
+            )
+            asks = sorted(b.get("asks", []), key=lambda x: float(x["price"]))
+            if not bids or not asks:
+                continue
+            bb, ba = float(bids[0]["price"]), float(asks[0]["price"])
+            rr_min, rr_max = reward_price_range(
+                (bb + ba) / 2, float(m.get("rewards_max_spread", 2))
+            )
+            sp = (ba - bb) * 100
+            if not m.get("outcome"):
+                m["outcome"] = tok.get("outcome", "")
+            break
+        m["reward_range_min"] = rr_min
+        m["reward_range_max"] = rr_max
+        m["spread_cents"] = sp
+        m.pop("_orderbooks", None)
     return markets
 
 

@@ -71,6 +71,10 @@ def test_eligible_derives_per_share(client):
     assert round(row["per_share"], 4) == 0.40  # 40 / 100
     assert row["per_share_bracket"] == 100
     assert round(row["per_share_threshold"], 2) == 0.30
+    assert row["per_share_ok"] is True  # 0.40 >= 0.30
+    # 无订单簿(闲时/DB)时 reward_range/spread 覆盖为 None -> 前端显「—」,不沿用落库占位值
+    assert row["reward_range_min"] is None
+    assert row["spread_cents"] is None
 
 
 def test_ladder_preview_route(client):

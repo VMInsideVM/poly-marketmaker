@@ -56,7 +56,8 @@ function fmtP(p) { return (+Number(p).toFixed(4)).toString(); }
 
 function perShareCell(m) {
     if (m.per_share == null) return '—';
-    const note = `档${m.per_share_bracket}·≥${Number(m.per_share_threshold).toFixed(2)} ✓`;
+    const mark = m.per_share_ok ? '✓' : '✗';
+    const note = `档${m.per_share_bracket}·≥${Number(m.per_share_threshold).toFixed(2)} ${mark}`;
     return `<span class="metric">$${m.per_share.toFixed(2)}</span> <span class="metric-note">${note}</span>`;
 }
 function rangeCell(m) {
@@ -129,8 +130,7 @@ function renderLadder(data) {
                 <td>${L.cumulative_thickness.toFixed(2)}</td>
                 ${last}</tr>`;
         }).join('');
-        const warn = s.double_sided_warn ? ' <span class="badge warn">§8 双边</span>' : '';
-        return `<div class="metric-note" style="margin-bottom:6px">${escapeHtml(s.outcome)} 方向 · 奖励范围 [${s.reward_range[0].toFixed(2)}, ${s.reward_range[1].toFixed(2)}] · 盘口价差 ${s.spread_cents.toFixed(0)}¢${warn}</div>
+        return `<div class="metric-note" style="margin-bottom:6px">${escapeHtml(s.outcome)} 方向 · 奖励范围 [${s.reward_range[0].toFixed(2)}, ${s.reward_range[1].toFixed(2)}] · 盘口价差 ${s.spread_cents.toFixed(0)}¢</div>
         <table class="data-table">
             <thead><tr>
                 <th>档</th><th>有效价格</th><th>盘口量</th><th>订单厚度</th><th>累加厚度</th><th>命中 → 份额</th><th>金额</th>
