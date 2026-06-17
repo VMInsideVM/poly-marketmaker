@@ -213,3 +213,59 @@ class TestOrderResponseChecked:
         }
         res = api.place_market_sell("tok1", 1000)
         assert res["status"] == "matched"
+
+
+class TestCancelResponseObserved:
+    """批量撤单的应用层失败(HTTP 200 但 not_canceled 非空 / success=False)不能静默
+    吞掉:至少 WARNING 记录,便于诊断"幻影撤单→重复挂单"(F5)。不抛异常(调用方各有
+    兜底,自愈靠下一轮对账)。"""
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_cancel_orders_warns_on_app_level_failure(
+        self, mock_clob, _mock_derive, caplog
+    ):
+        import logging
+
+        api, client = _api_with_mock_client(mock_clob)
+        client.cancel_orders.return_value = {
+            "canceled": [],
+            "not_canceled": {"o1": "x"},
+        }
+        with caplog.at_level(logging.WARNING):
+            res = api.cancel_orders(["o1"])
+        assert res == {"canceled": [], "not_canceled": {"o1": "x"}}  # 原样返回、不抛
+        assert any("未撤" in r.message for r in caplog.records)
+
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_cancel_orders_silent_on_clean_success(
+        self, mock_clob, _mock_derive, caplog
+    ):
+        import logging
+
+        api, client = _api_with_mock_client(mock_clob)
+        client.cancel_orders.return_value = {"canceled": ["o1"], "not_canceled": {}}
+        with caplog.at_level(logging.WARNING):
+            api.cancel_orders(["o1"])
+        assert not any("未撤" in r.message for r in caplog.records)
+
+
+class TestPositionsPagination:
+    """get_user_positions 需传 limit 抬高单页上限,避免持仓被服务端默认页大小静默截断
+    导致漏离场/止损(F7)。"""
+
+    @patch("api.polymarket_api.requests")
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
+    @patch("api.polymarket_api.ClobClient")
+    def test_get_user_positions_sends_limit(
+        self, mock_clob, _mock_derive, mock_requests
+    ):
+        api, client = _api_with_mock_client(mock_clob)
+        resp = MagicMock()
+        resp.json.return_value = []
+        mock_requests.get.return_value = resp
+        api.get_user_positions("0xfunder")
+        params = mock_requests.get.call_args.kwargs["params"]
+        assert params.get("user") == "0xfunder"
+        assert params.get("limit") == 500

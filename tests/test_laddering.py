@@ -206,6 +206,15 @@ def test_reconcile_size_tolerance_keeps():
     assert to_place == []
 
 
+def test_reconcile_cancels_duplicate_at_same_price():
+    # 同价两笔(上轮撤单失败遗留的重复单):只保留一笔、多余撤掉、不再重复挂,
+    # 否则两笔都被 keep、该 token 持仓量翻倍(F6)。
+    resting = [_ob_order("o1", 0.30, 100), _ob_order("o2", 0.30, 100)]
+    cancel_ids, to_place = reconcile_buy_orders([(0.30, 100)], resting)
+    assert cancel_ids == ["o2"]
+    assert to_place == []
+
+
 def test_reconcile_empty_target_cancels_all():
     resting = [_ob_order("o1", 0.30, 100), _ob_order("o2", 0.29, 100)]
     cancel_ids, to_place = reconcile_buy_orders([], resting)

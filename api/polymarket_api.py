@@ -66,6 +66,20 @@ def _check_order_resp(res, what: str):
     return res
 
 
+def _check_cancel_resp(res, what: str = "批量撤单"):
+    """撤单响应观测:应用层失败(success=False 或 not_canceled 非空)时 WARNING 记录。
+
+    不抛异常——调用方(monitor/manager)都已 try/except 网络错且各有兜底,这里只保证
+    "假装撤成功"的静默失败可见(F5)。撤单失败通常幂等(单已不在/已成交),下一轮对账
+    自愈;真正的危害是看不见。
+    """
+    if isinstance(res, dict) and (
+        res.get("success") is False or res.get("not_canceled")
+    ):
+        logger.warning("%s 部分/全部未撤: %s", what, res)
+    return res
+
+
 def derive_deposit_address(eoa_address: str) -> str:
     """Polymarket deposit-wallet (funder) address for a given signer EOA.
 
@@ -376,15 +390,17 @@ class PolymarketAPI:
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancel a single order by ID."""
-        return self.client.cancel_order(OrderPayload(orderID=order_id))
+        return _check_cancel_resp(
+            self.client.cancel_order(OrderPayload(orderID=order_id)), "撤单"
+        )
 
     def cancel_orders(self, order_ids: list) -> dict:
         """Batch-cancel multiple orders by ID in a single request."""
-        return self.client.cancel_orders(order_ids)
+        return _check_cancel_resp(self.client.cancel_orders(order_ids), "批量撤单")
 
     def cancel_all_orders(self) -> dict:
         """Cancel all open orders for this wallet."""
-        return self.client.cancel_all()
+        return _check_cancel_resp(self.client.cancel_all(), "全撤")
 
     def get_order(self, order_id: str) -> dict:
         """Get order details by ID.
@@ -424,7 +440,9 @@ class PolymarketAPI:
         """
         resp = requests.get(
             f"{DATA_API_HOST}/positions",
-            params={"user": user_address},
+            # limit 抬高单页上限,避免持仓被服务端默认页大小(约 100)静默截断 ->
+            # 漏离场/止损(F7)。本 app 并发市场上限 ~10 -> 持仓 ≤~20,500 足够,单请求。
+            params={"user": user_address, "limit": 500},
             timeout=15,
         )
         resp.raise_for_status()
