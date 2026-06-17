@@ -1,6 +1,6 @@
 /* web/static/style.css — 深/浅主题令牌 + 组件类。颜色一律走 CSS 变量。 */
 
-:root[data-theme="light"] {
+:root, :root[data-theme="light"] {
   --bg: #f4f5f7; --panel: #fff; --panel2: #f8fafc; --border: #e5e7eb; --rowline: #f1f3f5;
   --text: #1f2937; --muted: #8a93a0; --accent: #4f46e5; --accentsoft: #eef2ff;
   --good: #059669; --goodsoft: #ecfdf5; --bad: #dc2626; --badsoft: #fef2f2;
