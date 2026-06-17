@@ -40,16 +40,36 @@ Built for **non-technical users**: install, double-click, a browser opens, you s
 ## 功能特性 / Features
 
 - **自动 / 手动两种模式**
-  - *自动*：恢复 → 扫描 → 下单 → 监控的全流程循环。
-  - *手动*：分步执行「扫描 / 下单 / 启动监控」，由你掌控每一步。
-- **奖励做市选品**：按最低奖励、结算天数、价格区间、买卖价差、冷却时间过滤市场，并按竞争度（competitiveness）从低到高优先下单（竞争越少奖励份额越大）。
+  - *自动*：发现（慢节奏，默认 4 小时一轮）→ 下单（快节奏，刷新订单簿后多档挂单）→ 监控的全流程循环。
+  - *手动*：分步执行「扫描 / 分发挂单 / 启动监控」，由你掌控每一步。
+- **多档做市（v4 策略）**：一侧最多取 K 档，从买一往下挑「落在奖励区间内、且厚度 ≥ 1」的有效价位；每档份额由「累加厚度 → 份额规则表（`tier_rules`）」决定，整个市场两边共享敞口。
+- **奖励做市选品**：按最低奖励、结算天数、价格区间、买卖价差、冷却时间过滤；再校验「单份奖励 = 每日奖励 ÷ 最低份数」达到对应档位阈值；并按竞争度（competitiveness）从低到高优先下单（竞争越少奖励份额越大）。
+- **每钱包独立策略模板**：多模板增删改，每个钱包绑定自己的参数模板（阈值 / 敞口 / 离场 / 多档规则各自可调）。
 - **持仓驱动的止盈**：成本价由我们真实的 CLOB 成交逐笔重建（FIFO 净额），每个持仓**始终只挂一张**卖单；卖价 = `max(向上取整到 tick 的成本, 最优买价 + 1 tick)`（穿价护栏：不亏本卖、永远做 maker、不吃单）。成本无法可靠重建时**跳过并显著告警**（绝不按不确定成本卖出，自愈式重试）。
-- **止损**：按持仓成本与现价的偏离百分比触发。
+- **主动限损**：按持仓成本的偏离（θ_loss / θ_stop，美分）触发止盈撤改与止损。
 - **全局黑名单**：在下单 / 扫描 / 监控三处统一拦截不想参与的市场。
 - **私钥本地加密**：钱包私钥用 AES-256-GCM 加密，密钥由你的密码经 PBKDF2（60 万次迭代）派生，仅存在于内存。
 - **GitHub 自动更新**：启动时与最新 Release 比对，弹窗 → 下载校验（SHA-256）→ 静默安装重启。
 
-> Two modes (auto/manual), reward-aware market selection, position-driven take-profit with cost reconstructed from real fills, stop-loss, a global blacklist enforced at three choke points, AES-256-GCM encrypted keys held only in memory, and GitHub Release auto-update.
+> v4 multi-tier (laddering) market making with per-wallet strategy templates, reward-aware selection (including per-share-reward bracket thresholds), position-driven take-profit with cost reconstructed from real fills, θ-based exit/stop-loss, a global blacklist enforced at three choke points, AES-256-GCM encrypted keys held only in memory, and GitHub Release auto-update.
+
+---
+
+## 界面 / UI
+
+7 个页面、左侧边栏导航，支持**深 / 浅主题切换**（侧边栏底部按钮，选择记在浏览器本地，刷新保持）。
+
+| 页面 | 内容 |
+| --- | --- |
+| 仪表盘 | 引擎开关 / 手动步骤 + 健康汇总（总挂单 / 总持仓 / 总盈亏 / 合格市场数）+ 各钱包状态 |
+| 市场发现 | 扫描出的合格市场；每行常显**最低份数**、**单份奖励**（是否达档位阈值 ✓/✗）；点「展开」实时拉订单簿做**梯队预演**，显示每档的**有效价格 / 订单厚度 / 累加厚度 / 命中规则→份额**，以及该侧的**奖励范围 / 盘口价差**，并把「为什么这档不挂」的跳过行一并列出 |
+| 挂单与持仓 | 在挂买单（价 / 量 / 已成交 / 是否在赚奖励）+ 当前持仓（成本 / 现价 / 止损价 / 浮动盈亏） |
+| 历史 | 引擎动作记录（挂买 / 止盈止损卖 / 撤改 / 复查撤单等），含每笔卖单的逐笔成本构成依据 |
+| 监控 | 每 4 秒刷新的实时监控快照（瞬时状态） |
+| 配置 | 钱包导入与模板绑定、多模板管理、策略参数、多档规则（`tier_rules`）可视化编辑、引擎参数 |
+| 黑名单 | 加入 / 移除不参与的市场 |
+
+> Seven sidebar screens with a light/dark theme toggle. The Market Discovery page surfaces the v4 metrics: minimum shares and per-share reward in the list, plus an on-demand per-side ladder preview (effective price, order thickness, cumulative thickness, resolved shares per tier, the side's reward range and order-book spread, and the skipped rungs with the reason each was skipped).
 
 ---
 
@@ -125,12 +145,12 @@ pytest tests/test_strategy.py     # 单个文件
 
 | 阶段 | 模块 | 职责 |
 | --- | --- | --- |
-| 扫描 Scan | `engine/scanner.py` | 过滤奖励市场（奖励阈值、结算天数、价格带、价差、冷却），记录每市场的 `min_cost`（达标最低资金），下单时各钱包据此把关。 |
-| 策略 Strategy | `engine/strategy.py` | `determine_order_price` 纯函数、完整单测、核心 IP：依据 tick size 与 `rewards_max_spread`，从订单簿买盘深度选买价。 |
-| 下单 Place | `engine/manager.py` | 下单前**每次重读余额**防并发超支；按竞争度从低到高下单。 |
+| 扫描 Scan | `engine/scanner.py` | 发现奖励市场、产出共享**候选池**（奖励阈值、结算天数、价格带、价差、单份奖励取档、冷却）；各钱包下单时按自己的模板从候选池精筛。 |
+| 策略 Strategy | `engine/laddering.py` · `engine/strategy.py` | 多档挂单（纯函数、完整单测、核心 IP）：在奖励区间内从买一往下取有效价位，按「累加厚度 → 份额规则表」定档与份额，整市场两边共享敞口。 |
+| 下单 Place | `engine/manager.py` | 下单前**每次重读余额**防并发超支；按竞争度从低到高；按各钱包模板做多档撤改收敛（reconcile），成交后单侧暂停。 |
 | 监控 Monitor | `engine/monitor.py` | 检测成交、维护每仓**唯一**卖单（止盈，成本逐笔重建）、止损、重核价差与价格区间。 |
 
-> Auth gates everything (engines can't auto-start). One shared scanner thread feeds per-wallet workers; SQLite is shared across threads. The pipeline is scan → strategy → place → monitor, with `engine/strategy.py` (pure, fully unit-tested) as the core IP.
+> Auth gates everything (engines can't auto-start). One shared scanner thread feeds per-wallet workers; SQLite is shared across threads. The pipeline is scan → strategy → place → monitor, with the multi-tier laddering in `engine/laddering.py` (plus `engine/strategy.py`), pure and fully unit-tested, as the core IP.
 
 更详细的设计文档（简体中文）见 `docs/superpowers/specs/2026-05-17-polymarket-market-maker-design.md`。
 开发约定与关键不变量见 [`CLAUDE.md`](CLAUDE.md)。
@@ -139,7 +159,19 @@ pytest tests/test_strategy.py     # 单个文件
 
 ## 核心参数 / Configuration
 
-默认值见 `config.py` 的 `DEFAULTS`；用户在界面上的修改按 key 存入数据库 `settings` 表，并在读取时合并覆盖。改动在下次启动引擎时生效。
+参数分两级：**引擎级**（全局单值，存 `settings` 表）与**策略级 / 模板**（每钱包绑定的模板各自取值，存 `template_settings` 表）；默认值见 `config.py`（`ENGINE_DEFAULTS` / `TEMPLATE_DEFAULTS`）。界面改动在下次启动引擎时生效。
+
+**引擎级 / Engine（`settings`）**
+
+| Key | 默认值 | 含义 |
+| --- | --- | --- |
+| `scan_interval_sec` | 30 | 自动模式下单轮间隔（秒） |
+| `fill_check_interval_sec` | 5 | 成交 / 监控检查间隔（秒） |
+| `cooldown_minutes` | 20 | 同市场成交后冷却（分钟） |
+| `rewards_cache_ttl_sec` | 600 | 奖励参数缓存 TTL（秒） |
+| `discovery_interval_sec` | 14400 | 市场发现间隔（秒，默认 4 小时） |
+
+**策略级 / 每模板 Strategy（`template_settings`）**
 
 | Key | 默认值 | 含义 |
 | --- | --- | --- |
@@ -147,13 +179,14 @@ pytest tests/test_strategy.py     # 单个文件
 | `max_spread_cents` | 3.0 | 最大买卖价差（美分） |
 | `min_price_cents` / `max_price_cents` | 10.0 / 50.0 | 单价区间（美分，含端点） |
 | `min_settlement_days` | 4 | 距结算的最少天数 |
-| `stop_loss_pct` | 15.0 | 止损触发偏离百分比 |
-| `scan_interval_sec` | 30 | 自动模式扫描间隔（秒） |
-| `fill_check_interval_sec` | 5 | 成交/监控检查间隔（秒） |
-| `cooldown_minutes` | 20 | 同市场成交后的冷却（分钟） |
-| `max_buy_orders_per_wallet` | 5 | 每钱包最大同时挂买单数 |
-| `order_size_mode` | `min` | 下单规模模式（`min` / 自定义） |
-| `order_size_custom_usd` | 0.0 | 自定义下单金额（美元） |
+| `theta_loss_cents` / `theta_stop_cents` | 2 / 5 | 浮亏离场 / 强平止损阈值（美分） |
+| `case_a_mode` | `ask` | 成本 ≤ 买一时离场方式（`ask` 挂卖一 / `market` 市价） |
+| `excluded_categories` | `[sports, esports, weather]` | 排除品类（tag slug） |
+| `tier_rules` | 6 档 × 最小份数 | 多档挂单规则表（累加厚度 → 份额） |
+| `max_exposure_usd` / `max_exposure_shares` | 250 / 500 | 单市场最大敞口（美元 / 份数） |
+| `max_concurrent_markets` | 10 | 最大并发做市市场数 |
+| `min_price_double_cents` | 10 | 双边挂单价格下限（美分） |
+| `per_share_reward_thresholds` | 各档 0.30 | 单份奖励按最低份数取档的阈值 |
 
 运行时数据位置 / Runtime data：
 - 打包运行：`%LOCALAPPDATA%\PolymarketMarketMaker\`（`market_maker.db`、`market_maker.log`）
