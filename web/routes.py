@@ -242,6 +242,10 @@ def login():
 @app.route("/logout")
 def logout():
     session.clear()
+    # 退出时清掉进程内的解密密钥与缓存的 API 客户端,缩短密钥在内存中的存活窗口(F9)。
+    # 运行中的引擎持有各自的 api 实例、不依赖此模块级密钥;重新登录会重新派生同一密钥。
+    set_encryption_key(None)
+    _api_cache.clear()
     return redirect(url_for("login"))
 
 

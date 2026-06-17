@@ -31,3 +31,17 @@ def test_falls_back_when_preferred_unavailable():
             probe.close()
     finally:
         held.close()
+
+
+def test_raises_when_nothing_bindable():
+    # preferred 和系统分配端口(0)都绑不上时必须抛错,而非返回一个绑不上的端口
+    # (旧行为 return preferred → Flask 随后崩在晦涩的 WinError 10013)(F13)。
+    from unittest.mock import MagicMock, patch
+    import pytest
+
+    with patch("utils.net.socket.socket") as sock:
+        s = MagicMock()
+        s.bind.side_effect = OSError("port unavailable")
+        sock.return_value.__enter__.return_value = s
+        with pytest.raises(OSError):
+            pick_port(HOST, 8765)
