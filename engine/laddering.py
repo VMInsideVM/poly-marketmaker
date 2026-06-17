@@ -241,7 +241,7 @@ def preview_market_ladders(side_a, side_b, tier_rules, budget_usd, max_shares):
             cap_usd = int(remaining_usd / price) if price > 0 else 0
             cap_shares = max_shares - spent_shares
             shares = min(shares, cap_usd, cap_shares)
-            if shares <= 0 or shares < side["min_size"]:
+            if shares <= 0:
                 L["skip_reason"] = "预算/敞口用尽"
                 continue
             L["shares"], L["amount"] = shares, price * shares

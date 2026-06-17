@@ -58,12 +58,22 @@ def test_shares_allocated_to_qualifying_tiers():
     assert out["a"]["total_shares"] == 300
 
 
-def test_budget_exhaustion_marks_skip():
-    # 预算只够第 1 档(0.54*100=54);其余合格档应标"预算/敞口用尽"
-    out = preview_market_ladders(_side(), None, TIER_RULES, 60.0, 10000)
+def test_share_cap_exhaustion_marks_skip():
+    # 份额敞口上限只够第 1 档(100 份);其余合格档应标"预算/敞口用尽"
+    # 用 max_shares 触发耗尽,避免依赖 USD 封顶的浮点运算
+    out = preview_market_ladders(_side(), None, TIER_RULES, 100000.0, 100)
     levels = out["a"]["levels"]
     assert levels[0]["shares"] == 100
     assert levels[2]["shares"] == 0 and levels[2]["skip_reason"] == "预算/敞口用尽"
+
+
+def test_usd_budget_caps_shares_like_production():
+    # 镜像 compute_market_ladders:预算紧时按 USD 封顶下不足 min_size 的份额(不跳过)
+    # 预算 60:第1档 0.54*100=54;余约 6,第2档 0.52 -> int(6/0.52)=11 份仍下
+    out = preview_market_ladders(_side(), None, TIER_RULES, 60.0, 10000)
+    levels = out["a"]["levels"]
+    assert levels[0]["shares"] == 100
+    assert levels[2]["shares"] == 11
 
 
 def test_none_side_returns_none():
