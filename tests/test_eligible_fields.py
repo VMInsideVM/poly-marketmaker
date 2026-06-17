@@ -55,3 +55,12 @@ def test_eligible_row_has_reward_range_and_spread():
     assert round(r["reward_range_min"], 4) == 0.51
     assert round(r["reward_range_max"], 4) == 0.59
     assert round(r["spread_cents"], 4) == 2.0
+
+
+def test_null_rewards_min_size_skipped_not_crash():
+    # API 可能返回 rewards_min_size: null —— 不应 int(None) 崩溃,该市场跳过即可
+    c = _candidate()
+    c["rewards_min_size"] = None
+    sc = MarketScanner(api=None, db=_DB(), wallet_address="0xabc")
+    rows = sc.filter_for_template([c], _template(), "0xabc")
+    assert rows == []
