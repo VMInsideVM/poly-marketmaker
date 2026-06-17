@@ -87,6 +87,7 @@ a { color: var(--accent); }
 .ladder-wrap .data-table td { border-top: 1px solid var(--rowline); }
 .metric { font-weight: 600; }
 .metric-note { color: var(--muted); font-size: 12px; }
+.hint { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
 tr.skip td { color: var(--muted); }
 .tier-label { color: var(--good); }
 
