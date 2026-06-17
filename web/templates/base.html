@@ -1,40 +1,45 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Polymarket 做市助手</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script>
+      // 主题在 <head> 早置,避免刷新闪烁
+      (function(){var t=localStorage.getItem('mm-theme')||'light';document.documentElement.dataset.theme=t;})();
+    </script>
 </head>
 <body>
-    <nav class="navbar">
-        <div class="nav-brand">Polymarket 做市助手</div>
-        <div class="nav-links">
-            <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">仪表盘</a>
-            <a href="{{ url_for('config_page') }}" class="{% if request.endpoint == 'config_page' %}active{% endif %}">配置</a>
-            <a href="{{ url_for('orders_page') }}" class="{% if request.endpoint == 'orders_page' %}active{% endif %}">订单管理</a>
-            <a href="{{ url_for('history_page') }}" class="{% if request.endpoint == 'history_page' %}active{% endif %}">历史记录</a>
-            <a href="{{ url_for('logs_page') }}" class="{% if request.endpoint == 'logs_page' %}active{% endif %}">监控状态</a>
-            <a href="{{ url_for('blacklist_page') }}" class="{% if request.endpoint == 'blacklist_page' %}active{% endif %}">黑名单</a>
-            <a href="#" onclick="checkForUpdate(this); return false;" title="检查是否有新版本">检查更新</a>
-            <span class="nav-version">v{{ app_version }}</span>
-            <a href="{{ url_for('logout') }}">退出</a>
+<div class="layout">
+    <nav class="sidebar">
+        <div class="brand">◆ 做市助手</div>
+        <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint=='dashboard' %}active{% endif %}">仪表盘</a>
+        <a href="{{ url_for('markets_page') }}" class="{% if request.endpoint=='markets_page' %}active{% endif %}">市场发现</a>
+        <a href="{{ url_for('orders_page') }}" class="{% if request.endpoint=='orders_page' %}active{% endif %}">挂单与持仓</a>
+        <a href="{{ url_for('history_page') }}" class="{% if request.endpoint=='history_page' %}active{% endif %}">历史</a>
+        <a href="{{ url_for('logs_page') }}" class="{% if request.endpoint=='logs_page' %}active{% endif %}">监控</a>
+        <a href="{{ url_for('config_page') }}" class="{% if request.endpoint=='config_page' %}active{% endif %}">配置</a>
+        <a href="{{ url_for('blacklist_page') }}" class="{% if request.endpoint=='blacklist_page' %}active{% endif %}">黑名单</a>
+        <div class="sb-foot">
+            <button class="theme-toggle" onclick="toggleTheme()">切换主题</button>
+            <div style="margin-top:10px"><a href="#" onclick="checkForUpdate(this);return false;">检查更新</a></div>
+            <div style="margin-top:6px">v{{ app_version }}</div>
+            <div style="margin-top:6px"><a href="{{ url_for('logout') }}">退出</a></div>
         </div>
     </nav>
     {% include "_update_modal.html" %}
-    <main class="container">
+    <main class="content">
         {% with messages = get_flashed_messages() %}
-        {% if messages %}
-        <div class="flash-messages">
-            {% for msg in messages %}
-            <div class="flash">{{ msg }}</div>
-            {% endfor %}
-        </div>
-        {% endif %}
+        {% if messages %}<div class="flash-messages">{% for msg in messages %}<div class="flash">{{ msg }}</div>{% endfor %}</div>{% endif %}
         {% endwith %}
         {% block content %}{% endblock %}
     </main>
-    <script src="{{ url_for('static', filename='app.js') }}"></script>
-    {% block scripts %}{% endblock %}
+</div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+function toggleTheme(){var h=document.documentElement;var t=h.dataset.theme==='light'?'dark':'light';h.dataset.theme=t;localStorage.setItem('mm-theme',t);}
+</script>
+{% block scripts %}{% endblock %}
 </body>
 </html>

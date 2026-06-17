@@ -222,6 +222,12 @@ def dashboard():
     return render_template("dashboard.html")
 
 
+@app.route("/markets")
+@login_required
+def markets_page():
+    return render_template("markets.html")
+
+
 @app.route("/config")
 @login_required
 def config_page():
