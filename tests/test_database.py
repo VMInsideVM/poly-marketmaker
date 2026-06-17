@@ -549,3 +549,34 @@ def test_rename_template_duplicate_raises(db):
     tid = db.create_template("B")
     with pytest.raises(sqlite3.IntegrityError):
         db.rename_template(tid, "A")
+
+
+def test_eligible_markets_roundtrips_spread_cents(tmp_path):
+    from models.database import Database
+
+    db = Database(str(tmp_path / "t.db"))
+    db.init()
+    try:
+        db.save_eligible_markets(
+            [
+                {
+                    "market_id": "c1",
+                    "token_id": "tY",
+                    "market_name": "Q",
+                    "outcome": "YES",
+                    "market_competitiveness": 0.1,
+                    "daily_reward": 40.0,
+                    "rewards_max_spread": 4,
+                    "rewards_min_size": 100,
+                    "reward_range_min": 0.51,
+                    "reward_range_max": 0.59,
+                    "spread_cents": 2.0,
+                    "tags": [],
+                }
+            ]
+        )
+        rows = db.get_eligible_markets()
+        assert len(rows) == 1
+        assert round(rows[0]["spread_cents"], 4) == 2.0
+    finally:
+        db.close()
