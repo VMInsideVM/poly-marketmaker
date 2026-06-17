@@ -66,7 +66,11 @@ function rangeCell(m) {
 }
 function spreadCell(m) {
     if (m.spread_cents == null || m.spread_cents < 0) return '—';
-    const note = (maxSpread != null) ? ` <span class="metric-note">≤${maxSpread}¢ ✓</span>` : '';
+    let note = '';
+    if (maxSpread != null) {
+        const ok = m.spread_cents <= maxSpread;
+        note = ` <span class="metric-note">${ok ? '≤' : '＞'}${maxSpread}¢ ${ok ? '✓' : '✗'}</span>`;
+    }
     return `<span class="metric">${m.spread_cents.toFixed(0)}¢</span>${note}`;
 }
 

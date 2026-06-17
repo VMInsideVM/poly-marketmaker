@@ -207,7 +207,7 @@ class MarketScanner:
             if self.db.is_in_cooldown(wallet_address, condition_id):
                 continue  # 该钱包对此市场仍在冷却(与旧 scan 口径一致)
             max_spread_reward = float(market.get("rewards_max_spread", 2))
-            min_size = int(market.get("rewards_min_size", 0))
+            min_size = int(market.get("rewards_min_size", 0) or 0)
             # v4 §3:最低份额 0 < ≤ 250;超档无取档 -> 不做该市场
             if not (0 < min_size <= 250):
                 continue
