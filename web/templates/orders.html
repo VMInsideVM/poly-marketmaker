@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>订单管理</h1>
+<h1>挂单与持仓</h1>
 
 <div class="filter-bar">
   <label>钱包筛选：</label>
@@ -41,10 +41,11 @@
 </div>
 
 <h2>当前持仓</h2>
+<p class="metric-note">成本价为 Data API 加权均价（avgPrice），仅供展示，非卖出依据。</p>
 <div class="table-scroll">
 <table class="data-table">
-  <thead><tr><th>钱包</th><th>市场</th><th>买入价</th><th>当前价</th>
-  <th>止损价</th><th>盈亏</th></tr></thead>
+  <thead><tr><th>钱包</th><th>市场</th><th>方向</th><th>成本价</th><th>数量</th><th>现价</th>
+  <th>止损价</th><th>浮动盈亏</th></tr></thead>
   <tbody id="positions-body"></tbody>
 </table>
 </div>
@@ -69,7 +70,10 @@ function refreshOrders(){
   fetch(`/api/positions${qs}`).then(r=>r.json()).then(ps=>{
     document.getElementById('positions-body').innerHTML = ps.map(p=>`
       <tr><td title="${p.wallet}">${p.wallet.slice(0,6)}...${p.wallet.slice(-4)}</td>
-      <td>${marketCell(p.market_name, p.condition_id, p.market_url)}</td><td>${(p.buy_price||0).toFixed(4)}</td>
+      <td>${marketCell(p.market_name, p.condition_id, p.market_url)}</td>
+      <td>${p.outcome||''}</td>
+      <td>${(p.buy_price||0).toFixed(4)}</td>
+      <td>${p.size!=null?p.size:'-'}</td>
       <td>${p.current_price!=null?p.current_price.toFixed(4):'-'}</td>
       <td>${p.stop_price!=null?p.stop_price.toFixed(4):'-'}</td>
       <td class="${(p.pnl||0)>=0?'profit':'loss'}">${(p.pnl||0).toFixed(2)}</td></tr>`).join('');
@@ -98,7 +102,7 @@ function renderOrders(){
     <td>${marketCell(o.market_name, o.market, o.market_url)}</td><td>${o.side}</td><td>${o.outcome||''}</td>
     <td>${(o.price||0).toFixed(4)}</td><td>${o.original_size}</td>
     <td>${o.size_matched}</td>
-    <td>${o.side==='BUY' ? (o.scoring===true?'✓':(o.scoring===false?'✗':'?')) : '—'}</td>
+    <td>${o.side==='BUY' ? (o.scoring===true?'<span class="badge ok">✓ 在赚</span>':(o.scoring===false?'<span class="badge no">✗ 未赚</span>':'<span class="badge muted">?</span>')) : '—'}</td>
     <td>${o.created_at? new Date(o.created_at*1000).toLocaleString('zh-CN'):'-'}</td>
     <td><button class="btn btn-sm btn-danger"
         onclick="cancelOne('${o.order_id}','${o.wallet}')">撤单</button>
