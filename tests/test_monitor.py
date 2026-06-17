@@ -1123,6 +1123,21 @@ class TestCheckExit:
         api.place_market_sell.assert_called_once_with("A-y", 100)
         db.record_trade.assert_called_once()
 
+    def test_sell_rejection_emits_naked_warning_not_silent(self):
+        # 止损卖被 CLOB 拒(OrderRejected)时,不能静默裸奔:check_exit 不抛,
+        # 且必须留下含「裸奔/失败」的 ⚠️ 状态行,让用户在监控页看见未受保护。
+        from api.polymarket_api import OrderRejected
+
+        monitor, api, db = self._setup(0.40, 100, [(0.35, 500)], [(0.36, 500)])
+        api.place_market_sell.side_effect = OrderRejected("市价卖单 被拒")
+        rows = []
+        monitor._status_add = lambda **kw: rows.append(kw)
+        monitor.check_exit()  # 不应抛
+        assert any(
+            ("裸奔" in (r.get("action") or "")) or ("失败" in (r.get("action") or ""))
+            for r in rows
+        ), f"无告警状态行,静默裸奔: {rows}"
+
     def test_b0_cancels_existing_sell_before_market_clear(self):
         # 已有一笔挂卖单 -> B0 必须先撤再市价清仓(避免与残留卖单并存/重复卖)。
         sells = [

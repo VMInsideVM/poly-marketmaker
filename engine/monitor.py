@@ -322,7 +322,21 @@ class OrderMonitor:
                 except Exception as e:
                     logger.warning("Cancel stale sells %s failed: %s", asset_id, e)
                     return
-            self.api.place_limit_sell(asset_id, want, size, tick_size=tick_str)
+            try:
+                self.api.place_limit_sell(asset_id, want, size, tick_size=tick_str)
+            except Exception as e:
+                logger.error("Rest sell failed asset=%s: %s — UNPROTECTED", asset_id, e)
+                self._status_add(
+                    market=cid,
+                    side="卖出",
+                    price=f"{want:.4f}",
+                    size=str(size),
+                    matched="-",
+                    stage="离场",
+                    action="⚠️挂卖失败·裸奔",
+                    detail=f"{plan['tier']} 挂卖一被拒，该持仓未受保护：{e}",
+                )
+                return
             self._record_action(
                 market_id=cid,
                 action_type="exit_rest",
@@ -366,7 +380,23 @@ class OrderMonitor:
                 )
 
         if action == "market":
-            self.api.place_market_sell(asset_id, size)
+            try:
+                self.api.place_market_sell(asset_id, size)
+            except Exception as e:
+                logger.error(
+                    "Market exit failed asset=%s: %s — UNPROTECTED", asset_id, e
+                )
+                self._status_add(
+                    market=cid,
+                    side="卖出",
+                    price=f"{cur:.4f}",
+                    size=str(size),
+                    matched="-",
+                    stage="离场",
+                    action="⚠️止损失败·裸奔",
+                    detail=f"{plan['tier']} 市价清仓被拒，该持仓未受保护：{e}",
+                )
+                return
             if plan["tier"] == "B0":
                 self.db.record_trade(
                     wallet=self.wallet_address,
@@ -400,9 +430,25 @@ class OrderMonitor:
 
         if action == "sweep":
             want = plan["price"]
-            self.api.place_marketable_limit_sell(
-                asset_id, want, size, tick_size=tick_str
-            )
+            try:
+                self.api.place_marketable_limit_sell(
+                    asset_id, want, size, tick_size=tick_str
+                )
+            except Exception as e:
+                logger.error(
+                    "Sweep sell failed asset=%s: %s — UNPROTECTED", asset_id, e
+                )
+                self._status_add(
+                    market=cid,
+                    side="卖出",
+                    price=f"{want:.4f}",
+                    size=str(size),
+                    matched="-",
+                    stage="离场",
+                    action="⚠️扫单失败·裸奔",
+                    detail=f"{plan['tier']} FAK 扫单被拒，该持仓未受保护：{e}",
+                )
+                return
             self._record_action(
                 market_id=cid,
                 action_type="exit_sweep",
