@@ -105,13 +105,24 @@ def test_market_ladders_min_size_both_sides():
     assert out["b"] == [(0.30, 100)]
 
 
-def test_market_ladders_usd_budget_caps_across_sides():
+def test_market_ladders_usd_budget_cap_drops_sub_min_rung():
+    # 预算 80:a 侧吃满 100 份(0.50*100=50),余 30 只够 b 侧 int(30/0.50)=60 份。
+    # 60 < min_size(100) -> 该档放弃(不挂残档);否则挂出的单达不到奖励最低份数,
+    # 赚不到奖励还白占资金/敞口(现象1)。
     rules = [[{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)]
     a = _side([_b(0.50, 300)])
     b = _side([_b(0.50, 300)])
     out = compute_market_ladders(a, b, rules, 80.0, 10000)
     assert out["a"] == [(0.50, 100)]
-    assert out["b"] == [(0.50, 60)]
+    assert out["b"] == []
+
+
+def test_market_ladders_drops_rung_capped_below_min_size():
+    # 单侧:预算 40、价 0.50 -> int(40/0.50)=80 份,80 < min_size(100) -> 整档放弃。
+    rules = [[{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)]
+    a = _side([_b(0.50, 300)])
+    out = compute_market_ladders(a, None, rules, 40.0, 10000)
+    assert out == {"a": [], "b": []}
 
 
 def test_market_ladders_shares_budget_caps():
@@ -168,8 +179,11 @@ def test_double_sided_sub_threshold_one_side_cleared():
 from engine.laddering import reconcile_buy_orders
 
 
-def _ob_order(oid, price, size):
-    return {"id": oid, "price": str(price), "original_size": str(size)}
+def _ob_order(oid, price, size, matched=0):
+    o = {"id": oid, "price": str(price), "original_size": str(size)}
+    if matched:
+        o["size_matched"] = str(matched)
+    return o
 
 
 def test_reconcile_empty_resting_places_all():
@@ -219,4 +233,22 @@ def test_reconcile_empty_target_cancels_all():
     resting = [_ob_order("o1", 0.30, 100), _ob_order("o2", 0.29, 100)]
     cancel_ids, to_place = reconcile_buy_orders([], resting)
     assert set(cancel_ids) == {"o1", "o2"}
+    assert to_place == []
+
+
+def test_reconcile_cancels_partial_fill_below_target():
+    # 买单原始 100、已成交 60 -> 剩 40 < 目标 100:按剩余量(原始-已成交)判「量不符」,
+    # 撤掉残单并重挂满额。否则残单一直挂着、份数不达奖励最低要求(现象2)。
+    resting = [_ob_order("o1", 0.30, 100, matched=60)]
+    cancel_ids, to_place = reconcile_buy_orders([(0.30, 100)], resting)
+    assert cancel_ids == ["o1"]
+    assert to_place == [(0.30, 100)]
+
+
+def test_reconcile_partial_fill_within_tolerance_keeps():
+    # 极小成交(0.5 份)-> 剩 99.5,与目标 100 差 0.5 在容差 max(1,1%) 内 -> 保留,
+    # 避免每笔微量成交都撤改抖动。
+    resting = [_ob_order("o1", 0.30, 100, matched=0.5)]
+    cancel_ids, to_place = reconcile_buy_orders([(0.30, 100)], resting)
+    assert cancel_ids == []
     assert to_place == []

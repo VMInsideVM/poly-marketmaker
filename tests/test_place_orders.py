@@ -61,6 +61,8 @@ def test_places_multi_tier_min_size_on_one_side():
 
 
 def test_exposure_caps_total_usd():
+    # 预算 35:第1档 0.30*100=30 挂满;余 5 只够第2档 int(5/0.29)=17 份 < min_size(100)
+    # -> 第2档放弃(不挂残档)。USD 敞口上限仍然生效:总挂出量被限在第1档。
     worker, api, db = _make_worker(template={"max_exposure_usd": 35})
     api.get_orderbook.return_value = _ob([(0.30, 300), (0.29, 300)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes")])
@@ -68,7 +70,33 @@ def test_exposure_caps_total_usd():
         round(c.args[1], 2): c.args[2] for c in api.place_limit_buy.call_args_list
     }
     assert placed.get(0.30) == 100
-    assert placed.get(0.29) == 17
+    assert placed.get(0.29) is None
+
+
+def test_reconcile_replaces_partial_fill_remnant():
+    # 现象2 端到端:某买单原始 100、已成交 60(剩 40 < min_size 100),持仓已平(不在
+    # held_assets)。下单轮 reconcile 须按剩余量(原始-已成交)判定量不符,撤掉残单并
+    # 重挂满额 100,而非把它当「量符」一直留着。验证 size_matched 确实传到了 reconcile。
+    worker, api, db = _make_worker()
+    api.get_open_orders.return_value = [
+        {
+            "id": "o1",
+            "side": "BUY",
+            "asset_id": "A-y",
+            "market": "A",
+            "price": "0.30",
+            "original_size": "100",
+            "size_matched": "60",
+        }
+    ]
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    cancel_calls = [c.args[0] for c in api.cancel_orders.call_args_list]
+    assert ["o1"] in cancel_calls
+    placed = {
+        round(c.args[1], 2): c.args[2] for c in api.place_limit_buy.call_args_list
+    }
+    assert placed.get(0.30) == 100
 
 
 def test_concurrent_market_cap_skips_new_markets():

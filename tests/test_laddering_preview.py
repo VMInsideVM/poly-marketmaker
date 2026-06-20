@@ -67,13 +67,15 @@ def test_share_cap_exhaustion_marks_skip():
     assert levels[2]["shares"] == 0 and levels[2]["skip_reason"] == "预算/敞口用尽"
 
 
-def test_usd_budget_caps_shares_like_production():
-    # 镜像 compute_market_ladders:预算紧时按 USD 封顶下不足 min_size 的份额(不跳过)
-    # 预算 60:第1档 0.54*100=54;余约 6,第2档 0.52 -> int(6/0.52)=11 份仍下
+def test_usd_budget_cap_drops_sub_min_rung():
+    # 镜像 compute_market_ladders:预算紧时,按 USD 封顶后不足 min_size 的档放弃。
+    # 预算 60:第1档 0.54*100=54;余约 6,第2档 0.52 -> int(6/0.52)=11 < min_size(100)
+    # -> 该档放弃并标「不足最低份数」(旧版会照挂 11 份残档,赚不到奖励)。
     out = preview_market_ladders(_side(), None, TIER_RULES, 60.0, 10000)
     levels = out["a"]["levels"]
     assert levels[0]["shares"] == 100
-    assert levels[2]["shares"] == 11
+    assert levels[2]["shares"] == 0
+    assert levels[2]["skip_reason"] == "不足最低份数"
 
 
 def test_none_side_returns_none():
