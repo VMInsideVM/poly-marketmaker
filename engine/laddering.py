@@ -107,6 +107,11 @@ def compute_market_ladders(
             shares = min(shares, cap_by_usd, cap_by_shares)
             if shares <= 0:
                 continue
+            # 预算/敞口封顶后若不足奖励最低份数,放弃该档(不挂残档):挂出的单
+            # 达不到 rewards_min_size 既赚不到奖励、又白占资金/敞口。后续更便宜的
+            # 档仍可能用同一剩余预算凑满 min_size,故 continue 而非 break。
+            if shares < side["min_size"]:
+                continue
             out[key].append((price, shares))
             spent_usd += price * shares
             spent_shares += shares
@@ -139,14 +144,18 @@ def reconcile_buy_orders(ladder, resting_buys):
     cancel_ids = []
     for o in resting_buys:
         op = round(float(o.get("price", 0) or 0), 4)
+        # 按「剩余可成交量 = 原始 - 已成交」判定量是否达标,而非原始挂单量:
+        # 部分成交后 original_size 不变(仍=原始),只有 size_matched 反映已吃掉的量。
+        # 若仍用 original_size,被吃到不足最低份数的残单会被误判为「量符」而保留(现象2)。
         osize = float(o.get("original_size", o.get("size", 0)) or 0)
+        remaining = osize - float(o.get("size_matched", 0) or 0)
         tgt = target.get(op)
         # 每个目标价只保留一笔:价量符且该价尚未保留过 -> 留;否则(价漂/量不符/
         # 同价重复)-> 撤。漏掉 op not in keep 会让同价的重复单都被 keep、量翻倍。
         if (
             tgt is not None
             and op not in keep
-            and abs(osize - tgt) <= max(1.0, 0.01 * tgt)
+            and abs(remaining - tgt) <= max(1.0, 0.01 * tgt)
         ):
             keep.add(op)
         else:
@@ -249,6 +258,10 @@ def preview_market_ladders(side_a, side_b, tier_rules, budget_usd, max_shares):
             shares = min(shares, cap_usd, cap_shares)
             if shares <= 0:
                 L["skip_reason"] = "预算/敞口用尽"
+                continue
+            # 与 compute_market_ladders 一致:封顶后不足最低份数的档放弃。
+            if shares < side["min_size"]:
+                L["skip_reason"] = "不足最低份数"
                 continue
             L["shares"], L["amount"] = shares, price * shares
             spent_usd += price * shares
