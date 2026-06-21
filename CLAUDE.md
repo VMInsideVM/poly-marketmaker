@@ -47,3 +47,5 @@ pytest tests/test_strategy.py::TestMaxSpread2_TickSize1Cent::test_bid1_gt_2000_p
 ## Reference
 
 Design rationale and the canonical filtering flow are in `docs/superpowers/specs/2026-05-17-polymarket-market-maker-design.md` (in 简体中文). The scanner intentionally mirrors the flow documented at the top of `test_live.py`.
+
+**Versioning.** Release version numbering follows `docs/版本号规范.md` (semantic versioning adapted for this auto-updating, real-money desktop tool): bump MAJOR for incompatible/behavior-changing releases (strategy/order logic change, config or data-format break, UI overhaul), MINOR for backward-compatible features, PATCH for bug fixes. Only `version.py` carries the version; `release.ps1` builds + tags + publishes from it.
