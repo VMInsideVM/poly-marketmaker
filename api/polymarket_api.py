@@ -1,8 +1,8 @@
 """api/polymarket_api.py — Polymarket CLOB + Rewards API wrapper."""
 
+import functools
 import logging
 import time
-import requests
 from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
     AssetType,
@@ -18,8 +18,25 @@ from py_clob_client_v2.clob_types import (
 from eth_account import Account
 from py_builder_relayer_client.builder.derive import derive as _derive_safe
 from py_builder_relayer_client.config import get_contract_config
+from api.proxy import parse_proxy, use_proxy, http_get, install_clob_proxy
 
 logger = logging.getLogger(__name__)
+
+
+def _proxied(method):
+    """实例网络方法装饰器:调用期把代理上下文设为本钱包(self.proxy_url),使其内部
+    CLOB(httpx 分发器)与 http_get(requests)调用都走该钱包代理——无论从采集线程、
+    监控线程还是路由直接调用。类定义末尾对所有网络实例方法统一套用(见 _PROXIED_METHODS)。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        # getattr 兜底:极少数测试用 object.__new__ 跳过构造、不设 proxy_url -> 直连。
+        with use_proxy(getattr(self, "proxy_url", None)):
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
 
 POLYMARKET_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
@@ -142,6 +159,7 @@ class PolymarketAPI:
         private_key: str,
         signature_type: int = SIG_GNOSIS_SAFE,
         funder: str = None,
+        proxy: str = None,
     ):
         """Initialize with private key.
 
@@ -151,33 +169,39 @@ class PolymarketAPI:
             funder: Deposit-wallet (Gnosis Safe) address. If None, it is
                 derived from the signer EOA via derive_deposit_address so the
                 user only needs to provide a private key.
+            proxy: 该钱包专属 HTTP 代理串(host:port[:user:pass] 或 http://...),
+                None/空=直连。此后该钱包的所有网络活动都从这个代理 IP 出口。
         """
         self.private_key = private_key
         self.signature_type = signature_type
-        # Step 1: Create temp client to derive API creds + the signer EOA.
-        temp_client = ClobClient(
-            host=POLYMARKET_HOST,
-            key=private_key,
-            chain_id=CHAIN_ID,
-        )
-        # create_or_derive (not derive-only): a freshly imported wallet has no
-        # CLOB API creds yet, so derive_api_key alone fails with "Could not
-        # derive api key!". create_api_key first (new wallet), fall back to
-        # derive (already-onboarded wallet) — safe for both.
-        api_creds = temp_client.create_or_derive_api_key()
-        # The deposit wallet (where funds live) is the Polymarket Gnosis Safe
-        # deterministically derived from the EOA — NOT the EOA itself. Derive
-        # it when no funder is supplied.
-        eoa_address = temp_client.get_address()
-        # Step 2: Create full client with L2 auth
-        self.client = ClobClient(
-            host=POLYMARKET_HOST,
-            key=private_key,
-            chain_id=CHAIN_ID,
-            creds=api_creds,
-            signature_type=signature_type,
-            funder=funder or derive_deposit_address(eoa_address),
-        )
+        self.proxy_url = parse_proxy(proxy)
+        install_clob_proxy()  # 幂等:激活 CLOB(httpx)的按代理选路
+        # 构造期的网络调用(create_or_derive_api_key)也必须走该钱包代理。
+        with use_proxy(self.proxy_url):
+            # Step 1: Create temp client to derive API creds + the signer EOA.
+            temp_client = ClobClient(
+                host=POLYMARKET_HOST,
+                key=private_key,
+                chain_id=CHAIN_ID,
+            )
+            # create_or_derive (not derive-only): a freshly imported wallet has
+            # no CLOB API creds yet, so derive_api_key alone fails with "Could
+            # not derive api key!". create_api_key first (new wallet), fall back
+            # to derive (already-onboarded wallet) — safe for both.
+            api_creds = temp_client.create_or_derive_api_key()
+            # The deposit wallet (where funds live) is the Polymarket Gnosis Safe
+            # deterministically derived from the EOA — NOT the EOA itself. Derive
+            # it when no funder is supplied.
+            eoa_address = temp_client.get_address()
+            # Step 2: Create full client with L2 auth
+            self.client = ClobClient(
+                host=POLYMARKET_HOST,
+                key=private_key,
+                chain_id=CHAIN_ID,
+                creds=api_creds,
+                signature_type=signature_type,
+                funder=funder or derive_deposit_address(eoa_address),
+            )
 
     def get_address(self) -> str:
         """Return wallet address derived from private key."""
@@ -200,7 +224,7 @@ class PolymarketAPI:
         Returns -1 if no orderbook exists.
         """
         try:
-            resp = requests.get(
+            resp = http_get(
                 f"{POLYMARKET_HOST}/spread",
                 params={"token_id": token_id},
                 timeout=10,
@@ -438,7 +462,7 @@ class PolymarketAPI:
         sample): asset (=asset_id), size, avgPrice, curPrice, conditionId
         (=market), outcome, title. user_address is the proxy/funder.
         """
-        resp = requests.get(
+        resp = http_get(
             f"{DATA_API_HOST}/positions",
             # limit 抬高单页上限,避免持仓被服务端默认页大小(约 100)静默截断 ->
             # 漏离场/止损(F7)。本 app 并发市场上限 ~10 -> 持仓 ≤~20,500 足够,单请求。
@@ -506,7 +530,7 @@ class PolymarketAPI:
             resp_data = None
             for attempt in range(3):
                 try:
-                    resp = requests.get(
+                    resp = http_get(
                         f"{REWARDS_API}/rewards/markets/multi",
                         params=params,
                         timeout=30,
@@ -558,7 +582,7 @@ class PolymarketAPI:
                 params = {}
                 if next_cursor:
                     params["next_cursor"] = next_cursor
-                resp = requests.get(
+                resp = http_get(
                     f"{REWARDS_API}/rewards/markets/current",
                     params=params,
                     timeout=30,
@@ -583,7 +607,7 @@ class PolymarketAPI:
         Endpoint: GET https://gamma-api.polymarket.com/markets/{id}
         """
         try:
-            resp = requests.get(
+            resp = http_get(
                 f"https://gamma-api.polymarket.com/markets/{market_id}",
                 timeout=10,
             )
@@ -601,7 +625,7 @@ class PolymarketAPI:
         Supports filters: active, closed, end_date_min, end_date_max, etc.
         """
         try:
-            resp = requests.get(
+            resp = http_get(
                 "https://gamma-api.polymarket.com/markets",
                 params=filters,
                 timeout=15,
@@ -623,7 +647,7 @@ class PolymarketAPI:
         ids = [c for c in dict.fromkeys(condition_ids) if c]
         if not ids:
             return {}
-        resp = requests.get(
+        resp = http_get(
             "https://gamma-api.polymarket.com/markets",
             params=[("condition_ids", c) for c in ids],
             timeout=10,
@@ -655,7 +679,7 @@ class PolymarketAPI:
         if not ids:
             return {}
         try:
-            resp = requests.get(
+            resp = http_get(
                 "https://gamma-api.polymarket.com/markets",
                 params=[("condition_ids", c) for c in ids],
                 timeout=10,
@@ -687,7 +711,7 @@ class PolymarketAPI:
                 params = {}
                 if next_cursor:
                     params["next_cursor"] = next_cursor
-                resp = requests.get(
+                resp = http_get(
                     f"{REWARDS_API}/rewards/markets/{condition_id}",
                     params=params,
                     timeout=10,
@@ -702,3 +726,30 @@ class PolymarketAPI:
         except Exception as e:
             logger.error("Failed to get rewards for market %s: %s", condition_id, e)
         return all_data
+
+
+# 给所有「实例网络方法」统一套上代理上下文(见 _proxied):凡经某钱包 API 实例发出的
+# CLOB / Data API 调用,都从该钱包的代理 IP 出口,无论从哪个线程/路由调用。静态方法
+# (rewards/gamma 公共市场数据,非钱包身份)不在此列,靠操作边界(_tick/place_orders/
+# 采集器)设的环境代理走采集所用钱包的代理。
+_PROXIED_METHODS = (
+    "get_orderbook",
+    "get_spread",
+    "get_last_trade_price",
+    "get_balance",
+    "balance_by_sig_types",
+    "place_limit_buy",
+    "place_limit_sell",
+    "place_market_sell",
+    "place_marketable_limit_sell",
+    "cancel_order",
+    "cancel_orders",
+    "cancel_all_orders",
+    "get_order",
+    "get_open_orders",
+    "get_trades",
+    "are_orders_scoring",
+    "get_user_positions",
+)
+for _name in _PROXIED_METHODS:
+    setattr(PolymarketAPI, _name, _proxied(getattr(PolymarketAPI, _name)))

@@ -177,6 +177,19 @@ class TestWallets:
         assert w["signature_type"] == 1
         assert w["funder"] == "0xfund"
 
+    def test_proxy_defaults_to_empty(self, db):
+        db.add_wallet("0xABC", "enc")
+        assert db.list_wallets()[0]["proxy"] == ""
+
+    def test_add_wallet_stores_proxy(self, db):
+        db.add_wallet("0xABC", "enc", proxy="gate.kookeey.info:1000:u:p")
+        assert db.list_wallets()[0]["proxy"] == "gate.kookeey.info:1000:u:p"
+
+    def test_set_wallet_proxy_updates(self, db):
+        db.add_wallet("0xABC", "enc")
+        db.set_wallet_proxy("0xABC", "h:2000:x:y")
+        assert db.list_wallets()[0]["proxy"] == "h:2000:x:y"
+
     def test_migration_adds_signature_type_to_old_db(self, tmp_path):
         import sqlite3
 

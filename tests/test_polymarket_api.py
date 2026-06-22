@@ -255,7 +255,7 @@ class TestPositionsPagination:
     """get_user_positions 需传 limit 抬高单页上限,避免持仓被服务端默认页大小静默截断
     导致漏离场/止损(F7)。"""
 
-    @patch("api.polymarket_api.requests")
+    @patch("api.proxy.requests")
     @patch("api.polymarket_api.derive_deposit_address", return_value="0xDerivedSafe")
     @patch("api.polymarket_api.ClobClient")
     def test_get_user_positions_sends_limit(
@@ -269,3 +269,41 @@ class TestPositionsPagination:
         params = mock_requests.get.call_args.kwargs["params"]
         assert params.get("user") == "0xfunder"
         assert params.get("limit") == 500
+
+
+class TestPerWalletProxy:
+    @patch("api.polymarket_api.ClobClient")
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xS")
+    def test_proxy_url_parsed_from_init(self, _mock_derive, mock_clob):
+        temp = MagicMock()
+        temp.get_address.return_value = "0xE"
+        mock_clob.return_value = temp
+        api = PolymarketAPI("0xpk", proxy="h:1000:u:p")
+        assert api.proxy_url == "http://u:p@h:1000"
+
+    @patch("api.polymarket_api.ClobClient")
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xS")
+    def test_no_proxy_is_none(self, _mock_derive, mock_clob):
+        temp = MagicMock()
+        temp.get_address.return_value = "0xE"
+        mock_clob.return_value = temp
+        assert PolymarketAPI("0xpk").proxy_url is None
+
+    @patch("api.proxy.requests.get")
+    @patch("api.polymarket_api.ClobClient")
+    @patch("api.polymarket_api.derive_deposit_address", return_value="0xS")
+    def test_get_user_positions_routes_through_wallet_proxy(
+        self, _mock_derive, mock_clob, mock_get
+    ):
+        temp = MagicMock()
+        temp.get_address.return_value = "0xE"
+        mock_clob.return_value = temp
+        resp = MagicMock()
+        resp.json.return_value = []
+        mock_get.return_value = resp
+        api = PolymarketAPI("0xpk", proxy="h:1000:u:p")
+        api.get_user_positions("0xfunder")
+        assert mock_get.call_args.kwargs["proxies"] == {
+            "http": "http://u:p@h:1000",
+            "https": "http://u:p@h:1000",
+        }

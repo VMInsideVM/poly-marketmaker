@@ -38,6 +38,7 @@ class Database:
                 encrypted_key TEXT NOT NULL,
                 funder TEXT NOT NULL DEFAULT '',
                 signature_type INTEGER NOT NULL DEFAULT 2,
+                proxy TEXT NOT NULL DEFAULT '',
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
@@ -158,6 +159,9 @@ class Database:
             c.execute(
                 "ALTER TABLE wallets ADD COLUMN signature_type INTEGER NOT NULL DEFAULT 2"
             )
+            self.conn.commit()
+        if "proxy" not in cols:
+            c.execute("ALTER TABLE wallets ADD COLUMN proxy TEXT NOT NULL DEFAULT ''")
             self.conn.commit()
         c.execute("PRAGMA table_info(eligible_markets)")
         em_cols = {row[1] for row in c.fetchall()}
@@ -328,13 +332,20 @@ class Database:
         encrypted_key: str,
         funder: str = "",
         signature_type: int = 2,
+        proxy: str = "",
     ):
         c = self.conn.cursor()
         c.execute(
-            "INSERT INTO wallets (address, encrypted_key, funder, signature_type) "
-            "VALUES (?, ?, ?, ?)",
-            (address, encrypted_key, funder, signature_type),
+            "INSERT INTO wallets (address, encrypted_key, funder, signature_type, proxy) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (address, encrypted_key, funder, signature_type, proxy),
         )
+        self.conn.commit()
+
+    def set_wallet_proxy(self, address: str, proxy: str):
+        """更新某钱包的代理串(明文)。下次启动引擎/重建该 worker 时生效。"""
+        c = self.conn.cursor()
+        c.execute("UPDATE wallets SET proxy = ? WHERE address = ?", (proxy, address))
         self.conn.commit()
 
     def remove_wallet(self, address: str):
@@ -353,7 +364,7 @@ class Database:
     def list_wallets(self) -> list[dict]:
         c = self.conn.cursor()
         c.execute(
-            "SELECT address, encrypted_key, funder, signature_type, enabled, "
+            "SELECT address, encrypted_key, funder, signature_type, proxy, enabled, "
             "created_at, template_id FROM wallets"
         )
         return [dict(row) for row in c.fetchall()]

@@ -6,10 +6,12 @@ Architecture:
   then monitors fills/stop-loss independently
 """
 
+import functools
 import logging
 import threading
 import time
 from api.polymarket_api import PolymarketAPI
+from api.proxy import use_proxy
 from engine.scanner import MarketScanner
 from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
@@ -17,6 +19,19 @@ from engine.resolution import in_resolution
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_proxied(method):
+    """WalletWorker 网络入口装饰器:整个操作期把代理上下文设为本钱包(self.api.proxy_url),
+    使其中的静态公共数据调用(rewards/gamma)也走该钱包代理;实例方法已各自 _proxied。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with use_proxy(getattr(self.api, "proxy_url", None)):
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class WalletWorker:
@@ -82,6 +97,7 @@ class WalletWorker:
                 )
             self._stop_event.wait(timeout=check_interval)
 
+    @_worker_proxied
     def _tick(self):
         """One monitor pass: detect fills, UMA resolution guard, three-tier
         exit, strategy compliance. check_resolution runs right after fill
@@ -94,6 +110,7 @@ class WalletWorker:
         self.monitor.check_sell_orders()
         self.monitor.publish_status()
 
+    @_worker_proxied
     def place_orders(
         self,
         eligible_markets: list[dict],
@@ -447,6 +464,7 @@ class EngineManager:
                     pk,
                     signature_type=enabled[0].get("signature_type", 2),
                     funder=enabled[0].get("funder") or None,
+                    proxy=enabled[0].get("proxy") or None,
                 )
                 logger.info("Created scanner API from wallet %s", enabled[0]["address"])
 
@@ -504,6 +522,7 @@ class EngineManager:
                     private_key,
                     signature_type=wallet.get("signature_type", 2),
                     funder=funder or None,
+                    proxy=wallet.get("proxy") or None,
                 )
                 settings = self.db.get_settings()
                 worker = WalletWorker(api, self.db, address, settings)
@@ -548,6 +567,7 @@ class EngineManager:
             private_key,
             signature_type=wallet.get("signature_type", 2),
             funder=funder or None,
+            proxy=wallet.get("proxy") or None,
         )
         settings = self.db.get_settings()
         worker = WalletWorker(api, self.db, address, settings)
@@ -632,12 +652,15 @@ class EngineManager:
         try:
             scanner = MarketScanner(self._scanner_api, self.db, "")
             templates = self._active_templates()
-            candidate_pool = scanner.fetch_candidates(
-                templates,
-                on_progress=on_progress,
-                on_found=on_found,
-                skip_orderbook=skip_orderbook,
-            )
+            # 采集器的静态 rewards/gamma 发现调用走「采集所用钱包」的代理(订单簿抓取
+            # 经 _scanner_api 实例方法已各自走代理)。
+            with use_proxy(getattr(self._scanner_api, "proxy_url", None)):
+                candidate_pool = scanner.fetch_candidates(
+                    templates,
+                    on_progress=on_progress,
+                    on_found=on_found,
+                    skip_orderbook=skip_orderbook,
+                )
         except Exception:
             self.eligible_markets = prev_eligible  # don't blank on failure
             self.scan_status = "done"  # not 'scanning': progress bar won't stick

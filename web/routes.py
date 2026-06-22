@@ -72,7 +72,11 @@ def set_encryption_key(key: bytes):
 
 
 def _get_cached_api(
-    address: str, encrypted_key: str, funder: str = "", signature_type: int = 2
+    address: str,
+    encrypted_key: str,
+    funder: str = "",
+    signature_type: int = 2,
+    proxy: str = "",
 ):
     """Get or create a cached PolymarketAPI instance for balance queries."""
     if address in _api_cache:
@@ -80,7 +84,9 @@ def _get_cached_api(
     from api.polymarket_api import PolymarketAPI
 
     pk = decrypt(encrypted_key, encryption_key)
-    api = PolymarketAPI(pk, signature_type=signature_type, funder=funder or None)
+    api = PolymarketAPI(
+        pk, signature_type=signature_type, funder=funder or None, proxy=proxy or None
+    )
     _api_cache[address] = api
     return api
 
@@ -106,6 +112,7 @@ def _wallet_apis(only: str = None) -> dict:
                     pk,
                     signature_type=w.get("signature_type", 2),
                     funder=w.get("funder") or None,
+                    proxy=w.get("proxy") or None,
                 )
             except Exception as e:
                 app.logger.error("API build failed for %s: %s", addr, e)
@@ -437,6 +444,7 @@ def api_list_wallets():
                         encrypted_key,
                         w.get("funder", ""),
                         w.get("signature_type", 2),
+                        w.get("proxy", ""),
                     )
                     w["balance"] = api.get_balance()
                 except Exception:
@@ -502,6 +510,9 @@ def api_add_wallet():
     if err:
         return jsonify({"error": err}), 400
 
+    # 该钱包专属代理(明文存原串);此后含本次导入探测在内的所有网络活动都走它。
+    proxy = (data.get("proxy") or "").strip()
+
     from api.polymarket_api import (
         PolymarketAPI,
         derive_deposit_address,
@@ -520,7 +531,10 @@ def api_add_wallet():
         derived_safe = derive_deposit_address(eoa_from_key(private_key))
         provisional = resolve_signature_type(derived_safe, funder)
         api = PolymarketAPI(
-            private_key, signature_type=provisional, funder=funder or None
+            private_key,
+            signature_type=provisional,
+            funder=funder or None,
+            proxy=proxy or None,
         )
         address = api.get_address()
         funder = api.get_funder()
@@ -531,7 +545,7 @@ def api_add_wallet():
 
     encrypted = encrypt(private_key, encryption_key)
     try:
-        db.add_wallet(address, encrypted, funder, sig_type)
+        db.add_wallet(address, encrypted, funder, sig_type, proxy=proxy)
     except Exception:
         return jsonify({"error": "该钱包已存在"}), 400
 
@@ -550,6 +564,17 @@ def api_remove_wallet(address):
     _api_cache.pop(
         address, None
     )  # 丢弃旧的余额查询客户端,防止重导入后命中旧 sig/funder
+    return jsonify({"ok": True})
+
+
+@app.route("/api/wallets/<address>/proxy", methods=["PUT"])
+@login_required
+def api_set_wallet_proxy(address):
+    """设置/清空某钱包的 IP 代理(明文存)。代理变更在下次启动该钱包引擎时生效;
+    清掉缓存 api,使路由侧的余额查询按新代理重建。"""
+    proxy = ((request.get_json() or {}).get("proxy") or "").strip()
+    db.set_wallet_proxy(address, proxy)
+    _api_cache.pop(address, None)
     return jsonify({"ok": True})
 
 
