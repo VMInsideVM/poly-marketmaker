@@ -1209,3 +1209,72 @@ class TestCheckExit:
         monitor.check_exit()
         api.place_limit_sell.assert_not_called()
         api.cancel_orders.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# UMA resolution guard: check_resolution — 有人在 UMA 提交即撤该市场全部买单
+# ---------------------------------------------------------------------------
+
+
+class TestCheckResolution:
+    def _buy(self, oid, cid, asset="tok"):
+        return {
+            "id": oid,
+            "side": "BUY",
+            "asset_id": asset,
+            "market": cid,
+            "size_matched": "0",
+            "price": "0.30",
+            "original_size": "500",
+        }
+
+    def test_cancels_buys_only_for_market_in_resolution(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            self._buy("o1", "cid1"),
+            self._buy("o2", "cid1"),
+            self._buy("o3", "cid2"),
+        ]
+        api.gamma_resolution_status.return_value = {"cid1": "proposed", "cid2": None}
+        monitor.check_resolution()
+        api.cancel_orders.assert_called_once_with(["o1", "o2"])
+
+    def test_records_action_for_resolution_cancel(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._buy("o1", "cid1")]
+        api.gamma_resolution_status.return_value = {"cid1": "disputed"}
+        monitor.check_resolution()
+        ats = [c.kwargs.get("action_type") for c in db.record_action.call_args_list]
+        assert "uma_resolution_cancel" in ats
+
+    def test_does_not_cancel_when_not_in_resolution(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._buy("o1", "cid1")]
+        api.gamma_resolution_status.return_value = {"cid1": None}
+        monitor.check_resolution()
+        api.cancel_orders.assert_not_called()
+
+    def test_gamma_failure_fails_open_no_cancel(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._buy("o1", "cid1")]
+        api.gamma_resolution_status.return_value = {}  # fail-open -> 不撤
+        monitor.check_resolution()
+        api.cancel_orders.assert_not_called()
+
+    def test_no_buy_orders_skips_gamma_and_cancel(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [
+            {"id": "s1", "side": "SELL", "market": "cid1"}
+        ]
+        monitor.check_resolution()
+        api.gamma_resolution_status.assert_not_called()
+        api.cancel_orders.assert_not_called()
+
+    def test_cancel_failure_does_not_record_action(self):
+        monitor, api, db = _make_monitor()
+        api.get_open_orders.return_value = [self._buy("o1", "cid1")]
+        api.gamma_resolution_status.return_value = {"cid1": "proposed"}
+        api.cancel_orders.side_effect = Exception("network")
+        monitor.check_resolution()
+        ats = [c.kwargs.get("action_type") for c in db.record_action.call_args_list]
+        assert "uma_resolution_cancel" not in ats

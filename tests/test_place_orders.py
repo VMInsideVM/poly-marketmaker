@@ -11,6 +11,7 @@ def _make_worker(balance=10000.0, template=None):
     api.get_open_orders.return_value = []
     api.get_user_positions.return_value = []
     api.get_funder.return_value = "0xF"
+    api.gamma_resolution_status.return_value = {}  # UMA 守卫默认:无市场在结算
     db.get_blacklist_ids.return_value = set()
     db.is_in_cooldown.return_value = False
     tmpl = {
@@ -58,6 +59,25 @@ def test_places_multi_tier_min_size_on_one_side():
         (round(c.args[1], 2), c.args[2]) for c in api.place_limit_buy.call_args_list
     )
     assert (0.30, 100) in placed and (0.29, 100) in placed
+
+
+def test_skips_market_in_uma_resolution():
+    # 有人在 UMA 提交 resolution(umaResolutionStatus 非空)的市场 -> 本轮不挂买单,
+    # 避免「撤了又挂」。
+    worker, api, db = _make_worker()
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    api.gamma_resolution_status.return_value = {"A": "proposed"}
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    api.place_limit_buy.assert_not_called()
+
+
+def test_places_normally_when_not_in_resolution():
+    # 正常市场(umaResolutionStatus=None)照常下单,守卫不误伤。
+    worker, api, db = _make_worker()
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    api.gamma_resolution_status.return_value = {"A": None}
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    api.place_limit_buy.assert_called()
 
 
 def test_exposure_caps_total_usd():

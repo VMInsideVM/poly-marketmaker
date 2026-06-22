@@ -13,6 +13,7 @@ from api.polymarket_api import PolymarketAPI
 from engine.scanner import MarketScanner
 from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
+from engine.resolution import in_resolution
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
@@ -82,11 +83,13 @@ class WalletWorker:
             self._stop_event.wait(timeout=check_interval)
 
     def _tick(self):
-        """One monitor pass: detect fills, run three-tier exit, strategy
-        compliance. check_exit runs right after fill detection so the exit
-        decision reflects the latest fills."""
+        """One monitor pass: detect fills, UMA resolution guard, three-tier
+        exit, strategy compliance. check_resolution runs right after fill
+        detection to cancel buys in any market whose UMA resolution was just
+        proposed; check_exit then reflects the latest fills."""
         self.monitor.begin_status_tick()
         self.monitor.check_buy_orders()
+        self.monitor.check_resolution()
         self.monitor.check_exit()
         self.monitor.check_sell_orders()
         self.monitor.publish_status()
@@ -195,9 +198,23 @@ class WalletWorker:
                 except Exception as ex:
                     logger.warning("Dropout cancel failed: %s", ex)
 
+        # UMA 结算守卫:跳过已有人在 UMA 提交 resolution 的市场,避免「监控线程撤、
+        # 下单线程又挂」反复打架(发现每 4h 一次,市场不会立刻跌出 eligible)。Gamma
+        # 失败 -> resolving 空 -> 不跳过(fail-open,与监控侧一致)。
+        status_map = self.api.gamma_resolution_status(order)
+        resolving = {c for c in order if in_resolution(status_map.get(c))}
+        if resolving:
+            logger.info(
+                "place_orders skip %d markets in UMA resolution for %s",
+                len(resolving),
+                self.wallet_address,
+            )
+
         placed = 0
         for mid in order:
             if mid in blacklist:
+                continue
+            if mid in resolving:
                 continue
             if self.db.is_in_cooldown(self.wallet_address, mid):
                 continue

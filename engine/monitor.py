@@ -11,6 +11,7 @@ from engine.take_profit import (
     plan_exit,
 )
 from engine.eligibility import recheck_resting_buy
+from engine.resolution import in_resolution
 from engine.strategy import reward_price_range
 from engine.rewards import extract_max_spread
 from engine import monitor_status
@@ -202,6 +203,77 @@ class OrderMonitor:
             detail=f"成交{size}，止盈由持仓维护",
         )
 
+    def check_resolution(self):
+        """UMA 结算守卫:对已挂买单的市场,一旦 umaResolutionStatus 非空(有人在 UMA
+        上提交了 resolution)即撤掉该市场全部 BUY,避免被成交买进一个即将结算的市场。
+        持仓与卖单不动(卖单仍由 check_exit 在结算前正常离场)。
+
+        Gamma 失败时 gamma_resolution_status 返回 {} -> 一律不撤(fail-open),绝不
+        因一次接口抖动误撤全仓买单;下个 tick 自然重试。
+        """
+        try:
+            open_orders = self.api.get_open_orders()
+        except Exception as e:
+            logger.error("get_open_orders failed (skip resolution guard): %s", e)
+            return
+        buys_by_cid: dict = {}
+        for o in open_orders:
+            if o.get("side") != "BUY":
+                continue
+            cid = o.get("market", "")
+            if cid:
+                buys_by_cid.setdefault(cid, []).append(o)
+        if not buys_by_cid:
+            return
+        status_map = self.api.gamma_resolution_status(list(buys_by_cid.keys()))
+        for cid, buys in buys_by_cid.items():
+            status = status_map.get(cid)
+            if not in_resolution(status):
+                continue
+            ids = [o.get("id") for o in buys]
+            try:
+                self.api.cancel_orders(ids)
+            except Exception as e:
+                logger.warning(
+                    "UMA resolution cancel failed cid=%s: %s — buys 未撤", cid, e
+                )
+                self._status_add(
+                    market=cid,
+                    side="买入",
+                    price="-",
+                    size="-",
+                    matched="-",
+                    stage="结算守卫",
+                    action="⚠️UMA撤单失败",
+                    detail=f"umaResolutionStatus={status}，撤 {len(ids)} 笔买单失败：{e}",
+                )
+                continue
+            self._record_action(
+                market_id=cid,
+                action_type="uma_resolution_cancel",
+                side="-",
+                price=-1,
+                size=0,
+                reason=(
+                    f"市场进入 UMA 结算(状态={status})，撤销该市场全部买单，"
+                    "避免买进将结算的市场"
+                ),
+                price_basis=(
+                    f"status={status}；撤 {len(ids)} 笔 BUY；"
+                    "来源：Gamma /markets condition_ids"
+                ),
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price="-",
+                size="-",
+                matched="-",
+                stage="结算守卫",
+                action="⚠️UMA已提交·撤买单",
+                detail=f"umaResolutionStatus={status}，撤 {len(ids)} 笔买单",
+            )
+
     def _sell_book(self, asset_id: str):
         """(tick_float, tick_str, best_bid, best_ask);失败/空时缺的位回 None。"""
         try:
@@ -304,7 +376,7 @@ class OrderMonitor:
                     matched="-",
                     stage="离场",
                     action=f"保持({plan['tier']})",
-                    detail=f"成本{cost:.4f} 挂卖一{want:.4f}",
+                    detail=f"成本{cost:.4f} 挂卖单{want:.4f}",
                 )
                 return
             if p["cancel_ids"]:
@@ -334,7 +406,7 @@ class OrderMonitor:
                     matched="-",
                     stage="离场",
                     action="⚠️挂卖失败·裸奔",
-                    detail=f"{plan['tier']} 挂卖一被拒，该持仓未受保护：{e}",
+                    detail=f"{plan['tier']} 挂卖单被拒，该持仓未受保护：{e}",
                 )
                 return
             self._record_action(
@@ -343,8 +415,8 @@ class OrderMonitor:
                 side="卖出",
                 price=want,
                 size=size,
-                reason=f"{plan['tier']}：挂卖一离场",
-                price_basis=f"{basis}；卖一{want:.4f}；来源：CLOB get_trades+get_orderbook",
+                reason=f"{plan['tier']}：挂卖单离场",
+                price_basis=f"{basis}；挂卖价{want:.4f}；来源：CLOB get_trades+get_orderbook",
             )
             self._status_add(
                 market=cid,
@@ -353,7 +425,7 @@ class OrderMonitor:
                 size=str(size),
                 matched="-",
                 stage="离场",
-                action=f"挂卖一({plan['tier']})",
+                action=f"挂卖单({plan['tier']})",
                 detail=f"成本{cost:.4f}",
             )
             return

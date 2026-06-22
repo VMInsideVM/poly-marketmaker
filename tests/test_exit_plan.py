@@ -36,6 +36,17 @@ def test_case_a_boundary_cost_equals_bid():
     _p(0.30, 0.30, 0.32, "A", "rest", price=0.32)
 
 
+def test_case_a_cost_mode_rests_at_cost():
+    # mode="cost":挂在成本价(非卖一 0.33);成本 ≤ 买一,该单 marketable、会立即吃买盘
+    _p(0.30, 0.31, 0.33, "A", "rest", price=0.30, mode="cost")
+
+
+def test_case_a_cost_mode_ceils_to_tick_and_not_above_bid():
+    # 成本带零头 -> ceil_to_tick 向上取整;且保证挂价 ≤ 买一(始终 marketable,不卖穿成本)
+    out = _p(0.305, 0.31, 0.33, "A", "rest", price=0.31, mode="cost")
+    assert out["price"] <= 0.31
+
+
 def test_b0_force_clear_when_loss_ge_theta_stop():
     _p(0.40, 0.35, 0.36, "B0", "market", theta_stop=0.05)
 

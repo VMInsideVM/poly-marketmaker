@@ -642,6 +642,35 @@ class PolymarketAPI:
             }
         return out
 
+    @staticmethod
+    def gamma_resolution_status(condition_ids: list) -> dict:
+        """批量取每个 condition_id 的 umaResolutionStatus(Gamma 公共接口,免 auth)。
+
+        GET /markets?condition_ids=a&condition_ids=b... 返回 {condition_id: status
+        或 None}。UMA proposal 提交后该字段变非空(proposed->disputed->resolved);
+        正常交易为 None。网络/HTTP 失败 -> 返回 {}(fail-open:Gamma 抖动时调用方
+        一律不撤/不跳过,绝不因一次接口失败误撤全仓买单)。
+        """
+        ids = [c for c in dict.fromkeys(condition_ids) if c]
+        if not ids:
+            return {}
+        try:
+            resp = requests.get(
+                "https://gamma-api.polymarket.com/markets",
+                params=[("condition_ids", c) for c in ids],
+                timeout=10,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            logger.warning("gamma_resolution_status failed (fail-open): %s", e)
+            return {}
+        out = {}
+        for m in resp.json():
+            cid = m.get("conditionId", "")
+            if cid:
+                out[cid] = m.get("umaResolutionStatus")
+        return out
+
     # --- Per-market rewards ---
 
     @staticmethod

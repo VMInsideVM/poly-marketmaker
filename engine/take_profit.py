@@ -190,6 +190,15 @@ def plan_exit(
     if cost <= best_bid:
         if case_a_mode == "market":
             return {"tier": "A", "action": "market", "price": None, "size": size}
+        if case_a_mode == "cost":
+            # 挂在成本价:成本 ≤ 买一 -> ceil_to_tick(cost) ≤ 买一,该单 marketable,
+            # 立即按买一价(≥成本)成交、剩余停在成本价当保本单;限价下限绝不卖穿成本。
+            return {
+                "tier": "A",
+                "action": "rest",
+                "price": ceil_to_tick(cost, tick),
+                "size": size,
+            }
         return {"tier": "A", "action": "rest", "price": _rest_price(), "size": size}
 
     loss = cost - best_bid
