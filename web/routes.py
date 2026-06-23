@@ -301,6 +301,12 @@ def blacklist_page():
     return render_template("blacklist.html")
 
 
+@app.route("/help")
+@login_required
+def help_page():
+    return render_template("help.html")
+
+
 @app.route("/api/monitor-status", methods=["GET"])
 @login_required
 def api_monitor_status():
