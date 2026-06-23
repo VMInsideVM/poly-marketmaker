@@ -172,7 +172,7 @@ class OrderMonitor:
         if size <= 0:
             return
         # No trades-table write: buy "history" is the live Data API position.
-        # 离场卖单由 check_exit() 的三段式逻辑(plan_exit)按 get_trades 加权成本维护。
+        # 离场卖单由 check_exit() 的两段式逻辑(plan_exit)按 get_trades 加权成本维护。
         # Step 1 only sets the cooldown and cancels the buy's remainder.
         self.db.set_cooldown(
             self.wallet_address, market_id, self.db.get_settings()["cooldown_minutes"]
@@ -291,7 +291,7 @@ class OrderMonitor:
             return 0.01, "0.01", None, None
 
     def check_exit(self):
-        """三段式离场(v4 §7):合并原止盈+止损。每持仓按 plan_exit 决策执行。"""
+        """两段式离场:成本<买一挂成本价,成本≥买一挂卖一(亏损≥theta_stop 兜底市价止损)。"""
         tmpl = self.db.get_template_for(self.wallet_address)
         theta_loss = float(tmpl.get("theta_loss_cents", 2)) / 100.0
         theta_stop = float(tmpl.get("theta_stop_cents", 5)) / 100.0
@@ -497,48 +497,6 @@ class OrderMonitor:
                 stage="离场",
                 action=f"市价清仓({plan['tier']})",
                 detail=f"成本{cost:.4f}",
-            )
-            return
-
-        if action == "sweep":
-            want = plan["price"]
-            try:
-                self.api.place_marketable_limit_sell(
-                    asset_id, want, size, tick_size=tick_str
-                )
-            except Exception as e:
-                logger.error(
-                    "Sweep sell failed asset=%s: %s — UNPROTECTED", asset_id, e
-                )
-                self._status_add(
-                    market=cid,
-                    side="卖出",
-                    price=f"{want:.4f}",
-                    size=str(size),
-                    matched="-",
-                    stage="离场",
-                    action="⚠️扫单失败·裸奔",
-                    detail=f"{plan['tier']} FAK 扫单被拒，该持仓未受保护：{e}",
-                )
-                return
-            self._record_action(
-                market_id=cid,
-                action_type="exit_sweep",
-                side="卖出",
-                price=want,
-                size=size,
-                reason="B：以最低卖出价 FAK 扫单(剩余下轮再评估)",
-                price_basis=f"{basis}；最低卖出价{want:.4f}；来源：CLOB get_trades+get_orderbook",
-            )
-            self._status_add(
-                market=cid,
-                side="卖出",
-                price=f"{want:.4f}",
-                size=str(size),
-                matched="-",
-                stage="离场",
-                action="FAK扫单(B)",
-                detail=f"成本{cost:.4f} 扫到{want:.4f}",
             )
             return
 

@@ -36,10 +36,15 @@ def build_ladder(bids, reward_range_min, reward_range_max, min_size, tiers_k):
 
 
 def _interval_action(tier_rule, ct):
-    """半开升序区间 [前一上界, upper):返回包含 ct 的区间动作。"""
+    """厚度下界区间「厚度 > upper」:返回第一个满足 ct > upper 的区间动作。
+
+    `upper` 现在是「累计厚度须超过的阈值」(下界,非上界;键名沿用 upper 以兼容已存模板)。
+    取第一个命中,故同档内多个区间须按阈值**从大到小**排列,否则小阈值区间会遮住大的;
+    `upper=None` 为「其余」兜底(总匹配),都不满足时返回 skip。
+    """
     for interval in tier_rule:
         upper = interval.get("upper")
-        if upper is None or ct < upper:
+        if upper is None or ct > upper:
             return interval.get("action", {"type": "skip"})
     return {"type": "skip"}
 

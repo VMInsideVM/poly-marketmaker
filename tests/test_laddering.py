@@ -74,14 +74,27 @@ def test_share_skip():
     assert resolve_tier_share(2.0, rule, 0.30, 100, 1000) == 0
 
 
-def test_interval_selection_half_open_ascending():
+def test_interval_selection_greater_than_single_threshold():
+    # 厚度 > X:命中第一个 ct > upper 的区间;边界 ct==upper 不命中,落「其余」。
     rule = _rule(
         {"upper": 5.0, "action": {"type": "fixed_shares", "shares": 50}},
         {"upper": None, "action": {"type": "min_size"}},
     )
-    assert resolve_tier_share(4.9, rule, 0.30, 100, 1000) == 50
-    assert resolve_tier_share(5.0, rule, 0.30, 100, 1000) == 100
-    assert resolve_tier_share(9.0, rule, 0.30, 100, 1000) == 100
+    assert resolve_tier_share(5.1, rule, 0.30, 100, 1000) == 50  # ct>5 -> 50
+    assert resolve_tier_share(5.0, rule, 0.30, 100, 1000) == 100  # 边界不命中 -> 其余
+    assert resolve_tier_share(3.0, rule, 0.30, 100, 1000) == 100  # <5 -> 其余
+
+
+def test_interval_selection_greater_than_descending_first_exceeded():
+    # 阈值从大到小填,取第一个 ct > upper 的区间(填反会被大桶遮住,见文档)。
+    rule = _rule(
+        {"upper": 10.0, "action": {"type": "fixed_shares", "shares": 200}},
+        {"upper": 5.0, "action": {"type": "fixed_shares", "shares": 100}},
+        {"upper": None, "action": {"type": "skip"}},
+    )
+    assert resolve_tier_share(12.0, rule, 0.30, 100, 1000) == 200  # >10
+    assert resolve_tier_share(7.0, rule, 0.30, 100, 1000) == 100  # 不>10,但>5
+    assert resolve_tier_share(3.0, rule, 0.30, 100, 1000) == 0  # 都不>,其余 skip
 
 
 from engine.laddering import compute_market_ladders
