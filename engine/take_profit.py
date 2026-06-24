@@ -161,6 +161,31 @@ def describe_cost_basis(cost, lots: list[dict], max_lots: int = 6) -> str:
     )
 
 
+def market_fill_price(resp, best_bid, cur):
+    """市价清仓(B0)的真实成交价,**绝不用 Data API 现价**。
+
+    现价(curPrice)常与盘口背离——薄盘口里现价 0.13、买一却只有 0.06,拿现价当成交价
+    会把一笔亏损显示成盈利(用户实报 2026-06-24)。取价优先级:
+    1. 市价单响应里的成交额:takingAmount(收到 USDC)/ makingAmount(卖出份额)= 均价,
+       仅当比值是合理价位 (0,1] 才采信(防字段缺失/语义反/小数位不一致)。
+    2. 退回盘口买一 best_bid —— FAK 市价卖从买一往下吃,买一是真实成交的起点价(上界)。
+    3. 再退回现价 cur(仅当连买一都没有,理论上 B0 不会走到这)。
+    """
+    try:
+        if isinstance(resp, dict):
+            making = float(resp.get("makingAmount") or 0)  # 卖出份额
+            taking = float(resp.get("takingAmount") or 0)  # 收到 USDC
+            if making > 0 and taking > 0:
+                p = taking / making
+                if 0 < p <= 1:
+                    return p
+    except (TypeError, ValueError):
+        pass
+    if best_bid is not None and best_bid > 0:
+        return best_bid
+    return cur
+
+
 def plan_exit(
     cost, best_bid, best_ask, tick, theta_loss, theta_stop, case_a_mode, size
 ):

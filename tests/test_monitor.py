@@ -1073,6 +1073,7 @@ class TestCheckExit:
         mode="ask",
         theta_loss=2,
         theta_stop=5,
+        cur_price=None,
     ):
         monitor, api, db = _make_monitor(
             settings={
@@ -1085,7 +1086,9 @@ class TestCheckExit:
             {
                 "asset": "A-y",
                 "size": size,
-                "curPrice": (bids[0][0] if bids else 0),
+                "curPrice": (
+                    cur_price if cur_price is not None else (bids[0][0] if bids else 0)
+                ),
                 "conditionId": "A",
             }
         ]
@@ -1126,6 +1129,22 @@ class TestCheckExit:
         monitor.check_exit()
         api.place_market_sell.assert_called_once_with("A-y", 100)
         db.record_trade.assert_called_once()
+
+    def test_b0_records_real_fill_not_curprice(self):
+        # 市价清仓:成本 0.1133、买一 0.06(亏 5.33¢≥5¢ 触发 B0),但 Data API 现价抽风显示 0.13。
+        # 记录价必须是真实成交价≈买一 0.06(显示为亏损),绝不能是现价 0.13(会把亏损显示成盈利)。
+        monitor, api, db = self._setup(
+            0.1133, 60, [(0.06, 500)], [(0.20, 500)], cur_price=0.13
+        )
+        rows = []
+        monitor._status_add = lambda **kw: rows.append(kw)
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once()
+        _, k = db.record_trade.call_args
+        assert abs(k["price"] - 0.06) < 1e-9  # 真实成交价≈买一,不是现价 0.13
+        assert k["pnl"] < 0  # 必须显示为亏损
+        # 状态行也用真实成交价,不用现价
+        assert any(r.get("price") == "0.0600" for r in rows), rows
 
     def test_sell_rejection_emits_naked_warning_not_silent(self):
         # 止损卖被 CLOB 拒(OrderRejected)时,不能静默裸奔:check_exit 不抛,

@@ -9,6 +9,7 @@ from engine.take_profit import (
     position_cost_with_lots,
     describe_cost_basis,
     plan_exit,
+    market_fill_price,
 )
 from engine.eligibility import recheck_resting_buy
 from engine.resolution import in_resolution
@@ -453,7 +454,7 @@ class OrderMonitor:
 
         if action == "market":
             try:
-                self.api.place_market_sell(asset_id, size)
+                resp = self.api.place_market_sell(asset_id, size)
             except Exception as e:
                 logger.error(
                     "Market exit failed asset=%s: %s — UNPROTECTED", asset_id, e
@@ -469,34 +470,40 @@ class OrderMonitor:
                     detail=f"{plan['tier']} 市价清仓被拒，该持仓未受保护：{e}",
                 )
                 return
+            # 真实成交价(≈盘口买一,FAK 从买一往下吃),绝不用 Data API 现价——现价常与盘口
+            # 背离,会把亏损显示成盈利(2026-06-24 用户实报:现价 0.13 记成盈利,实为 6.5¢ 止损)。
+            fill = market_fill_price(resp, best_bid, cur)
             if plan["tier"] == "B0":
                 self.db.record_trade(
                     wallet=self.wallet_address,
                     market_id=cid,
                     market_name="",
                     side="stop_loss",
-                    price=cur,
+                    price=fill,
                     size=size,
-                    pnl=(cur - cost) * size,
+                    pnl=(fill - cost) * size,
                 )
             self._record_action(
                 market_id=cid,
                 action_type="exit_market",
                 side="卖出",
-                price=cur,
+                price=fill,
                 size=size,
                 reason=f"{plan['tier']}：市价清仓离场",
-                price_basis=f"{basis}；现价{cur:.4f}；来源：CLOB get_trades+Data API",
+                price_basis=(
+                    f"{basis}；市价清仓·成交≈买一{fill:.4f}（精确成交以链上为准）；"
+                    f"来源：CLOB get_trades+get_orderbook"
+                ),
             )
             self._status_add(
                 market=cid,
                 side="卖出",
-                price=f"{cur:.4f}",
+                price=f"{fill:.4f}",
                 size=str(size),
                 matched="-",
                 stage="离场",
                 action=f"市价清仓({plan['tier']})",
-                detail=f"成本{cost:.4f}",
+                detail=f"成本{cost:.4f} 成交≈{fill:.4f}",
             )
             return
 

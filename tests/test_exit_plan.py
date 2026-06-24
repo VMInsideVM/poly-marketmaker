@@ -6,7 +6,7 @@
 theta_loss / case_a_mode 已不再使用(签名保留以免改动调用方)。
 """
 
-from engine.take_profit import plan_exit
+from engine.take_profit import plan_exit, market_fill_price
 
 
 def _p(
@@ -89,3 +89,33 @@ def test_no_bid_rests_at_cost():
 def test_no_book_at_all_noop():
     out = plan_exit(0.40, None, None, 0.01, 0.02, 0.05, "ask", 100)
     assert out["action"] == "noop"
+
+
+# --- market_fill_price: B0 清仓的真实成交价(绝不用 Data API 现价)---
+
+
+def test_market_fill_uses_response_amounts():
+    # 卖出 60 份收到 2.88 USDC -> 均价 0.048(精确取自响应成交额)。
+    resp = {"makingAmount": 60.0, "takingAmount": 2.88}
+    assert abs(market_fill_price(resp, 0.06, 0.13) - 0.048) < 1e-9
+
+
+def test_market_fill_rejects_insane_ratio_falls_back_to_bid():
+    # 字段语义反了(比值>1)-> 不采信,退回买一,绝不用现价。
+    resp = {"makingAmount": 2.88, "takingAmount": 60.0}
+    assert market_fill_price(resp, 0.06, 0.13) == 0.06
+
+
+def test_market_fill_no_amounts_falls_back_to_bid():
+    # 响应没有成交额(常见)-> 退回买一(FAK 起吃价),不是现价。
+    assert market_fill_price({"success": True}, 0.06, 0.13) == 0.06
+
+
+def test_market_fill_never_uses_cur_when_bid_present():
+    # 关键:有买一就绝不退到现价——现价会把亏损显示成盈利。
+    assert market_fill_price({}, 0.06, 0.13) == 0.06
+
+
+def test_market_fill_no_bid_falls_back_to_cur():
+    # 连买一都没有(理论上 B0 不会走到)-> 才退回现价。
+    assert market_fill_price({}, None, 0.13) == 0.13
