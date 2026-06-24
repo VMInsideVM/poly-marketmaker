@@ -168,42 +168,30 @@ def plan_exit(
 
     返回 {"tier","action","price","size"};action ∈ {"rest","market","noop"}。
     cost>0、size>0 由调用方在调用前保证(成本取不到 -> 裸奔跳过,不进此函数)。
-    - 成本 < 买一(盈利):挂成本价 ceil_to_tick(cost)。该单 < 买一、marketable,立即按
-      买一价(≥成本)成交,锁定利润离场。
-    - 成本 ≥ 买一(保本/套牢):挂卖一(best_ask)被动等回本;无卖一则回退 ceil_to_tick(cost)。
+    - 成本 ≤ 买一(盈利):挂卖一(best_ask)做 maker 捕捉价差;无卖一则挂成本价
+      (成本≤买一,仍按 ≥成本 成交)。
+    - 成本 > 买一(保本/套牢):挂成本价 ceil_to_tick(cost) 被动等回本,绝不挂在成本下方。
       唯一例外是兜底止损:亏损(成本−买一) ≥ theta_stop 时市价清仓(B0),防极端套牢无限扛单。
 
+    两个分支都绝不低于成本卖出 —— 盈利侧 best_ask>买一≥成本,套牢侧挂成本价;唯一认亏
+    出口是 B0 强平。无买盘时无法判断盈亏、也无从兜底止损:挂成本价等回本(无盘口则跳过)。
     theta_loss / case_a_mode 已不再使用(签名保留以免改动调用方);旧 B_sweep 封顶亏与
     case_a 的 market/cost 模式已移除。
     """
+    cost_floor = ceil_to_tick(cost, tick)
 
-    def _rest_price():
-        if best_ask is not None and best_ask > 0:
-            return best_ask
-        return ceil_to_tick(cost, tick)
+    # 盈利:成本 ≤ 买一 -> 挂卖一做 maker 捕捉价差;无卖一回退成本价。
+    if best_bid is not None and cost <= best_bid:
+        price = best_ask if (best_ask is not None and best_ask > 0) else cost_floor
+        return {"tier": "A", "action": "rest", "price": price, "size": size}
 
-    # 无买盘:无法判断盈亏、也无从兜底止损,挂卖一被动等(无卖盘则跳过)。
-    if best_bid is None:
-        if best_ask is not None and best_ask > 0:
-            return {
-                "tier": "B_park",
-                "action": "rest",
-                "price": _rest_price(),
-                "size": size,
-            }
+    # 成本 > 买一:套牢/保本。亏损过大兜底市价止损(无买盘时无从计算,跳过止损)。
+    if best_bid is not None and (cost - best_bid) >= theta_stop:
+        return {"tier": "B0", "action": "market", "price": None, "size": size}
+
+    # 完全无盘口(无买无卖):不挂进死 book。
+    if best_bid is None and (best_ask is None or best_ask <= 0):
         return {"tier": "none", "action": "noop", "price": None, "size": 0.0}
 
-    # 盈利:成本严格低于买一 -> 挂成本价(marketable,立即按买一成交)。
-    if cost < best_bid:
-        return {
-            "tier": "A",
-            "action": "rest",
-            "price": ceil_to_tick(cost, tick),
-            "size": size,
-        }
-
-    # 成本 ≥ 买一:套牢/保本。亏损过大兜底市价止损,否则挂卖一等回本。
-    loss = cost - best_bid
-    if loss >= theta_stop:
-        return {"tier": "B0", "action": "market", "price": None, "size": size}
-    return {"tier": "B_park", "action": "rest", "price": _rest_price(), "size": size}
+    # 套牢/无买盘:挂成本价等回本(绝不低于成本)。
+    return {"tier": "B_park", "action": "rest", "price": cost_floor, "size": size}

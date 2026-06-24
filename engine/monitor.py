@@ -291,7 +291,7 @@ class OrderMonitor:
             return 0.01, "0.01", None, None
 
     def check_exit(self):
-        """两段式离场:成本<买一挂成本价,成本≥买一挂卖一(亏损≥theta_stop 兜底市价止损)。"""
+        """两段式离场:成本≤买一挂卖一,成本>买一挂成本价(永不低于成本;亏损≥theta_stop 兜底市价止损)。"""
         tmpl = self.db.get_template_for(self.wallet_address)
         theta_loss = float(tmpl.get("theta_loss_cents", 2)) / 100.0
         theta_stop = float(tmpl.get("theta_stop_cents", 5)) / 100.0

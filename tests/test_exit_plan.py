@@ -1,7 +1,8 @@
 """tests/test_exit_plan.py — 两段式离场决策纯函数(不触网)。
 
-成本 < 买一(盈利) -> 挂成本价(marketable、立即按买一成交)。
-成本 ≥ 买一(保本/套牢) -> 挂卖一被动等回本;亏损 ≥ theta_stop 兜底市价止损。
+成本 ≤ 买一(盈利)   -> 挂卖一(best_ask)做 maker 捕捉价差;无卖一回退成本价。
+成本 > 买一(保本/套牢) -> 挂成本价 ceil_to_tick(cost) 被动等回本,绝不低于成本;
+                        亏损 ≥ theta_stop 兜底市价止损。
 theta_loss / case_a_mode 已不再使用(签名保留以免改动调用方)。
 """
 
@@ -28,35 +29,46 @@ def _p(
     return out
 
 
-def test_profit_cost_below_bid_rests_at_cost():
-    # 成本 0.30 < 买一 0.31 -> 挂成本价 0.30(非卖一 0.33);marketable、立即按买一成交。
-    _p(0.30, 0.31, 0.33, "A", "rest", price=0.30)
+def test_profit_cost_below_bid_rests_at_ask():
+    # 成本 0.30 ≤ 买一 0.31(盈利)-> 挂卖一 0.33 做 maker 捕价差(不再按成本/买一甩)。
+    _p(0.30, 0.31, 0.33, "A", "rest", price=0.33)
 
 
-def test_case_a_mode_ignored_rests_at_cost():
-    # case_a_mode 已死:即便传 "market" 也仍挂成本价,不再市价。
-    _p(0.30, 0.31, 0.33, "A", "rest", price=0.30, mode="market")
+def test_profit_boundary_cost_equals_bid_rests_at_ask():
+    # 成本 == 买一 仍算盈利(≤)-> 挂卖一。
+    _p(0.30, 0.30, 0.32, "A", "rest", price=0.32)
 
 
-def test_profit_ceils_cost_to_tick_and_not_above_bid():
-    # 成本带零头 -> ceil_to_tick 向上取整;且挂价 ≤ 买一(始终 marketable,不卖穿成本)。
-    out = _p(0.305, 0.31, 0.33, "A", "rest", price=0.31)
-    assert out["price"] <= 0.31
+def test_profit_no_ask_falls_back_to_cost():
+    # 盈利但无卖一 -> 回退挂成本价(成本≤买一,仍按≥成本成交)。
+    _p(0.30, 0.31, None, "A", "rest", price=0.30)
 
 
-def test_boundary_cost_equals_bid_parks_at_ask():
-    # 成本 == 买一(不再算盈利)-> 走"挂卖一"侧,亏损 0 < theta_stop -> B_park 挂卖一。
-    _p(0.30, 0.30, 0.32, "B_park", "rest", price=0.32)
+def test_case_a_mode_ignored():
+    # case_a_mode 已死:即便传 "market" 盈利侧仍挂卖一。
+    _p(0.30, 0.31, 0.33, "A", "rest", price=0.33, mode="market")
 
 
-def test_underwater_within_stop_parks_at_ask():
-    # 成本 0.40 > 买一 0.39,亏损 0.01 < theta_stop -> 挂卖一 0.41 被动等回本(无 sweep)。
-    _p(0.40, 0.39, 0.41, "B_park", "rest", price=0.41)
+def test_underwater_within_stop_rests_at_cost():
+    # 成本 0.40 > 买一 0.39,亏损 0.01 < theta_stop -> 挂成本价 0.40 等回本(不跟卖一)。
+    _p(0.40, 0.39, 0.41, "B_park", "rest", price=0.40)
 
 
-def test_underwater_deeper_still_parks_at_ask():
-    # 亏损 0.03 < theta_stop -> 仍 B_park 挂卖一,不市价割肉。
-    _p(0.40, 0.37, 0.41, "B_park", "rest", price=0.41)
+def test_underwater_ask_below_cost_rests_at_cost():
+    # "买15卖13.5" 真根因:卖一 0.135 已低于成本 0.15 -> 挂成本价 0.15,绝不挂在成本下方。
+    out = _p(0.15, 0.13, 0.135, "B_park", "rest", price=0.15, tick=0.005)
+    assert out["price"] >= 0.15
+
+
+def test_underwater_ask_below_cost_rests_at_cost_subcent():
+    # "买19.3卖18.7":卖一 0.187 < 成本 0.193 -> 挂成本价 0.193。
+    out = _p(0.193, 0.185, 0.187, "B_park", "rest", price=0.193, tick=0.001)
+    assert out["price"] >= 0.193
+
+
+def test_underwater_ceils_cost_to_tick():
+    # 成本带零头 0.305 > 买一 0.30 -> 挂 ceil_to_tick(0.305)=0.31。
+    _p(0.305, 0.30, 0.34, "B_park", "rest", price=0.31)
 
 
 def test_underwater_loss_ge_theta_stop_market():
@@ -64,16 +76,16 @@ def test_underwater_loss_ge_theta_stop_market():
     _p(0.40, 0.35, 0.36, "B0", "market", theta_stop=0.05)
 
 
-def test_no_bid_parks_at_ask():
+def test_no_bid_rests_at_cost():
+    # 无买盘无法判断盈亏 -> 挂成本价等回本(绝不低于成本),不跟卖一。
     out = plan_exit(0.40, None, 0.41, 0.01, 0.02, 0.05, "ask", 100)
-    assert out["action"] == "rest" and abs(out["price"] - 0.41) < 1e-9
+    assert (
+        out["action"] == "rest"
+        and out["tier"] == "B_park"
+        and abs(out["price"] - 0.40) < 1e-9
+    )
 
 
 def test_no_book_at_all_noop():
     out = plan_exit(0.40, None, None, 0.01, 0.02, 0.05, "ask", 100)
     assert out["action"] == "noop"
-
-
-def test_profit_falls_back_to_cost_when_no_ask():
-    out = plan_exit(0.30, 0.31, None, 0.01, 0.02, 0.05, "ask", 100)
-    assert out["action"] == "rest" and abs(out["price"] - 0.30) < 1e-9

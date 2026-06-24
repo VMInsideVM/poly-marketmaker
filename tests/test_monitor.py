@@ -1101,24 +1101,24 @@ class TestCheckExit:
         )
         return monitor, api, db
 
-    def test_case_a_rests_one_sell_at_cost(self):
-        # 成本 0.30 < 买一 0.31 -> 挂成本价 0.30(非卖一 0.33),立即按买一成交。
+    def test_case_a_rests_one_sell_at_ask(self):
+        # 成本 0.30 ≤ 买一 0.31(盈利)-> 挂卖一 0.33 做 maker 捕价差(不再按成本/买一甩)。
         monitor, api, db = self._setup(0.30, 100, [(0.31, 500)], [(0.33, 500)])
         monitor.check_exit()
         api.place_limit_sell.assert_called_once()
         a, k = api.place_limit_sell.call_args
-        assert a[0] == "A-y" and abs(a[1] - 0.30) < 1e-9 and a[2] == 100
+        assert a[0] == "A-y" and abs(a[1] - 0.33) < 1e-9 and a[2] == 100
         api.place_market_sell.assert_not_called()
 
-    def test_case_a_mode_ignored_still_rests_at_cost(self):
-        # case_a_mode 已死:即便 mode="market" 也仍挂成本价,不再市价。
+    def test_case_a_mode_ignored_still_rests_at_ask(self):
+        # case_a_mode 已死:即便 mode="market" 盈利侧也仍挂卖一,不市价。
         monitor, api, db = self._setup(
             0.30, 100, [(0.31, 500)], [(0.33, 500)], mode="market"
         )
         monitor.check_exit()
         api.place_limit_sell.assert_called_once()
         a, k = api.place_limit_sell.call_args
-        assert abs(a[1] - 0.30) < 1e-9
+        assert abs(a[1] - 0.33) < 1e-9
         api.place_market_sell.assert_not_called()
 
     def test_b0_market_clear_and_record(self):
@@ -1171,22 +1171,23 @@ class TestCheckExit:
         api.place_limit_sell.assert_called_once()
         db.record_trade.assert_not_called()
 
-    def test_underwater_within_stop_parks_at_ask_no_sweep(self):
-        # 成本 0.40 > 买一 0.39,亏损 0.01 < theta_stop -> 挂卖一 0.41(无 sweep、无市价)。
+    def test_underwater_within_stop_rests_at_cost_no_sweep(self):
+        # 成本 0.40 > 买一 0.39,亏损 0.01 < theta_stop -> 挂成本价 0.40(等回本,不跟卖一 0.41)。
         monitor, api, db = self._setup(0.40, 100, [(0.39, 500)], [(0.41, 500)])
         monitor.check_exit()
         api.place_limit_sell.assert_called_once()
         a, k = api.place_limit_sell.call_args
-        assert abs(a[1] - 0.41) < 1e-9
+        assert abs(a[1] - 0.40) < 1e-9
         api.place_marketable_limit_sell.assert_not_called()
         api.place_market_sell.assert_not_called()
 
-    def test_b_park_rests_at_ask(self):
+    def test_b_park_rests_at_cost(self):
+        # 套牢(成本 0.40 > 买一 0.37),亏损 0.03 < theta_stop -> 挂成本价 0.40 等回本。
         monitor, api, db = self._setup(0.40, 100, [(0.37, 500)], [(0.41, 500)])
         monitor.check_exit()
         api.place_limit_sell.assert_called_once()
         a, k = api.place_limit_sell.call_args
-        assert abs(a[1] - 0.41) < 1e-9
+        assert abs(a[1] - 0.40) < 1e-9
         api.place_market_sell.assert_not_called()
 
     def test_naked_skips_no_sell(self):
@@ -1198,13 +1199,13 @@ class TestCheckExit:
         api.place_marketable_limit_sell.assert_not_called()
 
     def test_rest_keeps_existing_matching_sell(self):
-        # 已有一笔挂在成本价 0.30 的卖单 -> 盈利挂成本价 want=0.30 与之吻合 -> 保持不动。
+        # 已有一笔挂在卖一 0.33 的卖单 -> 盈利挂卖一 want=0.33 与之吻合 -> 保持不动。
         sells = [
             {
                 "id": "s1",
                 "asset_id": "A-y",
                 "side": "SELL",
-                "price": "0.30",
+                "price": "0.33",
                 "original_size": "100",
                 "size_matched": "0",
             }
