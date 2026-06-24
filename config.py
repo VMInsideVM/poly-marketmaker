@@ -20,7 +20,10 @@ TEMPLATE_DEFAULTS = {
     "max_price_cents": 50.0,
     "min_settlement_days": 4,
     "theta_loss_cents": 2,
-    "theta_stop_cents": 5,
+    # 强平止损阈值:可按比例(占成本%)或按固定金额(美分)。默认按比例 20%。
+    "stop_loss_mode": "percent",  # "percent" | "fixed"
+    "stop_loss_percent": 20,  # 按比例时:成本的百分比(最大回撤)
+    "theta_stop_cents": 5,  # 按固定金额时:亏损达到这么多美分即强平
     "case_a_mode": "ask",
     "excluded_categories": ["sports", "esports", "weather"],
     # 多档挂单(SP2)

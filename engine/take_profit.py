@@ -161,6 +161,26 @@ def describe_cost_basis(cost, lots: list[dict], max_lots: int = 6) -> str:
     )
 
 
+def effective_theta_stop(cost, mode, percent, cents):
+    """B0 强平的有效阈值(价位单位 = ¢/100)。两种可配置模式:
+
+    - "percent"(默认):成本 × 百分比/100,即相对成本的最大回撤(默认 20%)。成本越高、
+      允许的绝对亏损越大;成本越低、止损越紧。
+    - "fixed":固定美分 / 100(原行为,默认 5¢),与成本无关的固定亏损额。
+
+    任一参数异常时回退固定美分,绝不让止损阈值算成 0/负(那会一触即发或永不触发)。
+    """
+    try:
+        if str(mode) == "fixed":
+            return max(0.0, float(cents) / 100.0)
+        return max(0.0, float(cost) * float(percent) / 100.0)
+    except (TypeError, ValueError):
+        try:
+            return max(0.0, float(cents) / 100.0)
+        except (TypeError, ValueError):
+            return 0.05
+
+
 def market_fill_price(resp, best_bid, cur):
     """市价清仓(B0)的真实成交价,**绝不用 Data API 现价**。
 

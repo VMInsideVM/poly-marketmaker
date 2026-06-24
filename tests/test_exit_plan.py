@@ -6,7 +6,7 @@
 theta_loss / case_a_mode 已不再使用(签名保留以免改动调用方)。
 """
 
-from engine.take_profit import plan_exit, market_fill_price
+from engine.take_profit import plan_exit, market_fill_price, effective_theta_stop
 
 
 def _p(
@@ -126,3 +126,27 @@ def test_market_fill_never_uses_cur_when_bid_present():
 def test_market_fill_no_bid_falls_back_to_cur():
     # 连买一都没有(理论上 B0 不会走到)-> 才退回现价。
     assert market_fill_price({}, None, 0.13) == 0.13
+
+
+# --- effective_theta_stop: 可配置强平阈值(比例 / 固定金额)---
+
+
+def test_effective_stop_percent_of_cost():
+    # 按比例 20%:0.40 × 20% = 0.08。
+    assert abs(effective_theta_stop(0.40, "percent", 20, 5) - 0.08) < 1e-9
+
+
+def test_effective_stop_percent_scales_with_cost():
+    # 成本越低、止损越紧:0.10 × 20% = 0.02。
+    assert abs(effective_theta_stop(0.10, "percent", 20, 5) - 0.02) < 1e-9
+
+
+def test_effective_stop_fixed_cents():
+    # 按固定金额:5¢ = 0.05,与成本无关。
+    assert abs(effective_theta_stop(0.40, "fixed", 20, 5) - 0.05) < 1e-9
+    assert abs(effective_theta_stop(0.10, "fixed", 20, 5) - 0.05) < 1e-9
+
+
+def test_effective_stop_garbage_falls_back_to_fixed():
+    # 比例参数异常 -> 回退固定美分,不让阈值变成 0/负。
+    assert abs(effective_theta_stop(0.40, "percent", None, 5) - 0.05) < 1e-9

@@ -10,6 +10,7 @@ from engine.take_profit import (
     describe_cost_basis,
     plan_exit,
     market_fill_price,
+    effective_theta_stop,
     ceil_to_tick,
 )
 from engine.eligibility import recheck_resting_buy
@@ -293,10 +294,15 @@ class OrderMonitor:
             return 0.01, "0.01", None, None
 
     def check_exit(self):
-        """两段式离场:成本≤买一挂卖一,成本>买一挂成本价(永不低于成本;亏损≥theta_stop 兜底市价止损)。"""
+        """两段式离场:成本≤买一挂卖一,成本>买一挂成本价(永不低于成本;亏损≥强平阈值兜底市价止损)。
+
+        强平阈值可配置(模板 stop_loss_mode):按比例(占成本%,默认20%)或按固定金额(美分)。
+        """
         tmpl = self.db.get_template_for(self.wallet_address)
         theta_loss = float(tmpl.get("theta_loss_cents", 2)) / 100.0
-        theta_stop = float(tmpl.get("theta_stop_cents", 5)) / 100.0
+        stop_mode = tmpl.get("stop_loss_mode", "percent")
+        stop_percent = tmpl.get("stop_loss_percent", 20)
+        stop_cents = tmpl.get("theta_stop_cents", 5)
         case_a_mode = tmpl.get("case_a_mode", "ask")
         try:
             positions = self.api.get_user_positions(self._funder())
@@ -311,12 +317,27 @@ class OrderMonitor:
         for pos in positions:
             try:
                 self._exit_position(
-                    pos, open_orders, theta_loss, theta_stop, case_a_mode
+                    pos,
+                    open_orders,
+                    theta_loss,
+                    stop_mode,
+                    stop_percent,
+                    stop_cents,
+                    case_a_mode,
                 )
             except Exception as e:
                 logger.error("Exit error on %s: %s", pos.get("asset"), e)
 
-    def _exit_position(self, pos, open_orders, theta_loss, theta_stop, case_a_mode):
+    def _exit_position(
+        self,
+        pos,
+        open_orders,
+        theta_loss,
+        stop_mode,
+        stop_percent,
+        stop_cents,
+        case_a_mode,
+    ):
         asset_id = pos.get("asset", "")
         size = float(pos.get("size", 0) or 0)
         cur = float(pos.get("curPrice", 0) or 0)
@@ -342,19 +363,23 @@ class OrderMonitor:
             )
             return
         tick, tick_str, best_bid, best_ask = self._sell_book(asset_id)
+        # 强平阈值按成本现算(比例模式 = 成本×%;固定模式 = 美分)。
+        theta_stop = effective_theta_stop(cost, stop_mode, stop_percent, stop_cents)
         plan = plan_exit(
             cost, best_bid, best_ask, tick, theta_loss, theta_stop, case_a_mode, size
         )
-        # 每次离场都把盘口+成本+决策打进日志,留作抓现行的证据(下次再现 0.13 卖,可一眼分清
-        # 是成本算错[成本=0.13]还是盘口抽风[成本=0.14 却挂穿])。
+        # 每次离场都把盘口+成本+强平阈值+决策打进日志,留作抓现行的证据(下次再现 0.13 卖,可
+        # 一眼分清是成本算错[成本=0.13]还是盘口抽风[成本=0.14 却挂穿])。
         logger.info(
-            "离场决策 asset=%s 成本=%.4f 买一=%s 卖一=%s tick=%s size=%s -> tier=%s action=%s 挂价=%s",
+            "离场决策 asset=%s 成本=%.4f 买一=%s 卖一=%s tick=%s size=%s 强平阈值=%.4f(%s) -> tier=%s action=%s 挂价=%s",
             asset_id,
             cost,
             best_bid,
             best_ask,
             tick_str,
             size,
+            theta_stop,
+            stop_mode,
             plan["tier"],
             plan["action"],
             plan["price"],

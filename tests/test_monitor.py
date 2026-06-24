@@ -1074,11 +1074,15 @@ class TestCheckExit:
         theta_loss=2,
         theta_stop=5,
         cur_price=None,
+        stop_mode="fixed",
+        stop_percent=20,
     ):
         monitor, api, db = _make_monitor(
             settings={
                 "theta_loss_cents": theta_loss,
                 "theta_stop_cents": theta_stop,
+                "stop_loss_mode": stop_mode,
+                "stop_loss_percent": stop_percent,
                 "case_a_mode": mode,
             }
         )
@@ -1129,6 +1133,34 @@ class TestCheckExit:
         monitor.check_exit()
         api.place_market_sell.assert_called_once_with("A-y", 100)
         db.record_trade.assert_called_once()
+
+    def test_b0_percent_mode_triggers_at_cost_pct(self):
+        # 按比例 20%:成本 0.40 -> 阈值 0.08。买一 0.31(亏 0.09 ≥ 0.08)-> B0 市价清仓。
+        monitor, api, db = self._setup(
+            0.40,
+            100,
+            [(0.31, 500)],
+            [(0.32, 500)],
+            stop_mode="percent",
+            stop_percent=20,
+        )
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once_with("A-y", 100)
+
+    def test_b0_percent_mode_holds_within_threshold(self):
+        # 按比例 20%:成本 0.40 -> 阈值 0.08。买一 0.35(亏 0.05 < 0.08)-> 不强平,挂成本价。
+        # (同样的盘口在固定 5¢ 模式下亏 0.05≥0.05 会强平 -> 证明模式确实改变了行为。)
+        monitor, api, db = self._setup(
+            0.40,
+            100,
+            [(0.35, 500)],
+            [(0.36, 500)],
+            stop_mode="percent",
+            stop_percent=20,
+        )
+        monitor.check_exit()
+        api.place_market_sell.assert_not_called()
+        api.place_limit_sell.assert_called_once()
 
     def test_b0_records_real_fill_not_curprice(self):
         # 市价清仓:成本 0.1133、买一 0.06(亏 5.33¢≥5¢ 触发 B0),但 Data API 现价抽风显示 0.13。

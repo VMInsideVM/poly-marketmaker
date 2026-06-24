@@ -24,6 +24,7 @@ from engine.monitor_status import get_snapshot
 from engine.market_links import enrich_with_market_meta, ensure_market_meta
 from engine.blacklist_ops import buy_order_ids_for_condition
 from engine.scanner import reward_bracket
+from engine.take_profit import effective_theta_stop
 from config import DB_PATH, HOST, PORT
 from web import update as updater
 from version import __version__
@@ -813,13 +814,18 @@ def api_get_positions():
     wallet = request.args.get("wallet")
     out = []
     for addr, api in _wallet_apis(wallet).items():
-        # 止损比例是策略级参数,按各钱包自己的模板取(每钱包可不同)。
-        theta_stop = float(db.get_template_for(addr).get("theta_stop_cents", 5)) / 100.0
+        # 止损是策略级参数,按各钱包自己的模板取(每钱包可不同)。可配置:按比例(占成本%)
+        # 或按固定金额(美分)。展示价用 avg 现算(仅供参考,实际离场以 get_trades 成本为准)。
+        tmpl = db.get_template_for(addr)
+        stop_mode = tmpl.get("stop_loss_mode", "percent")
+        stop_percent = tmpl.get("stop_loss_percent", 20)
+        stop_cents = tmpl.get("theta_stop_cents", 5)
         try:
             for p in api.get_user_positions(api.get_funder()):
                 avg = float(p.get("avgPrice", 0) or 0)
                 cur = float(p.get("curPrice", 0) or 0)
                 size = float(p.get("size", 0) or 0)
+                eff = effective_theta_stop(avg, stop_mode, stop_percent, stop_cents)
                 out.append(
                     {
                         "wallet": addr,
@@ -829,7 +835,7 @@ def api_get_positions():
                         "buy_price": avg,
                         "size": size,
                         "current_price": cur,
-                        "stop_price": max(0.0, avg - theta_stop),
+                        "stop_price": max(0.0, avg - eff),
                         "pnl": (cur - avg) * size,
                     }
                 )
