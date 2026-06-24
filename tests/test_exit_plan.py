@@ -44,6 +44,13 @@ def test_profit_no_ask_falls_back_to_cost():
     _p(0.30, 0.31, None, "A", "rest", price=0.30)
 
 
+def test_profit_crossed_book_floors_at_cost():
+    # 异常/幻影盘口:买一 0.16(≥成本,触发盈利分支)但卖一 0.13 < 成本 0.14。
+    # 盈利分支必须对成本取下限 -> 挂 0.14,绝不挂在成本下方 0.13(这正是 0.13 卖的疑似根因 B)。
+    out = _p(0.14, 0.16, 0.13, "A", "rest", price=0.14)
+    assert out["price"] >= 0.14
+
+
 def test_case_a_mode_ignored():
     # case_a_mode 已死:即便传 "market" 盈利侧仍挂卖一。
     _p(0.30, 0.31, 0.33, "A", "rest", price=0.33, mode="market")

@@ -1209,6 +1209,16 @@ class TestCheckExit:
         assert abs(a[1] - 0.40) < 1e-9
         api.place_market_sell.assert_not_called()
 
+    def test_exit_never_places_sell_below_cost_crossed_book(self):
+        # 硬底线:异常/幻影盘口——买一 0.16≥成本(误判盈利)、卖一 0.13<成本 0.14。
+        # 挂卖价必须 ≥ 成本 0.14,绝不挂在 0.13(疑似 0.13 卖根因 B 的端到端护栏)。
+        monitor, api, db = self._setup(0.14, 50, [(0.16, 500)], [(0.13, 500)])
+        monitor.check_exit()
+        api.place_limit_sell.assert_called_once()
+        a, k = api.place_limit_sell.call_args
+        assert a[1] >= 0.14 - 1e-9, f"挂卖价 {a[1]} 低于成本 0.14"
+        api.place_market_sell.assert_not_called()
+
     def test_naked_skips_no_sell(self):
         monitor, api, db = self._setup(0.30, 100, [(0.31, 500)], [(0.33, 500)])
         monitor._cost_lots = lambda a, s, c: (None, [])

@@ -205,9 +205,14 @@ def plan_exit(
     """
     cost_floor = ceil_to_tick(cost, tick)
 
-    # 盈利:成本 ≤ 买一 -> 挂卖一做 maker 捕捉价差;无卖一回退成本价。
+    # 盈利:成本 ≤ 买一 -> 挂卖一做 maker 捕捉价差;但**绝不挂在成本下方**——盘口异常/买一
+    # 是幻影滞后报价时,卖一可能 < 成本(正常簿里卖一≥买一≥成本,这是对异常簿的兜底),
+    # 故对成本取下限。无卖一则回退成本价。
     if best_bid is not None and cost <= best_bid:
-        price = best_ask if (best_ask is not None and best_ask > 0) else cost_floor
+        if best_ask is not None and best_ask > 0:
+            price = max(best_ask, cost_floor)
+        else:
+            price = cost_floor
         return {"tier": "A", "action": "rest", "price": price, "size": size}
 
     # 成本 > 买一:套牢/保本。亏损过大兜底市价止损(无买盘时无从计算,跳过止损)。

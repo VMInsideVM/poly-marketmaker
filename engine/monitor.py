@@ -10,6 +10,7 @@ from engine.take_profit import (
     describe_cost_basis,
     plan_exit,
     market_fill_price,
+    ceil_to_tick,
 )
 from engine.eligibility import recheck_resting_buy
 from engine.resolution import in_resolution
@@ -344,6 +345,20 @@ class OrderMonitor:
         plan = plan_exit(
             cost, best_bid, best_ask, tick, theta_loss, theta_stop, case_a_mode, size
         )
+        # 每次离场都把盘口+成本+决策打进日志,留作抓现行的证据(下次再现 0.13 卖,可一眼分清
+        # 是成本算错[成本=0.13]还是盘口抽风[成本=0.14 却挂穿])。
+        logger.info(
+            "离场决策 asset=%s 成本=%.4f 买一=%s 卖一=%s tick=%s size=%s -> tier=%s action=%s 挂价=%s",
+            asset_id,
+            cost,
+            best_bid,
+            best_ask,
+            tick_str,
+            size,
+            plan["tier"],
+            plan["action"],
+            plan["price"],
+        )
         sells = [
             o
             for o in open_orders
@@ -367,6 +382,21 @@ class OrderMonitor:
 
         if action == "rest":
             want = plan["price"]
+            # 硬底线:下任何挂卖单前,价格强制 ≥ 成本价(tick 对齐)。即便 plan_exit/成本一时
+            # 异常吐出低于成本的价,也绝不挂穿成本。钳到下限时打 WARNING 以便抓现行。
+            floor = ceil_to_tick(cost, tick)
+            if want is not None and want < floor - 1e-9:
+                logger.warning(
+                    "离场挂价 %.4f 低于成本下限 %.4f，已钳至下限（asset=%s tier=%s 买一=%s 卖一=%s 成本=%.4f）",
+                    want,
+                    floor,
+                    asset_id,
+                    plan["tier"],
+                    best_bid,
+                    best_ask,
+                    cost,
+                )
+                want = floor
             p = plan_take_profit(size, want, tick, sells)
             if p["action"] in ("noop", "keep"):
                 self._status_add(
