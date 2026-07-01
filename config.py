@@ -40,6 +40,16 @@ TEMPLATE_DEFAULTS = {
         "200": 0.30,
         "250": 0.30,
     },
+    # 奖励最低份额范围筛选(向上取档硬顶 250)
+    "rewards_min_size_min": 1,
+    "rewards_min_size_max": 250,
+    # 每档区间匹配变量 + 金额数值表(风险系数模式用)
+    "tier_match_var": "cumulative_thickness",  # "cumulative_thickness" | "risk_coefficient"
+    "amount_value_table": [
+        {"upper": 0.20, "value": 1},
+        {"upper": 0.25, "value": 1.5},
+        {"upper": 0.30, "value": 2},
+    ],
 }
 
 # 向后兼容:仍暴露合并后的 DEFAULTS。get_settings() 在最后一个任务前仍以此为基准。

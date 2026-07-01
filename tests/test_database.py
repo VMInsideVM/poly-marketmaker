@@ -593,3 +593,17 @@ def test_eligible_markets_roundtrips_spread_cents(tmp_path):
         assert round(rows[0]["spread_cents"], 4) == 2.0
     finally:
         db.close()
+
+
+def test_template_defaults_has_tier_match_and_size_range():
+    from config import TEMPLATE_DEFAULTS
+
+    assert TEMPLATE_DEFAULTS["rewards_min_size_min"] == 1
+    assert TEMPLATE_DEFAULTS["rewards_min_size_max"] == 250
+    assert TEMPLATE_DEFAULTS["tier_match_var"] == "cumulative_thickness"
+    table = TEMPLATE_DEFAULTS["amount_value_table"]
+    assert table == [
+        {"upper": 0.20, "value": 1},
+        {"upper": 0.25, "value": 1.5},
+        {"upper": 0.30, "value": 2},
+    ]
