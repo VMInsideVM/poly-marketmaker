@@ -24,6 +24,7 @@ from engine.categories import (
     any_include_other,
     tag_pool,
     market_wanted,
+    count_by_category,
 )
 from config import CATALOG_SLUGS
 from engine.strategy import reward_price_range
@@ -158,6 +159,30 @@ class MarketScanner:
         if not skip_orderbook:
             self.refresh_orderbooks(pool)
         return pool
+
+    def category_counts(self, catalog) -> dict:
+        """catalog: [{'slug','label'}]. 返回各 curated 品类在当前奖励市场的市场数 +
+        「其他」数。钱包无关;逐 slug 查 CLOB 奖励端点,与全量取交集计数。"""
+        full = self.api.get_rewards_markets()
+        full_ids = {m.get("condition_id", "") for m in full if m.get("condition_id")}
+        category_ids = {}
+        for c in catalog:
+            slug = c["slug"]
+            try:
+                rows = self.api.get_rewards_markets(tag_slug=slug)
+                category_ids[slug] = {
+                    m.get("condition_id", "") for m in rows
+                } & full_ids
+            except Exception as e:
+                logger.warning("category_counts slug %s failed: %s", slug, e)
+                category_ids[slug] = set()
+        slugs = [c["slug"] for c in catalog]
+        counts, other = count_by_category(full_ids, category_ids, slugs)
+        cats = [
+            {"slug": c["slug"], "label": c["label"], "count": counts.get(c["slug"], 0)}
+            for c in catalog
+        ]
+        return {"categories": cats, "other_count": other}
 
     def _fetch_orderbooks(self, market: dict) -> dict:
         """抓该市场每 token 的订单簿快照(钱包无关)。抓不到的略过。"""

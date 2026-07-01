@@ -349,6 +349,19 @@ def api_save_settings():
     )
 
 
+@app.route("/api/categories", methods=["GET"])
+@login_required
+def api_categories():
+    if manager is None:
+        return jsonify({"ready": False, "categories": [], "other_count": 0})
+    try:
+        return jsonify(manager.category_catalog())
+    except Exception as e:
+        return jsonify(
+            {"ready": False, "categories": [], "other_count": 0, "error": str(e)}
+        )
+
+
 # --- API: Templates (多模板 CRUD + 钱包绑定) ---
 
 

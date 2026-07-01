@@ -365,3 +365,27 @@ class TestRewardBracket:
         assert reward_bracket(251) is None
         assert reward_bracket(0) is None
         assert reward_bracket(-5) is None
+
+
+class TestCategoryCounts:
+    def test_counts_and_other(self):
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [{"condition_id": c} for c in ("A", "B", "C", "D")]
+            return {
+                "politics": [{"condition_id": "A"}],
+                "economy": [{"condition_id": "A"}, {"condition_id": "B"}],
+            }.get(tag_slug, [])
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        scanner = MarketScanner(api, MagicMock(), "")
+        catalog = [
+            {"slug": "politics", "label": "政治"},
+            {"slug": "economy", "label": "经济"},
+        ]
+        out = scanner.category_counts(catalog)
+        counts = {c["slug"]: c["count"] for c in out["categories"]}
+        assert counts == {"politics": 1, "economy": 2}
+        assert [c["label"] for c in out["categories"]] == ["政治", "经济"]
+        assert out["other_count"] == 2  # C、D

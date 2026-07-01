@@ -12,6 +12,7 @@ import threading
 import time
 from api.polymarket_api import PolymarketAPI
 from api.proxy import use_proxy
+from config import CATEGORY_CATALOG
 from engine.scanner import MarketScanner
 from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
@@ -390,6 +391,8 @@ class EngineManager:
         self._scanner_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._scanner_api: PolymarketAPI | None = None  # Shared API for scanning
+        self._catalog_cache = None
+        self._catalog_cache_ts = 0.0
         self.eligible_markets: list[dict] = []  # Latest scan results
         self.last_scan_time: float = 0
         self.scan_status: str = "idle"  # idle, scanning, done
@@ -452,35 +455,58 @@ class EngineManager:
                     logger.error("Error cancelling orders for %s: %s", address, e)
         logger.info("Cancelled all buy orders across all wallets")
 
+    def _ensure_scanner_api(self):
+        """确保 _scanner_api 就绪:优先复用运行中 worker 的 API,否则用首个启用钱包新建。
+        无可用钱包时保持 None。"""
+        if self._scanner_api:
+            return
+        if self.engines:
+            self._scanner_api = next(iter(self.engines.values())).api
+            return
+        wallets = self.db.list_wallets()
+        enabled = [w for w in wallets if w["enabled"]]
+        if not enabled:
+            logger.error("No wallets available for scanning")
+            return
+        pk = decrypt(enabled[0]["encrypted_key"], self.encryption_key)
+        self._scanner_api = PolymarketAPI(
+            pk,
+            signature_type=enabled[0].get("signature_type", 2),
+            funder=enabled[0].get("funder") or None,
+            proxy=enabled[0].get("proxy") or None,
+        )
+        logger.info("Created scanner API from wallet %s", enabled[0]["address"])
+
     def scan_markets(self):
         """Run a single scan to produce the eligible markets list.
 
         Updates scan_status/scan_progress in real-time for frontend polling.
         """
+        self._ensure_scanner_api()
         if not self._scanner_api:
-            if self.engines:
-                self._scanner_api = next(iter(self.engines.values())).api
-            else:
-                # No workers running, create API from first enabled wallet
-                wallets = self.db.list_wallets()
-                enabled = [w for w in wallets if w["enabled"]]
-                if not enabled:
-                    logger.error("No wallets available for scanning")
-                    return
-                pk = decrypt(enabled[0]["encrypted_key"], self.encryption_key)
-                self._scanner_api = PolymarketAPI(
-                    pk,
-                    signature_type=enabled[0].get("signature_type", 2),
-                    funder=enabled[0].get("funder") or None,
-                    proxy=enabled[0].get("proxy") or None,
-                )
-                logger.info("Created scanner API from wallet %s", enabled[0]["address"])
+            return
 
         eligible = self._scan_with_status()
 
         # Persist to database (replace old data)
         self.db.save_eligible_markets(eligible)
         logger.info("Saved %d eligible markets to database", len(eligible))
+
+    def category_catalog(self) -> dict:
+        """供配置页勾选:各 curated 品类实时市场数 + 「其他」数。600s 内存缓存。"""
+        now = time.time()
+        if self._catalog_cache and (now - self._catalog_cache_ts) < 600:
+            return self._catalog_cache
+        self._ensure_scanner_api()
+        if not self._scanner_api:
+            return {"ready": False, "categories": [], "other_count": 0}
+        scanner = MarketScanner(self._scanner_api, self.db, "")
+        with use_proxy(getattr(self._scanner_api, "proxy_url", None)):
+            result = scanner.category_counts(CATEGORY_CATALOG)
+        result["ready"] = True
+        self._catalog_cache = result
+        self._catalog_cache_ts = now
+        return result
 
     def place_all_orders(self):
         """每钱包按自己模板从候选池精筛后下单。"""
