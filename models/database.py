@@ -2,6 +2,7 @@
 
 import sqlite3
 import json
+import threading
 import time
 from config import DEFAULTS, ENGINE_DEFAULTS, TEMPLATE_DEFAULTS
 
@@ -9,16 +10,47 @@ from config import DEFAULTS, ENGINE_DEFAULTS, TEMPLATE_DEFAULTS
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self.conn = None
+        # 每个线程一条独立连接。sqlite 连接不能安全地被多线程共享:曾用单个共享连接
+        # (check_same_thread=False)且全程无锁,多 worker 并发时会把读结果冲坏——
+        # get_template_for 偶发读到默认模板、离场按错阈值(20% 而非 80%)强平在手持仓
+        # (2026-06-27 事故)。改为线程内惰性建连 + WAL,让读写互不阻塞、各自独立。
+        self._local = threading.local()
+        self._connections: list[sqlite3.Connection] = []
+        self._conn_lock = threading.Lock()
+
+    def _new_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        # WAL:读快照不阻塞写、写不阻塞读;busy_timeout:写-写争用时等待而非立即报错。
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        with self._conn_lock:
+            self._connections.append(conn)
+        return conn
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """本线程专属连接,首次访问时惰性创建;每个连接只被其创建线程使用。"""
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._new_conn()
+            self._local.conn = c
+        return c
 
     def init(self):
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        # 触发本线程建连 + 建表 + 迁移。WAL/schema 落到库文件,其余线程各自连上即可见。
         self._create_tables()
 
     def close(self):
-        if self.conn:
-            self.conn.close()
+        with self._conn_lock:
+            for c in self._connections:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            self._connections.clear()
+        self._local = threading.local()
 
     def _create_tables(self):
         c = self.conn.cursor()
@@ -570,7 +602,7 @@ class Database:
     # --- Cooldowns ---
 
     def set_cooldown(self, wallet: str, market_id: str, minutes: int):
-        expires_at = time.time() + minutes * 60
+        expires_at = time.time() + int(minutes or 0) * 60
         c = self.conn.cursor()
         c.execute(
             "INSERT OR REPLACE INTO cooldowns (wallet, market_id, expires_at) VALUES (?, ?, ?)",
