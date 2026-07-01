@@ -364,7 +364,7 @@ class WalletWorker:
                 side="买入",
                 price=price,
                 size=shares,
-                reason="多档:在奖励区间内按累加厚度规则表挂买单",
+                reason="多档:在奖励区间内按累计厚度规则表挂买单",
                 price_basis=(
                     f"档价 {price:.4f}（{side.get('outcome','')}）；"
                     f"奖励区间[{side['reward_range_min']:.4f},{side['reward_range_max']:.4f}]；"
