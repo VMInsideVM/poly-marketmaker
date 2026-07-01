@@ -254,12 +254,14 @@ class MarketScanner:
             size_hi = min(250, int(template.get("rewards_min_size_max", 250) or 250))
             if not (size_lo <= min_size <= size_hi):
                 continue
-            # v4 §3:单份奖励(每日LP奖励÷最低份数) >= 该取档阈值(向上取档) -> 通过
-            bracket = reward_bracket(min_size)
-            per_share = market_reward / min_size
-            thresholds = template.get("per_share_reward_thresholds", {})
-            if per_share < float(thresholds.get(str(bracket), 0.30)):
-                continue
+            # v4 §3:单份奖励(每日LP奖励÷最低份数) >= 该取档阈值(向上取档) -> 通过。
+            # 可整体关闭(per_share_reward_enabled=False):跳过本门槛,其余筛选照常。
+            if template.get("per_share_reward_enabled", True):
+                bracket = reward_bracket(min_size)
+                per_share = market_reward / min_size
+                thresholds = template.get("per_share_reward_thresholds", {})
+                if per_share < float(thresholds.get(str(bracket), 0.30)):
+                    continue
             neg_risk = market.get("neg_risk", False)
             books = market.get("_orderbooks", {})
             valid_tokens = [

@@ -59,6 +59,8 @@ TEMPLATE_DEFAULTS = {
     "max_exposure_shares": 500,
     "max_concurrent_markets": 10,
     "min_price_double_cents": 10,
+    # 单份奖励阈值筛选总开关(每模板);False=整段跳过,其余筛选不受影响。
+    "per_share_reward_enabled": True,
     # 单份奖励阈值档位(SP4)
     "per_share_reward_thresholds": {
         "20": 0.30,

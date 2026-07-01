@@ -367,6 +367,20 @@ class TestFilterForTemplate:
         out = scanner.filter_for_template(pool, tmpl, "0xW")
         assert {e["rewards_min_size"] for e in out} == {20}
 
+    def test_per_share_disabled_lets_low_through(self):
+        scanner = self._scanner()
+        # 单份奖励 20/100 = 0.20 < 0.30,但关掉开关 -> 应放行
+        pool = [self._candidate("A", [], daily_reward=20)]
+        tmpl = self._template(per_share_reward_enabled=False)
+        out = scanner.filter_for_template(pool, tmpl, "0xW")
+        assert any(e["market_id"] == "A" for e in out)
+
+    def test_per_share_enabled_by_default_still_excludes(self):
+        scanner = self._scanner()
+        pool = [self._candidate("A", [], daily_reward=20)]
+        # _template 不设该键 -> 默认启用 -> 仍剔除
+        assert scanner.filter_for_template(pool, self._template(), "0xW") == []
+
     def test_rewards_min_size_default_range_passes_all(self):
         scanner = self._scanner()
         pool = [

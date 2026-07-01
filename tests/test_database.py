@@ -48,6 +48,7 @@ def test_config_split_engine_and_template_defaults():
     assert DEFAULTS["min_reward_usd"] == 100.0
     assert set(ENGINE_DEFAULTS) & set(TEMPLATE_DEFAULTS) == set()
     assert ENGINE_DEFAULTS["discovery_interval_sec"] == 14400
+    assert TEMPLATE_DEFAULTS["per_share_reward_enabled"] is True
 
 
 def test_template_defaults_has_multitier_keys():
