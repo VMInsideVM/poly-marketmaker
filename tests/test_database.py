@@ -37,7 +37,10 @@ def test_config_split_engine_and_template_defaults():
         "rewards_cache_ttl_sec",
         "discovery_interval_sec",
     }
-    assert TEMPLATE_DEFAULTS["excluded_categories"] == ["sports", "esports", "weather"]
+    assert "excluded_categories" not in TEMPLATE_DEFAULTS
+    assert TEMPLATE_DEFAULTS["include_other"] is True
+    assert "sports" not in TEMPLATE_DEFAULTS["included_categories"]
+    assert "politics" in TEMPLATE_DEFAULTS["included_categories"]
     assert TEMPLATE_DEFAULTS["min_reward_usd"] == 100.0
     assert "stop_loss_pct" not in TEMPLATE_DEFAULTS
     # 向后兼容:DEFAULTS 仍是两者合并(get_settings 在最后一个任务前仍用它)
@@ -484,12 +487,14 @@ class TestTemplateCRUD:
             db.create_template("保守")
 
     def test_save_and_get_template_merges_defaults(self, db):
+        from config import TEMPLATE_DEFAULTS
+
         tid = db.create_template("激进")
         db.save_template(tid, {"max_spread_cents": 6.0})
         t = db.get_template(tid)
         assert t["max_spread_cents"] == 6.0
         assert t["min_reward_usd"] == 100.0
-        assert t["excluded_categories"] == ["sports", "esports", "weather"]
+        assert t["included_categories"] == TEMPLATE_DEFAULTS["included_categories"]
         assert "scan_interval_sec" not in t
 
     def test_default_template_exists_after_init(self, db):

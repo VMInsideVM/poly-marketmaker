@@ -3,6 +3,32 @@
 import os
 import sys
 
+# curated 品类名单(白名单勾选来源)。slug 须是 CLOB /rewards/markets/multi 的 tag_slug
+# 可识别值(已实测 politics/geopolitics/world/elections/economy/finance/crypto/sports/
+# esports/games/weather/ai/tech/culture 均返回合理子集)。顺序即配置页展示顺序。
+CATEGORY_CATALOG = [
+    {"slug": "politics", "label": "政治"},
+    {"slug": "geopolitics", "label": "地缘政治"},
+    {"slug": "world", "label": "国际"},
+    {"slug": "elections", "label": "选举"},
+    {"slug": "economy", "label": "经济"},
+    {"slug": "finance", "label": "金融"},
+    {"slug": "crypto", "label": "加密货币"},
+    {"slug": "sports", "label": "体育"},
+    {"slug": "esports", "label": "电竞"},
+    {"slug": "games", "label": "游戏"},
+    {"slug": "weather", "label": "天气"},
+    {"slug": "ai", "label": "人工智能"},
+    {"slug": "tech", "label": "科技"},
+    {"slug": "culture", "label": "文化"},
+]
+CATALOG_SLUGS = frozenset(c["slug"] for c in CATEGORY_CATALOG)
+# 默认延续升级前行为:体育/电竞/天气不做,其余(含未分类)都做。
+_DEFAULT_EXCLUDED = {"sports", "esports", "weather"}
+DEFAULT_INCLUDED_CATEGORIES = [
+    c["slug"] for c in CATEGORY_CATALOG if c["slug"] not in _DEFAULT_EXCLUDED
+]
+
 # 引擎级参数:全局单值,所有钱包共用,存 settings 表。
 ENGINE_DEFAULTS = {
     "scan_interval_sec": 30,
@@ -25,7 +51,8 @@ TEMPLATE_DEFAULTS = {
     "stop_loss_percent": 20,  # 按比例时:成本的百分比(最大回撤)
     "theta_stop_cents": 5,  # 按固定金额时:亏损达到这么多美分即强平
     "case_a_mode": "ask",
-    "excluded_categories": ["sports", "esports", "weather"],
+    "included_categories": DEFAULT_INCLUDED_CATEGORIES,
+    "include_other": True,
     # 多档挂单(SP2)
     "tier_rules": [[{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)],
     "max_exposure_usd": 250,
