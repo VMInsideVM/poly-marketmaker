@@ -1,57 +1,55 @@
-"""engine/categories.py — 品类排除纯函数(不触网)。
+"""engine/categories.py — 品类白名单纯函数(不触网)。
 
-采集器按品类黑名单在采集阶段排除市场:
-- queried_categories: 所有模板排除集的并集 = 需向服务端查询的品类(打标签 + 相减)。
-- excluded_intersection: 所有模板共同排除的品类 = 可在采集阶段安全删除的品类
-  (某模板独有的排除项留到每钱包精筛 narrow,避免误删别的模板需要的市场)。
-- partition_candidates: 全量市场减去交集品类命中者,并给每条候选打 tags。
+采集器对整份 curated 名单给市场打标签(tag_pool),再按白名单判定(market_wanted):
+- included_union: 所有模板 included_categories 的并集(发现阶段预筛用的"想要"集)。
+- any_include_other: 是否有模板收「其他/未分类」(决定预筛是否保留无 curated 标签者)。
+- market_wanted: 命中 included,或(空 tags 且 include_other)。空 tags 恒指"无 curated
+  标签"——故打标签必须覆盖整份 catalog,否则未勾选品类会被误判成「其他」。
 """
 
 
-def queried_categories(templates: list[dict]) -> set:
+def included_union(templates: list[dict]) -> set:
     out = set()
     for t in templates:
-        out.update(t.get("excluded_categories", []) or [])
+        out.update(t.get("included_categories", []) or [])
     return out
 
 
-def excluded_intersection(templates: list[dict]) -> set:
-    sets = [set(t.get("excluded_categories", []) or []) for t in templates]
-    if not sets:
-        return set()
-    out = sets[0]
-    for s in sets[1:]:
-        out = out & s
-    return out
+def any_include_other(templates: list[dict]) -> bool:
+    return any(bool(t.get("include_other", False)) for t in templates)
 
 
-def partition_candidates(
-    full_markets: list[dict],
-    category_ids: dict,
-    intersection_slugs: set,
-) -> list[dict]:
-    """全量市场 - 交集品类命中者,并给每条候选打 tags。
+def tag_pool(full_markets: list[dict], category_ids: dict, catalog_slugs) -> list[dict]:
+    """给每条市场加 tags = 命中的 catalog slug(有序);不删除任何市场。
 
     Args:
         full_markets: 全量奖励市场(每条含 condition_id)。
-        category_ids: {品类 slug: set(condition_id)},采集器逐品类查询所得。
-        intersection_slugs: 采集阶段要删的品类(= 所有模板共同排除集)。
-
-    Returns:
-        候选池:移除属于任一交集品类的市场,并为每条加 tags =
-        它命中的(被查询过的)品类 slug 列表。
+        category_ids: {catalog slug: set(condition_id)},逐 slug 查询所得。
+        catalog_slugs: 打标签的 curated slug 全集(决定 tags 与「其他」判定)。
     """
-    removed = set()
-    for slug in intersection_slugs:
-        removed |= category_ids.get(slug, set())
-
+    ordered = list(catalog_slugs)
     pool = []
     for m in full_markets:
         cid = m.get("condition_id", "")
-        if cid in removed:
-            continue
-        tags = [slug for slug, ids in category_ids.items() if cid in ids]
+        tags = [s for s in ordered if cid in category_ids.get(s, set())]
         entry = dict(m)
         entry["tags"] = tags
         pool.append(entry)
     return pool
+
+
+def market_wanted(tags, included, include_other: bool) -> bool:
+    tags = tags or []
+    if set(included) & set(tags):
+        return True
+    return bool(include_other) and not tags
+
+
+def count_by_category(full_ids, category_ids: dict, catalog_slugs):
+    """返回 ({slug: 命中数}, 其他数)。计数在整全量集上做,与是否被勾选无关。"""
+    counts = {s: len(category_ids.get(s, set())) for s in catalog_slugs}
+    covered = set()
+    for s in catalog_slugs:
+        covered |= category_ids.get(s, set())
+    other = len(set(full_ids) - covered)
+    return counts, other
