@@ -1,6 +1,7 @@
 """tests/test_laddering.py — 多档挂单纯函数(不触网)。"""
 
 from engine.laddering import build_ladder
+from engine.laddering import compute_market_ladders
 
 
 def _b(price, size):
@@ -350,3 +351,51 @@ def test_build_ladder_risk_mode_ignores_thickness_gate():
     )
     assert [r["price"] for r in ladder] == [0.15]
     assert ladder[0]["match_value"] == 0.5  # 0.5/1
+
+
+def test_compute_ladders_risk_mode_places_by_risk_table():
+    # tier_rule:风险系数>1.5 -> min_size,否则不挂。两档 rc 都=2 -> 都挂 min_size=100。
+    rule = [
+        {"upper": 1.5, "action": {"type": "min_size"}},
+        {"upper": None, "action": {"type": "skip"}},
+    ]
+    side = {
+        "bids": [{"price": "0.15", "size": "200"}, {"price": "0.23", "size": "300"}],
+        "reward_range_min": 0.0,
+        "reward_range_max": 1.0,
+        "min_size": 100,
+    }
+    out = compute_market_ladders(
+        side,
+        None,
+        [rule, rule],
+        100000.0,
+        100000,
+        tier_match_var="risk_coefficient",
+        amount_value_table=_AVT,
+    )
+    assert out["a"] == [(0.15, 100), (0.23, 100)]
+
+
+def test_compute_ladders_risk_mode_skips_low_risk():
+    # 薄档 rc=0.5 < 1.5 -> 命中「其余→skip」-> 不挂
+    rule = [
+        {"upper": 1.5, "action": {"type": "min_size"}},
+        {"upper": None, "action": {"type": "skip"}},
+    ]
+    side = {
+        "bids": [{"price": "0.15", "size": "50"}],
+        "reward_range_min": 0.0,
+        "reward_range_max": 1.0,
+        "min_size": 100,
+    }
+    out = compute_market_ladders(
+        side,
+        None,
+        [rule, rule],
+        100000.0,
+        100000,
+        tier_match_var="risk_coefficient",
+        amount_value_table=_AVT,
+    )
+    assert out["a"] == []

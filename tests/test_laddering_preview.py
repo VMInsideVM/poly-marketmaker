@@ -82,3 +82,37 @@ def test_none_side_returns_none():
     out = preview_market_ladders(None, _side("NO"), TIER_RULES, 1000.0, 10000)
     assert out["a"] is None
     assert out["b"]["outcome"] == "NO"
+
+
+_AVT = [
+    {"upper": 0.20, "value": 1},
+    {"upper": 0.25, "value": 1.5},
+    {"upper": 0.30, "value": 2},
+]
+
+
+def test_preview_risk_mode_marks_price_over_table():
+    side = {
+        "outcome": "YES",
+        "token_id": "t",
+        "min_size": 100,
+        "best_bid": 0.4,
+        "best_ask": 0.45,
+        "spread_cents": 5,
+        "reward_range_min": 0.0,
+        "reward_range_max": 1.0,
+        "bids": [{"price": "0.40", "size": "500"}, {"price": "0.15", "size": "200"}],
+    }
+    rule = [{"upper": None, "action": {"type": "min_size"}}]
+    out = preview_market_ladders(
+        side,
+        None,
+        [rule, rule],
+        100000.0,
+        100000,
+        tier_match_var="risk_coefficient",
+        amount_value_table=_AVT,
+    )
+    levels = {L["price"]: L for L in out["a"]["levels"]}
+    assert levels[0.40]["skip_reason"] == "价超金额表"
+    assert levels[0.15]["match_value"] == 2.0  # 200/100 / 1

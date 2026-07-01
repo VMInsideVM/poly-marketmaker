@@ -89,11 +89,9 @@ def _interval_action(tier_rule, ct):
     return {"type": "skip"}
 
 
-def resolve_tier_share(
-    cumulative_thickness, tier_rule, price, min_size, remaining_budget_usd
-):
+def resolve_tier_share(match_value, tier_rule, price, min_size, remaining_budget_usd):
     """按该档累加厚度命中的区间动作,算份额(int>=0,0=不挂)。"""
-    action = _interval_action(tier_rule, cumulative_thickness)
+    action = _interval_action(tier_rule, match_value)
     t = action.get("type")
     if t == "min_size":
         return int(min_size)
@@ -110,7 +108,13 @@ def resolve_tier_share(
 
 
 def compute_market_ladders(
-    side_a, side_b, tier_rules, market_budget_usd, max_exposure_shares
+    side_a,
+    side_b,
+    tier_rules,
+    market_budget_usd,
+    max_exposure_shares,
+    tier_match_var="cumulative_thickness",
+    amount_value_table=None,
 ):
     """两边共享敞口算多档计划。
 
@@ -130,6 +134,8 @@ def compute_market_ladders(
                 side["reward_range_max"],
                 side["min_size"],
                 tiers_k,
+                tier_match_var,
+                amount_value_table,
             )
     out = {"a": [], "b": []}
     spent_usd = 0.0
@@ -140,10 +146,10 @@ def compute_market_ladders(
                 continue
             rung = rungs[key][j]
             price = rung["price"]
-            ct = rung["cumulative_thickness"]
+            mv = rung["match_value"]
             remaining_usd = market_budget_usd - spent_usd
             shares = resolve_tier_share(
-                ct, tier_rules[j], price, side["min_size"], remaining_usd
+                mv, tier_rules[j], price, side["min_size"], remaining_usd
             )
             if shares <= 0:
                 continue
@@ -211,8 +217,10 @@ def reconcile_buy_orders(ladder, resting_buys):
     return cancel_ids, to_place
 
 
-def _verbose_levels(side, tiers_k):
-    """每个 bid 价位 -> 标注 dict;合格档(in_range 且厚度>=1)按序给 tier_index(<tiers_k)。"""
+def _verbose_levels(
+    side, tiers_k, tier_match_var="cumulative_thickness", amount_value_table=None
+):
+    """每个 bid 价位 -> 标注 dict;合格档按序给 tier_index(<tiers_k)。"""
     min_size = side["min_size"]
     rmin, rmax = side["reward_range_min"], side["reward_range_max"]
     levels, running, tier_no = [], 0.0, 0
@@ -221,10 +229,18 @@ def _verbose_levels(side, tiers_k):
         thickness = size / min_size if min_size > 0 else 0.0
         running += thickness
         in_range = rmin <= price <= rmax
-        qualifies = in_range and thickness >= 1
+        if tier_match_var == "risk_coefficient":
+            av = amount_value(price, amount_value_table)
+            qualifies = in_range and bool(av) and av > 0
+            match_value = (thickness / av) if (av and av > 0) else running
+            oor_reason = "超出奖励范围" if not in_range else "价超金额表"
+        else:
+            qualifies = in_range and thickness >= 1
+            match_value = running
+            oor_reason = "超出奖励范围" if not in_range else "厚度<1"
         tier_index, skip_reason = None, None
         if not qualifies:
-            skip_reason = "超出奖励范围" if not in_range else "厚度<1"
+            skip_reason = oor_reason
         elif tier_no < tiers_k:
             tier_index, tier_no = tier_no, tier_no + 1
         else:
@@ -235,6 +251,7 @@ def _verbose_levels(side, tiers_k):
                 "size": size,
                 "thickness": thickness,
                 "cumulative_thickness": running,
+                "match_value": match_value,
                 "in_range": in_range,
                 "qualifies": qualifies,
                 "tier_index": tier_index,
@@ -246,7 +263,15 @@ def _verbose_levels(side, tiers_k):
     return levels
 
 
-def preview_market_ladders(side_a, side_b, tier_rules, budget_usd, max_shares):
+def preview_market_ladders(
+    side_a,
+    side_b,
+    tier_rules,
+    budget_usd,
+    max_shares,
+    tier_match_var="cumulative_thickness",
+    amount_value_table=None,
+):
     """两边共享敞口的逐档预演(只读、不下单)。
 
     分配口径与 compute_market_ladders 一致(档序升序、同档先 a 后 b、resolve_tier_share
@@ -263,7 +288,7 @@ def preview_market_ladders(side_a, side_b, tier_rules, budget_usd, max_shares):
         if side is None:
             out[key], lv[key] = None, []
             continue
-        lv[key] = _verbose_levels(side, tiers_k)
+        lv[key] = _verbose_levels(side, tiers_k, tier_match_var, amount_value_table)
         out[key] = {
             "outcome": side.get("outcome", ""),
             "token_id": side.get("token_id", ""),
@@ -290,10 +315,10 @@ def preview_market_ladders(side_a, side_b, tier_rules, budget_usd, max_shares):
             L = by_tier[key].get(j)
             if L is None:
                 continue
-            price, ct = L["price"], L["cumulative_thickness"]
+            price, mv = L["price"], L["match_value"]
             remaining_usd = budget_usd - spent_usd
             shares = resolve_tier_share(
-                ct, tier_rules[j], price, side["min_size"], remaining_usd
+                mv, tier_rules[j], price, side["min_size"], remaining_usd
             )
             if shares <= 0:
                 L["skip_reason"] = "规则判定不挂"
