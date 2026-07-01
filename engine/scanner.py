@@ -2,13 +2,15 @@
 
 Two-phase design:
 - fetch_candidates(templates): wallet-independent network work. Fetches all reward
-  markets, excludes blacklisted-category markets at collection time (the category
-  intersection across templates), tags survivors, pre-filters by the loosest reward
-  floor, fetches precise per-market reward, and caches each token's orderbook. Does
-  NOT compute order prices.
+  markets, tags each with the curated categories it matches (queried per tag_slug over
+  the full CATALOG_SLUGS), pre-filters to markets wanted by at least one template
+  (whitelist union of included_categories, plus the "other" bucket when some template
+  sets include_other) and by the loosest reward floor, fetches precise per-market
+  reward, and caches each token's orderbook. Does NOT compute order prices.
 - filter_for_template(pool, template, wallet): per-wallet CPU work. Applies the
-  template's thresholds (reward floor, settlement, price band, spread), narrows by the
-  template's excluded_categories, checks cooldown. Does NOT compute prices or costs —
+  template's thresholds (reward floor, settlement, price band, spread), keeps only
+  markets matching the template's included_categories (or untagged when include_other),
+  checks cooldown. Does NOT compute prices or costs —
   pricing and sizing happen at placement time (place_orders).
 
 Optional on_progress(checked, total, msg) / on_found(market) callbacks fire per
