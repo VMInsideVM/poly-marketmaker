@@ -117,6 +117,7 @@ function renderLadder(data) {
     if (!data.sides || !data.sides.length) {
         return '<span class="metric-note">无可预演的方向（订单簿缺失或预算为 0）</span>';
     }
+    const isRisk = data.tier_match_var === 'risk_coefficient';
     return data.sides.map(s => {
         const rows = s.levels.map(L => {
             const tier = L.tier_index != null
@@ -131,12 +132,13 @@ function renderLadder(data) {
                 <td>${L.size}</td>
                 <td>${L.thickness.toFixed(2)}</td>
                 <td>${L.cumulative_thickness.toFixed(2)}</td>
+                ${isRisk ? `<td>${L.match_value != null ? L.match_value.toFixed(2) : '—'}</td>` : ''}
                 ${last}</tr>`;
         }).join('');
         return `<div class="metric-note" style="margin-bottom:6px">${escapeHtml(s.outcome)} 方向 · 奖励范围 [${s.reward_range[0].toFixed(2)}, ${s.reward_range[1].toFixed(2)}] · 盘口价差 ${s.spread_cents.toFixed(0)}¢</div>
         <table class="data-table">
             <thead><tr>
-                <th>档</th><th>有效价格</th><th>盘口量</th><th>订单厚度</th><th>累加厚度</th><th>命中 → 份额</th><th>金额</th>
+                <th>档</th><th>有效价格</th><th>盘口量</th><th>订单厚度</th><th>累加厚度</th>${isRisk ? '<th>风险系数</th>' : ''}<th>命中 → 份额</th><th>金额</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>

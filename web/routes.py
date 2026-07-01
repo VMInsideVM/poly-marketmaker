@@ -1031,6 +1031,7 @@ def api_market_ladder(market_id):
             "budget_usd": budget,
             "shares_budget": shares_budget,
             "sides": sides,
+            "tier_match_var": tier_match_var,
         }
     )
 

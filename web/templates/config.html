@@ -127,7 +127,7 @@
         </div>
 
         <h3>多档挂单规则</h3>
-        <p style="color:#888;font-size:12px;margin-top:4px;">每档从买一往下；每行「累加厚度 &gt; X → 动作」，取第一个命中的区间，末行「其余」兜底。多行阈值须<b>从大到小</b>填（否则小阈值会遮住大的）。动作：最小份数 / 固定份数 / 固定金额 / 钱包全额 / 不挂。</p>
+        <p style="color:#888;font-size:12px;margin-top:4px;">每档从买一往下；每行「<b id="tier-var-name">累加厚度</b> &gt; X → 动作」，取第一个命中的区间，末行「其余」兜底。多行阈值须<b>从大到小</b>填（否则小阈值会遮住大的）。动作：最小份数 / 固定份数 / 固定金额 / 钱包全额 / 不挂。</p>
         <div id="tier-rules-editor"></div>
         <button type="button" class="btn" onclick="addTier()">+ 加一档</button>
         <button type="submit" class="btn btn-primary">保存策略参数</button>
@@ -237,11 +237,21 @@ function updateStopMode() {
     if (cents) cents.style.display = (mode === 'fixed') ? '' : 'none';
 }
 
-// 区间变量切换:只有风险系数模式才显示金额数值表。
+// 区间变量当前中文名(累加厚度 / 风险系数),供档规则的行标签与说明动态显示。
+function tierVarName() {
+    const v = (document.getElementById('tier-match-var') || {}).value || 'cumulative_thickness';
+    return (v === 'risk_coefficient') ? '风险系数' : '累加厚度';
+}
+
+// 区间变量切换:切金额表显隐,并把档规则里的「阈值变量」标签/说明同步成当前变量名。
 function updateTierMatchVar() {
     const v = (document.getElementById('tier-match-var') || {}).value || 'cumulative_thickness';
     const g = document.getElementById('amount-value-group');
     if (g) g.style.display = (v === 'risk_coefficient') ? '' : 'none';
+    const name = tierVarName();
+    const noteVar = document.getElementById('tier-var-name');
+    if (noteVar) noteVar.textContent = name;
+    document.querySelectorAll('#tier-rules-editor .thr-prefix').forEach(s => { s.textContent = name; });
 }
 
 function makeAmountRow(cents, value) {
@@ -296,7 +306,7 @@ function makeIntervalRow(interval, isCatchAll) {
     row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:4px 0;flex-wrap:wrap';
     const upperHtml = isCatchAll
         ? '<span>其余</span>'
-        : `厚度 &gt; <input class="upper-input" type="number" step="0.1" style="width:70px" value="${(interval && interval.upper != null) ? interval.upper : ''}">`;
+        : `<span class="thr-prefix">${tierVarName()}</span> &gt; <input class="upper-input" type="number" step="0.1" style="width:70px" value="${(interval && interval.upper != null) ? interval.upper : ''}">`;
     let paramVal = '';
     if (type === 'fixed_shares') paramVal = (action.shares != null) ? action.shares : '';
     if (type === 'fixed_amount') paramVal = (action.usd != null) ? action.usd : '';
@@ -475,7 +485,7 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     const badUpper = Array.from(
         document.querySelectorAll('#tier-rules-editor .interval-row:not(.catch-all) .upper-input')
     ).some(inp => inp.value === '' || isNaN(parseFloat(inp.value)));
-    if (badUpper) { alert('请填写每个区间的厚度阈值'); return; }
+    if (badUpper) { alert('请填写每个区间的' + tierVarName() + '阈值'); return; }
     const badParam = Array.from(
         document.querySelectorAll('#tier-rules-editor .interval-row')
     ).some(row => {
