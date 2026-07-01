@@ -56,6 +56,14 @@
                 <input type="number" name="min_settlement_days" step="1">
             </div>
             <div class="form-group">
+                <label>奖励最低份额下限</label>
+                <input type="number" name="rewards_min_size_min" step="1">
+            </div>
+            <div class="form-group">
+                <label>奖励最低份额上限</label>
+                <input type="number" name="rewards_min_size_max" step="1">
+            </div>
+            <div class="form-group">
                 <label>止损方式</label>
                 <select name="stop_loss_mode" id="stop-loss-mode" onchange="updateStopMode()">
                     <option value="percent">按比例（占成本 %）</option>
@@ -102,6 +110,20 @@
             <div class="form-group"><label>100 档</label><input type="number" step="0.01" data-bracket="100"></div>
             <div class="form-group"><label>200 档</label><input type="number" step="0.01" data-bracket="200"></div>
             <div class="form-group"><label>250 档</label><input type="number" step="0.01" data-bracket="250"></div>
+        </div>
+
+        <h3>区间变量与金额数值表</h3>
+        <div class="form-group">
+            <label>区间变量（下方多档规则的阈值按此匹配）</label>
+            <select name="tier_match_var" id="tier-match-var" onchange="updateTierMatchVar()">
+                <option value="cumulative_thickness">累计厚度</option>
+                <option value="risk_coefficient">风险系数</option>
+            </select>
+        </div>
+        <div class="form-group" id="amount-value-group">
+            <label>金额数值表（价格档[美分] → 数值；价超此表则该档不挂）</label>
+            <div id="amount-value-rows"></div>
+            <button type="button" class="btn" onclick="addAmountRow()">+ 价格档</button>
         </div>
 
         <h3>多档挂单规则</h3>
@@ -198,6 +220,10 @@ function loadStrategy(tid) {
             inp.value = (ps[b] !== undefined) ? ps[b] : 0.30;
         });
         renderTierEditor(data.tier_rules || []);
+        document.getElementById('tier-match-var').value =
+            data.tier_match_var || 'cumulative_thickness';
+        renderAmountTable(data.amount_value_table || []);
+        updateTierMatchVar();
         updateStopMode();
     });
 }
@@ -209,6 +235,46 @@ function updateStopMode() {
     const cents = document.getElementById('stop-cents-group');
     if (pct) pct.style.display = (mode === 'percent') ? '' : 'none';
     if (cents) cents.style.display = (mode === 'fixed') ? '' : 'none';
+}
+
+// 区间变量切换:只有风险系数模式才显示金额数值表。
+function updateTierMatchVar() {
+    const v = (document.getElementById('tier-match-var') || {}).value || 'cumulative_thickness';
+    const g = document.getElementById('amount-value-group');
+    if (g) g.style.display = (v === 'risk_coefficient') ? '' : 'none';
+}
+
+function makeAmountRow(cents, value) {
+    const row = document.createElement('div');
+    row.className = 'amount-row';
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:4px 0';
+    row.innerHTML =
+        '价 ≤ <input type="number" class="av-cents" step="1" style="width:70px" value="' + cents + '"> ¢ ' +
+        '→ 数值 <input type="number" class="av-value" step="0.1" style="width:70px" value="' + value + '"> ' +
+        '<button type="button" class="btn btn-sm" onclick="this.closest(\'.amount-row\').remove()">✕</button>';
+    return row;
+}
+
+function addAmountRow() {
+    document.getElementById('amount-value-rows').appendChild(makeAmountRow(30, 1));
+}
+
+function renderAmountTable(table) {
+    const box = document.getElementById('amount-value-rows');
+    box.innerHTML = '';
+    (table && table.length ? table : []).forEach(r => {
+        box.appendChild(makeAmountRow(Math.round(r.upper * 100), r.value));
+    });
+}
+
+function serializeAmountTable() {
+    const rows = [];
+    document.querySelectorAll('#amount-value-rows .amount-row').forEach(row => {
+        const cents = parseFloat(row.querySelector('.av-cents').value);
+        const value = parseFloat(row.querySelector('.av-value').value);
+        if (!isNaN(cents) && !isNaN(value)) rows.push({upper: cents / 100, value: value});
+    });
+    return rows;
 }
 
 const ACTION_LABELS = {
@@ -396,6 +462,8 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     });
     // select 不在 input[type=number] 里,单独收。
     data.stop_loss_mode = (document.getElementById('stop-loss-mode') || {}).value || 'percent';
+    data.tier_match_var = (document.getElementById('tier-match-var') || {}).value || 'cumulative_thickness';
+    data.amount_value_table = serializeAmountTable();
     data.excluded_categories = Array.from(
         document.querySelectorAll('#excluded-categories input[type=checkbox]:checked')
     ).map(cb => cb.value);
@@ -428,7 +496,8 @@ document.getElementById('engine-form').addEventListener('submit', function(e) {
     e.preventDefault();
     const data = {};
     this.querySelectorAll('input[type=number][name]').forEach(inp => {
-        data[inp.name] = parseFloat(inp.value);
+        const v = parseFloat(inp.value);
+        if (!isNaN(v)) data[inp.name] = v;
     });
     fetch('/api/settings', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
