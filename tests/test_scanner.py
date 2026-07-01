@@ -109,6 +109,36 @@ class TestFetchCandidatesCategoryWiring:
         pool = scanner.fetch_candidates(templates, skip_orderbook=True)
         assert {m["condition_id"] for m in pool} == {"A", "C"}  # C 落入其他
 
+    def test_slug_query_failure_tolerated(self):
+        # 单个品类查询抛错(奖励端点偶发 500)不该拖垮整轮发现:该 slug 记空集,
+        # 冷启动无缓存池时也仍能产出候选池。
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [
+                    {"condition_id": "A", "tokens": [], "rewards_config": []},
+                    {"condition_id": "C", "tokens": [], "rewards_config": []},
+                ]
+            if tag_slug == "politics":
+                return [{"condition_id": "A"}]
+            raise RuntimeError("boom")  # 其余品类查询全挂
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        templates = [
+            {
+                "included_categories": ["politics"],
+                "include_other": True,
+                "min_reward_usd": 0,
+            }
+        ]
+        pool = scanner.fetch_candidates(templates, skip_orderbook=True)
+        # A 命中 politics(查询成功);C 无标签(其余 slug 失败记空集)-> 落其他,include_other 收。
+        # 关键:整轮未因单 slug 抛错而崩。
+        assert {m["condition_id"] for m in pool} == {"A", "C"}
+
     def test_no_price_computed(self):
         api = MagicMock()
         api.get_rewards_markets.return_value = [

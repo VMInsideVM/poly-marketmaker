@@ -85,8 +85,17 @@ class MarketScanner:
         full = self.api.get_rewards_markets()
         category_ids = {}
         for slug in CATALOG_SLUGS:  # 对整份 catalog 打标签(否则"其他"判定不准)
-            rows = self.api.get_rewards_markets(tag_slug=slug)
-            category_ids[slug] = {m.get("condition_id", "") for m in rows}
+            try:
+                rows = self.api.get_rewards_markets(tag_slug=slug)
+                category_ids[slug] = {m.get("condition_id", "") for m in rows}
+            except Exception as e:
+                # 单个品类查询失败不拖垮整轮发现(奖励端点偶发 500):该 slug 记空集,
+                # 其命中市场退化为"其他"(include_other 时仍会被采集)。尤其冷启动无缓存池
+                # 时,避免一次抖动导致整池空、全不下单。与 category_counts 的容错口径一致。
+                logger.warning(
+                    "Discovery tag_slug %s failed (treated as empty): %s", slug, e
+                )
+                category_ids[slug] = set()
 
         pool = tag_pool(full, category_ids, CATALOG_SLUGS)
         blacklist = self.db.get_blacklist_ids()

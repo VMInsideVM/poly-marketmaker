@@ -180,7 +180,8 @@ pytest tests/test_strategy.py     # 单个文件
 | `min_settlement_days` | 4 | 距结算的最少天数 |
 | `theta_loss_cents` / `theta_stop_cents` | 2 / 5 | 浮亏离场 / 强平止损阈值（美分） |
 | `case_a_mode` | `ask` | 成本 ≤ 买一时离场方式（`ask` 挂卖一 / `market` 市价 / `cost` 按成本价保本挂单，立即吃买盘、剩余停在成本） |
-| `excluded_categories` | `[sports, esports, weather]` | 排除品类（tag slug） |
+| `included_categories` | 除 sports/esports/weather 外全部 | 做市品类白名单（勾中的才做，tag slug） |
+| `include_other` | `true` | 是否做市「其他/未分类」（不属于任何 curated 品类的市场） |
 | `tier_rules` | 6 档 × 最小份数 | 多档挂单规则表（累加厚度 → 份额） |
 | `max_exposure_usd` / `max_exposure_shares` | 250 / 500 | 单市场最大敞口（美元 / 份数） |
 | `max_concurrent_markets` | 10 | 最大并发做市市场数 |
