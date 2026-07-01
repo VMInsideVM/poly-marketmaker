@@ -44,13 +44,18 @@ def _make_manager():
     ]
     db.get_open_buy_orders.return_value = []
     db.get_template_for.return_value = {
-        "excluded_categories": [],
+        "included_categories": ["politics"],
+        "include_other": True,
         "min_reward_usd": 100.0,
         "max_buy_orders_per_wallet": 5,
         "order_size_mode": "min",
         "order_size_custom_usd": 0.0,
     }
-    db.get_template.return_value = {"excluded_categories": [], "min_reward_usd": 100.0}
+    db.get_template.return_value = {
+        "included_categories": ["politics"],
+        "include_other": True,
+        "min_reward_usd": 100.0,
+    }
     db.get_default_template_id.return_value = 1
     manager = EngineManager(db, encryption_key=b"x" * 32)
     return manager, db

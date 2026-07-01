@@ -613,7 +613,7 @@ class EngineManager:
             self._stop_event.wait(timeout=place_interval)
 
     def _active_templates(self) -> list[dict]:
-        """所有启用钱包绑定模板(按 excluded_categories 去重),供采集器算并集/交集。"""
+        """所有启用钱包绑定模板(按 included_categories 去重),供采集器算并集/交集。"""
         try:
             wallets = self.db.list_wallets()
         except Exception:
@@ -623,10 +623,11 @@ class EngineManager:
             if not w.get("enabled"):
                 continue
             tmpl = self.db.get_template_for(w["address"])
-            # 去重键须含采集器实际用到的两个维度:品类排除集 + 奖励下限
+            # 去重键须含采集器实际用到的两个维度:品类包含集 + 奖励下限
             # (min_reward_usd 决定预筛 min_floor);只按品类去重会丢掉下限差异。
             key = (
-                tuple(sorted(tmpl.get("excluded_categories", []) or [])),
+                tuple(sorted(tmpl.get("included_categories", []) or [])),
+                bool(tmpl.get("include_other", False)),
                 tmpl.get("min_reward_usd", 0),
             )
             seen[key] = tmpl
