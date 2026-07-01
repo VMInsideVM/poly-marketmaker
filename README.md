@@ -187,6 +187,16 @@ pytest tests/test_strategy.py     # 单个文件
 | `max_concurrent_markets` | 10 | 最大并发做市市场数 |
 | `min_price_double_cents` | 10 | 双边挂单价格下限（美分） |
 | `per_share_reward_thresholds` | 各档 0.30 | 单份奖励按最低份数取档的阈值 |
+| `per_share_reward_enabled` | `true` | 单份奖励阈值筛选总开关；`false`=不按单份奖励卡这一关 |
+| `rewards_min_size_min` / `rewards_min_size_max` | 1 / 250 | 只做最低下单份数落在此范围的市场（硬顶 250） |
+| `tier_match_var` | `cumulative_thickness` | 多档规则阈值按哪个量匹配：`cumulative_thickness`（累计厚度）/ `risk_coefficient`（风险系数） |
+| `amount_value_table` | 20¢→1 / 25¢→1.5 / 30¢→2 | 仅风险系数模式用：价格档→系数；价超表的档不挂 |
+
+**几个概念怎么算 / Key metrics**
+
+- **单份奖励** = 市场每日 LP 奖励 ÷ 该市场最低下单份数(`rewards_min_size`)，即"每一手最低单每天能拿多少奖励"。例：日奖励池 $60、最低份数 20 → 单份奖励 = 60 / 20 = 3.0；若该档阈值 0.30，则 3.0 ≥ 0.30 通过。可用 `per_share_reward_enabled=false` 整体关闭这道筛选。
+- **累计厚度** = 从买一往下累加到该档的厚度之和；单档厚度 = 盘口该价位挂单量 ÷ 最低份数。例：最低份数 20，买一 0.30 挂 60 张(厚度 3)、0.29 挂 40 张(厚度 2) → 0.29 档累计厚度 = 3 + 2 = 5。多档规则「累计厚度 > X → 动作」按此分档。
+- **风险系数** = 本档厚度 ÷ 金额数值(该档价)（逐档、非累计）。金额数值表按价格档配系数(价越高系数越大)。例：金额表 20¢→1 / 25¢→1.5 / 30¢→2，某档价 0.25、厚度 3 → 风险系数 = 3 / 1.5 = 2.0；价超金额表最大档 → 该档不挂。价越高分母越大，同样厚度算出的系数越低。
 
 运行时数据位置 / Runtime data：
 - 打包运行：`%LOCALAPPDATA%\PolymarketMarketMaker\`（`market_maker.db`、`market_maker.log`）
