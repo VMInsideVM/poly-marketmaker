@@ -208,8 +208,10 @@ class MarketScanner:
                 continue  # 该钱包对此市场仍在冷却(与旧 scan 口径一致)
             max_spread_reward = float(market.get("rewards_max_spread", 2))
             min_size = int(market.get("rewards_min_size", 0) or 0)
-            # v4 §3:最低份额 0 < ≤ 250;超档无取档 -> 不做该市场
-            if not (0 < min_size <= 250):
+            # 最低份额范围筛选(可配);硬顶 250(超档无取档)。默认 1/250 = 放行全部合法档。
+            size_lo = max(1, int(template.get("rewards_min_size_min", 1) or 1))
+            size_hi = min(250, int(template.get("rewards_min_size_max", 250) or 250))
+            if not (size_lo <= min_size <= size_hi):
                 continue
             # v4 §3:单份奖励(每日LP奖励÷最低份数) >= 该取档阈值(向上取档) -> 通过
             bracket = reward_bracket(min_size)

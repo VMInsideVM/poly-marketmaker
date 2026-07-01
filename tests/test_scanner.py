@@ -270,6 +270,25 @@ class TestFilterForTemplate:
         ids = {e["market_id"] for e in out}
         assert "P" not in ids and "Q" in ids
 
+    def test_rewards_min_size_exact_match_only(self):
+        scanner = self._scanner()
+        pool = [
+            self._candidate("A", [], daily_reward=20, min_size=20),
+            self._candidate("B", [], daily_reward=50, min_size=50),
+        ]
+        tmpl = self._template(rewards_min_size_min=20, rewards_min_size_max=20)
+        out = scanner.filter_for_template(pool, tmpl, "0xW")
+        assert {e["rewards_min_size"] for e in out} == {20}
+
+    def test_rewards_min_size_default_range_passes_all(self):
+        scanner = self._scanner()
+        pool = [
+            self._candidate("A", [], daily_reward=20, min_size=20),
+            self._candidate("B", [], daily_reward=50, min_size=50),
+        ]
+        out = scanner.filter_for_template(pool, self._template(), "0xW")
+        assert {e["rewards_min_size"] for e in out} == {20, 50}
+
 
 class TestRewardBracket:
     def test_upward_bracket_mapping(self):
