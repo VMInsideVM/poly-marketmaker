@@ -972,6 +972,8 @@ def api_market_ladder(market_id):
     addr, api = next(iter(apis.items()))
     tmpl = db.get_template_for(addr)
     tier_rules = tmpl.get("tier_rules") or []
+    tier_match_var = tmpl.get("tier_match_var", "cumulative_thickness")
+    amount_value_table = tmpl.get("amount_value_table") or None
     max_exposure_usd = float(tmpl.get("max_exposure_usd", 250))
     max_exposure_shares = int(tmpl.get("max_exposure_shares", 500))
 
@@ -1018,7 +1020,9 @@ def api_market_ladder(market_id):
         )
     a = sides_in[0] if sides_in else None
     b = sides_in[1] if len(sides_in) > 1 else None
-    preview = preview_market_ladders(a, b, tier_rules, budget, shares_budget)
+    preview = preview_market_ladders(
+        a, b, tier_rules, budget, shares_budget, tier_match_var, amount_value_table
+    )
     sides = [preview[k] for k in ("a", "b") if preview.get(k)]
     return jsonify(
         {
