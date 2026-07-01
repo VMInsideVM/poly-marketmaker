@@ -20,10 +20,12 @@ import time
 import logging
 from datetime import datetime
 from engine.categories import (
-    excluded_intersection,
-    queried_categories,
-    partition_candidates,
+    included_union,
+    any_include_other,
+    tag_pool,
+    market_wanted,
 )
+from config import CATALOG_SLUGS
 from engine.strategy import reward_price_range
 
 logger = logging.getLogger(__name__)
@@ -72,18 +74,18 @@ class MarketScanner:
     ) -> list[dict]:
         """共享发现:抓全量奖励市场,按品类交集采集阶段排除,打 tags,补精确奖励。
         钱包无关、网络密集(rewards 端点)、不抓订单簿、不算价。"""
-        inter = excluded_intersection(templates)
-        queried = queried_categories(templates)
+        union = included_union(templates)
+        inc_other = any_include_other(templates)
         floors = [t.get("min_reward_usd", 0) for t in templates]
         min_floor = min(floors) if floors else 0
 
         full = self.api.get_rewards_markets()
         category_ids = {}
-        for slug in queried:
+        for slug in CATALOG_SLUGS:  # 对整份 catalog 打标签(否则"其他"判定不准)
             rows = self.api.get_rewards_markets(tag_slug=slug)
             category_ids[slug] = {m.get("condition_id", "") for m in rows}
 
-        pool = partition_candidates(full, category_ids, inter)
+        pool = tag_pool(full, category_ids, CATALOG_SLUGS)
         blacklist = self.db.get_blacklist_ids()
 
         out = []
@@ -92,6 +94,8 @@ class MarketScanner:
             cid = market.get("condition_id", "")
             if cid in blacklist:
                 continue
+            if not market_wanted(market.get("tags", []), union, inc_other):
+                continue  # 没被任何模板 include(且非其他)-> 不做昂贵的精确奖励拉取
             total_rate = sum(
                 rc.get("rate_per_day", 0) for rc in market.get("rewards_config", [])
             )
@@ -131,9 +135,9 @@ class MarketScanner:
                 on_found(market)
             out.append(market)
         logger.info(
-            "discover_candidates: %d candidates (queried %d categories)",
+            "discover_candidates: %d candidates (included union %d categories)",
             len(out),
-            len(queried),
+            len(union),
         )
         return out
 
@@ -185,11 +189,12 @@ class MarketScanner:
         max_price_cents = template["max_price_cents"]
         max_spread_cents = template["max_spread_cents"]
         min_days = template["min_settlement_days"]
-        excluded = set(template.get("excluded_categories", []) or [])
+        included = set(template.get("included_categories", []) or [])
+        include_other = bool(template.get("include_other", False))
 
         eligible = []
         for market in candidate_pool:
-            if excluded & set(market.get("tags", [])):
+            if not market_wanted(market.get("tags", []), included, include_other):
                 continue
             total_rate = sum(
                 rc.get("rate_per_day", 0) for rc in market.get("rewards_config", [])

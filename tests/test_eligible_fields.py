@@ -42,7 +42,8 @@ def _template():
         "max_price_cents": 99,
         "max_spread_cents": 3,
         "min_settlement_days": 0,
-        "excluded_categories": [],
+        "included_categories": [],
+        "include_other": True,
         "per_share_reward_thresholds": {"100": 0.30},
     }
 

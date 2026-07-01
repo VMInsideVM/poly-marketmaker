@@ -51,7 +51,7 @@ def _sample_orderbook():
 
 
 class TestFetchCandidatesCategoryWiring:
-    def test_queries_full_plus_each_category_and_subtracts(self):
+    def test_whitelist_keeps_only_included_union(self):
         def fake_rewards(tag_slug=None, **kw):
             if tag_slug is None:
                 return [
@@ -60,9 +60,8 @@ class TestFetchCandidatesCategoryWiring:
                     {"condition_id": "C", "tokens": [], "rewards_config": []},
                 ]
             return {
-                "sports": [{"condition_id": "A"}],
-                "weather": [{"condition_id": "B"}],
-                "esports": [],
+                "politics": [{"condition_id": "A"}],
+                "economy": [{"condition_id": "B"}],
             }.get(tag_slug, [])
 
         api = MagicMock()
@@ -71,14 +70,44 @@ class TestFetchCandidatesCategoryWiring:
         db.get_blacklist_ids.return_value = set()
         scanner = MarketScanner(api, db, "")
         templates = [
-            {"excluded_categories": ["sports", "weather"], "min_reward_usd": 0},
             {
-                "excluded_categories": ["sports", "weather", "esports"],
+                "included_categories": ["politics"],
+                "include_other": False,
+                "min_reward_usd": 0,
+            },
+            {
+                "included_categories": ["economy"],
+                "include_other": False,
                 "min_reward_usd": 0,
             },
         ]
         pool = scanner.fetch_candidates(templates, skip_orderbook=True)
-        assert {m["condition_id"] for m in pool} == {"C"}
+        # A(politics)+B(economy) 收;C 无 curated 标签且无人收其他 -> 丢
+        assert {m["condition_id"] for m in pool} == {"A", "B"}
+
+    def test_include_other_keeps_untagged(self):
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [
+                    {"condition_id": "A", "tokens": [], "rewards_config": []},
+                    {"condition_id": "C", "tokens": [], "rewards_config": []},
+                ]
+            return {"politics": [{"condition_id": "A"}]}.get(tag_slug, [])
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        templates = [
+            {
+                "included_categories": ["politics"],
+                "include_other": True,
+                "min_reward_usd": 0,
+            }
+        ]
+        pool = scanner.fetch_candidates(templates, skip_orderbook=True)
+        assert {m["condition_id"] for m in pool} == {"A", "C"}  # C 落入其他
 
     def test_no_price_computed(self):
         api = MagicMock()
@@ -89,22 +118,32 @@ class TestFetchCandidatesCategoryWiring:
         db.get_blacklist_ids.return_value = set()
         scanner = MarketScanner(api, db, "")
         pool = scanner.fetch_candidates(
-            [{"excluded_categories": [], "min_reward_usd": 0}], skip_orderbook=True
+            [{"included_categories": [], "include_other": True, "min_reward_usd": 0}],
+            skip_orderbook=True,
         )
         assert all("order_price" not in m for m in pool)
 
 
 class TestDiscoverAndRefreshSplit:
     def test_discover_candidates_has_no_orderbooks(self):
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [
+                    {
+                        "condition_id": "C",
+                        "tokens": [{"token_id": "C-y"}],
+                        "rewards_config": [],
+                    }
+                ]
+            return []  # C 无 curated 标签 -> 落「其他」
+
         api = MagicMock()
-        api.get_rewards_markets.return_value = [
-            {"condition_id": "C", "tokens": [{"token_id": "C-y"}], "rewards_config": []}
-        ]
+        api.get_rewards_markets.side_effect = fake_rewards
         db = MagicMock()
         db.get_blacklist_ids.return_value = set()
         scanner = MarketScanner(api, db, "")
         pool = scanner.discover_candidates(
-            [{"excluded_categories": [], "min_reward_usd": 0}]
+            [{"included_categories": [], "include_other": True, "min_reward_usd": 0}]
         )
         assert pool and all("_orderbooks" not in m for m in pool)
         api.get_spread.assert_not_called()  # 发现阶段不抓订单簿
@@ -131,17 +170,26 @@ class TestDiscoverAndRefreshSplit:
         assert "STALE" not in pool[0]["_orderbooks"]  # 覆盖写,不留陈旧
 
     def test_fetch_candidates_still_includes_orderbooks(self):
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [
+                    {
+                        "condition_id": "C",
+                        "tokens": [{"token_id": "C-y"}],
+                        "rewards_config": [],
+                    }
+                ]
+            return []  # C 无 curated 标签 -> 落「其他」
+
         api = MagicMock()
-        api.get_rewards_markets.return_value = [
-            {"condition_id": "C", "tokens": [{"token_id": "C-y"}], "rewards_config": []}
-        ]
+        api.get_rewards_markets.side_effect = fake_rewards
         api.get_spread.return_value = 0.01
         api.get_orderbook.return_value = {"bids": [], "asks": [], "tick_size": "0.01"}
         db = MagicMock()
         db.get_blacklist_ids.return_value = set()
         scanner = MarketScanner(api, db, "")
         pool = scanner.fetch_candidates(
-            [{"excluded_categories": [], "min_reward_usd": 0}]
+            [{"included_categories": [], "include_other": True, "min_reward_usd": 0}]
         )
         assert all("_orderbooks" in m for m in pool)
 
@@ -184,7 +232,8 @@ class TestFilterForTemplate:
             "max_price_cents": 90,
             "max_spread_cents": 6,
             "min_settlement_days": 0,
-            "excluded_categories": [],
+            "included_categories": ["esports", "politics"],
+            "include_other": True,
         }
         t.update(over)
         return t
@@ -194,11 +243,13 @@ class TestFilterForTemplate:
         db.is_in_cooldown.return_value = False  # filter_for_template 会查冷却
         return MarketScanner(MagicMock(), db, "")
 
-    def test_category_narrow_drops_excluded_tag(self):
+    def test_category_whitelist_keeps_only_included(self):
         scanner = self._scanner()
-        pool = [self._candidate("A", ["esports"]), self._candidate("B", [])]
+        pool = [self._candidate("A", ["esports"]), self._candidate("B", ["politics"])]
         out = scanner.filter_for_template(
-            pool, self._template(excluded_categories=["esports"]), "0xW"
+            pool,
+            self._template(included_categories=["politics"], include_other=False),
+            "0xW",
         )
         ids = {e["market_id"] for e in out}
         assert "A" not in ids and "B" in ids
@@ -217,17 +268,23 @@ class TestFilterForTemplate:
 
     def test_two_templates_yield_different_lists(self):
         scanner = self._scanner()
-        pool = [self._candidate("A", ["esports"]), self._candidate("B", [])]
+        pool = [self._candidate("A", ["esports"]), self._candidate("B", ["politics"])]
         strict = {
             e["market_id"]
             for e in scanner.filter_for_template(
-                pool, self._template(excluded_categories=["esports"]), "0xW"
+                pool,
+                self._template(included_categories=["politics"], include_other=False),
+                "0xW",
             )
         }
         loose = {
             e["market_id"]
             for e in scanner.filter_for_template(
-                pool, self._template(excluded_categories=[]), "0xW"
+                pool,
+                self._template(
+                    included_categories=["politics", "esports"], include_other=False
+                ),
+                "0xW",
             )
         }
         assert strict != loose and "A" in loose and "A" not in strict
