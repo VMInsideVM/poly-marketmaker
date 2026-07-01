@@ -102,6 +102,8 @@
         <p class="hint" style="color:#888;font-size:12px">数量为当前奖励市场中该品类的市场数（每次扫描后刷新）；勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。</p>
 
         <h3>单份奖励阈值（按最低份数取档）</h3>
+        <label class="ps-enable"><input type="checkbox" id="per-share-enabled" checked onchange="updatePerShareEnabled()"> 启用单份奖励阈值筛选</label>
+        <p class="hint" style="color:#888;font-size:12px">单份奖励 = 市场每日奖励 ÷ 该市场最低下单份数；按最低份数所在档(20/50/100/200/250)分别设阈值，低于阈值不做该市场。</p>
         <div id="per-share-thresholds" class="form-grid">
             <div class="form-group"><label>20 档</label><input type="number" step="0.01" data-bracket="20"></div>
             <div class="form-group"><label>50 档</label><input type="number" step="0.01" data-bracket="50"></div>
@@ -123,6 +125,7 @@
             <div id="amount-value-rows"></div>
             <button type="button" class="btn" onclick="addAmountRow()">+ 价格档</button>
         </div>
+        <p class="hint" style="color:#888;font-size:12px">累计厚度＝从买一往下累加的盘口深度(以最低份数为单位)；风险系数＝本档厚度 ÷ 金额数值(该档价)，价越高系数越低、价超金额表则该档不挂。</p>
 
         <h3>多档挂单规则</h3>
         <p style="color:#888;font-size:12px;margin-top:4px;">每档从买一往下；每行「<b id="tier-var-name">累加厚度</b> &gt; X → 动作」，取第一个命中的区间，末行「其余」兜底。多行阈值须<b>从大到小</b>填（否则小阈值会遮住大的）。动作：最小份数 / 固定份数 / 固定金额 / 钱包全额 / 不挂。</p>
@@ -228,6 +231,13 @@ function renderCategories(catalog, selected, includeOther) {
     if (oc) oc.textContent = catalog.ready ? ' (' + (catalog.other_count || 0) + ')' : '';
 }
 
+function updatePerShareEnabled() {
+    const on = document.getElementById('per-share-enabled').checked;
+    document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
+        inp.disabled = !on;
+    });
+}
+
 function loadStrategy(tid) {
     Promise.all([
         fetch(`/api/templates/${tid}`).then(r => r.json()),
@@ -244,6 +254,9 @@ function loadStrategy(tid) {
             const b = inp.getAttribute('data-bracket');
             inp.value = (ps[b] !== undefined) ? ps[b] : 0.30;
         });
+        document.getElementById('per-share-enabled').checked =
+            (data.per_share_reward_enabled !== false);
+        updatePerShareEnabled();
         renderTierEditor(data.tier_rules || []);
         document.getElementById('tier-match-var').value =
             data.tier_match_var || 'cumulative_thickness';
@@ -508,6 +521,7 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
         ps[inp.getAttribute('data-bracket')] = parseFloat(inp.value);
     });
     data.per_share_reward_thresholds = ps;
+    data.per_share_reward_enabled = document.getElementById('per-share-enabled').checked;
     const badUpper = Array.from(
         document.querySelectorAll('#tier-rules-editor .interval-row:not(.catch-all) .upper-input')
     ).some(inp => inp.value === '' || isNaN(parseFloat(inp.value)));
