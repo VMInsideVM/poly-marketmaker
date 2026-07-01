@@ -5,6 +5,27 @@ v4 §5:一侧最多 K 档,从买一往下取「在奖励区间内且厚度>=1」
 """
 
 
+def amount_value(price, table):
+    """金额数值查表:返回第一个 price <= upper 的 value(按 upper 升序);价超最大 upper -> None。
+
+    table: [{"upper": float, "value": float}](顺序无所谓,内部按 upper 升序取)。
+    低端下界由价格区间旗 min_price_cents 兜。表空/无匹配 -> None(该档不挂)。
+    """
+    if not table:
+        return None
+    rows = []
+    for r in table:
+        try:
+            rows.append((float(r["upper"]), float(r["value"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    rows.sort(key=lambda x: x[0])
+    for upper, value in rows:
+        if price <= upper:
+            return value
+    return None
+
+
 def build_ladder(bids, reward_range_min, reward_range_max, min_size, tiers_k):
     """构建单边档价梯。
 

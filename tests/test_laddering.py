@@ -265,3 +265,30 @@ def test_reconcile_partial_fill_within_tolerance_keeps():
     cancel_ids, to_place = reconcile_buy_orders([(0.30, 100)], resting)
     assert cancel_ids == []
     assert to_place == []
+
+
+from engine.laddering import amount_value
+
+_AVT = [
+    {"upper": 0.20, "value": 1},
+    {"upper": 0.25, "value": 1.5},
+    {"upper": 0.30, "value": 2},
+]
+
+
+def test_amount_value_buckets():
+    assert amount_value(0.15, _AVT) == 1
+    assert amount_value(0.20, _AVT) == 1  # 端点归下档
+    assert amount_value(0.23, _AVT) == 1.5
+    assert amount_value(0.30, _AVT) == 2
+
+
+def test_amount_value_out_of_range_is_none():
+    assert amount_value(0.31, _AVT) is None  # 价超最大 upper
+    assert amount_value(0.15, []) is None  # 空表
+    assert amount_value(0.15, None) is None
+
+
+def test_amount_value_unsorted_table_ok():
+    unsorted = [{"upper": 0.30, "value": 2}, {"upper": 0.20, "value": 1}]
+    assert amount_value(0.15, unsorted) == 1
