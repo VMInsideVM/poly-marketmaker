@@ -292,3 +292,61 @@ def test_amount_value_out_of_range_is_none():
 def test_amount_value_unsorted_table_ok():
     unsorted = [{"upper": 0.30, "value": 2}, {"upper": 0.20, "value": 1}]
     assert amount_value(0.15, unsorted) == 1
+
+
+def test_build_ladder_default_still_cumulative():
+    # 累计厚度模式(默认):行为与旧版一致,match_value == cumulative_thickness
+    bids = [_b(0.35, 300), _b(0.30, 150), _b(0.25, 50), _b(0.22, 200)]
+    ladder = build_ladder(bids, 0.20, 0.40, 100, 6)
+    assert [r["price"] for r in ladder] == [0.35, 0.30, 0.22]
+    for r in ladder:
+        assert r["match_value"] == r["cumulative_thickness"]
+
+
+def test_build_ladder_risk_coefficient_mode():
+    # 风险系数 = 本档厚度 / 金额数值(价)。min_size=100。
+    # 0.15: thickness 200/100=2, av=1 -> rc=2 ; 0.23: 300/100=3, av=1.5 -> rc=2
+    bids = [_b(0.15, 200), _b(0.23, 300)]
+    ladder = build_ladder(
+        bids,
+        0.0,
+        1.0,
+        100,
+        6,
+        tier_match_var="risk_coefficient",
+        amount_value_table=_AVT,
+    )
+    by_price = {r["price"]: r["match_value"] for r in ladder}
+    assert by_price[0.15] == 2.0
+    assert by_price[0.23] == 2.0
+
+
+def test_build_ladder_risk_mode_skips_price_over_table():
+    # 0.40 超金额表(最大 upper 0.30)-> 不挂;0.15 在表内 -> 入档
+    bids = [_b(0.40, 500), _b(0.15, 200)]
+    ladder = build_ladder(
+        bids,
+        0.0,
+        1.0,
+        100,
+        6,
+        tier_match_var="risk_coefficient",
+        amount_value_table=_AVT,
+    )
+    assert [r["price"] for r in ladder] == [0.15]
+
+
+def test_build_ladder_risk_mode_ignores_thickness_gate():
+    # 薄档 thickness=0.5<1,累计厚度模式会跳过;风险系数模式仍入档(交给 tier_rules 兜)
+    bids = [_b(0.15, 50)]
+    ladder = build_ladder(
+        bids,
+        0.0,
+        1.0,
+        100,
+        6,
+        tier_match_var="risk_coefficient",
+        amount_value_table=_AVT,
+    )
+    assert [r["price"] for r in ladder] == [0.15]
+    assert ladder[0]["match_value"] == 0.5  # 0.5/1

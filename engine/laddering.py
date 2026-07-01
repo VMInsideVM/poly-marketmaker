@@ -26,19 +26,22 @@ def amount_value(price, table):
     return None
 
 
-def build_ladder(bids, reward_range_min, reward_range_max, min_size, tiers_k):
+def build_ladder(
+    bids,
+    reward_range_min,
+    reward_range_max,
+    min_size,
+    tiers_k,
+    tier_match_var="cumulative_thickness",
+    amount_value_table=None,
+):
     """构建单边档价梯。
 
-    Args:
-        bids: 按价降序的 [{price, size}](字符串或数值均可)。
-        reward_range_min/max: 奖励区间(含端点)。
-        min_size: 最低份数(>0)。
-        tiers_k: 最多取几档。
-
-    Returns:
-        [{"price": float, "cumulative_thickness": float}, ...],档1=最高合格价位。
-        累加厚度 = 从买一往下到该档(含)所有 bid 价位的 size/min_size 之和。
-        合格档 = 价位在奖励区间内且该价位厚度(size/min_size)>=1。
+    tier_match_var:
+      - "cumulative_thickness"(默认):match_value=累计厚度;合格档=区间内且本档厚度>=1。
+      - "risk_coefficient":match_value=本档厚度/金额数值(价);合格档=区间内且金额数值有值(>0)。
+        价超金额表 -> 该档不挂;厚度门槛交由 tier_rules 区间表兜。
+    返回 [{"price","match_value","cumulative_thickness"}],档1=最高合格价位。
     """
     if min_size <= 0 or not bids:
         return []
@@ -49,10 +52,26 @@ def build_ladder(bids, reward_range_min, reward_range_max, min_size, tiers_k):
         size = float(level["size"])
         thickness = size / min_size
         running_ct += thickness
-        if reward_range_min <= price <= reward_range_max and thickness >= 1:
-            tiers.append({"price": price, "cumulative_thickness": running_ct})
-            if len(tiers) >= tiers_k:
-                break
+        if not (reward_range_min <= price <= reward_range_max):
+            continue
+        if tier_match_var == "risk_coefficient":
+            av = amount_value(price, amount_value_table)
+            if not av or av <= 0:
+                continue
+            match_value = thickness / av
+        else:
+            if thickness < 1:
+                continue
+            match_value = running_ct
+        tiers.append(
+            {
+                "price": price,
+                "match_value": match_value,
+                "cumulative_thickness": running_ct,
+            }
+        )
+        if len(tiers) >= tiers_k:
+            break
     return tiers
 
 
