@@ -28,7 +28,8 @@ def test_get_settings_returns_v4_params(tmp_path, monkeypatch):
         "case_a_mode",
         "tier_rules",
         "per_share_reward_thresholds",
-        "excluded_categories",
+        "included_categories",
+        "include_other",
         "max_exposure_usd",
         "max_exposure_shares",
         "max_concurrent_markets",
@@ -43,7 +44,8 @@ def test_post_settings_roundtrips_structured(tmp_path, monkeypatch):
     payload = {
         "theta_loss_cents": 3,
         "case_a_mode": "market",
-        "excluded_categories": ["sports"],
+        "included_categories": ["politics"],
+        "include_other": False,
         "per_share_reward_thresholds": {
             "20": 0.5,
             "50": 0.4,
@@ -61,7 +63,8 @@ def test_post_settings_roundtrips_structured(tmp_path, monkeypatch):
     tmpl = db.get_template(db.get_default_template_id())
     assert tmpl["theta_loss_cents"] == 3
     assert tmpl["case_a_mode"] == "market"
-    assert tmpl["excluded_categories"] == ["sports"]
+    assert tmpl["included_categories"] == ["politics"]
+    assert tmpl["include_other"] is False
     assert tmpl["per_share_reward_thresholds"]["20"] == 0.5
     assert tmpl["tier_rules"] == [
         [{"upper": None, "action": {"type": "fixed_shares", "shares": 50}}]
