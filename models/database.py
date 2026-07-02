@@ -256,6 +256,24 @@ class Database:
             )
         self.conn.commit()
 
+    def save_category_catalog(self, payload: dict):
+        """持久化配置页品类计数快照(整份 catalog + 其他数 + 时间戳),供跨重启秒显。
+        存 settings 表的保留键 category_catalog;get_settings 只认 ENGINE_DEFAULTS 键,
+        故不会污染引擎参数。"""
+        c = self.conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            ("category_catalog", json.dumps(payload)),
+        )
+        self.conn.commit()
+
+    def get_category_catalog(self) -> dict | None:
+        """读上次持久化的品类计数快照;从没存过返回 None。"""
+        c = self.conn.cursor()
+        c.execute("SELECT value FROM settings WHERE key = ?", ("category_catalog",))
+        row = c.fetchone()
+        return json.loads(row["value"]) if row else None
+
     # --- Templates ---
 
     DEFAULT_TEMPLATE_NAME = "默认"

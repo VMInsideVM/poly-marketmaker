@@ -22,6 +22,7 @@
         <a href="{{ url_for('config_page') }}" class="{% if request.endpoint=='config_page' %}active{% endif %}">配置</a>
         <a href="{{ url_for('blacklist_page') }}" class="{% if request.endpoint=='blacklist_page' %}active{% endif %}">黑名单</a>
         <a href="{{ url_for('help_page') }}" class="{% if request.endpoint=='help_page' %}active{% endif %}">使用说明</a>
+        <a href="{{ url_for('markets_page') }}" id="scan-indicator" class="scan-indicator" style="display:none"></a>
         <div class="sb-foot">
             <button class="theme-toggle" onclick="toggleTheme()">切换主题</button>
             <div style="margin-top:10px"><a href="#" onclick="checkForUpdate(this);return false;">检查更新</a></div>

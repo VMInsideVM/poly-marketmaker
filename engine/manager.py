@@ -13,7 +13,7 @@ import time
 from api.polymarket_api import PolymarketAPI
 from api.proxy import use_proxy
 from config import CATEGORY_CATALOG
-from engine.scanner import MarketScanner
+from engine.scanner import MarketScanner, ScanSuperseded
 from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
 from engine.resolution import in_resolution
@@ -399,6 +399,8 @@ class EngineManager:
         self.scan_progress: str = ""  # e.g. "Checking 5/120..."
         self.scan_total: int = 0
         self.scan_checked: int = 0
+        self._scan_lock = threading.Lock()  # 守卫手动扫描不重复开线程
+        self._scan_generation = 0  # 每次启动手动扫描 +1;旧扫描据此合作式让位
 
     # === Auto mode: full engine lifecycle ===
 
@@ -477,36 +479,106 @@ class EngineManager:
         )
         logger.info("Created scanner API from wallet %s", enabled[0]["address"])
 
-    def scan_markets(self):
+    def start_scan_async(self, force: bool = False) -> bool:
+        """启动一次后台扫描,返回是否真的启动了。
+        - 未在扫描:直接启动。
+        - 已在扫描且 force=False:返回 False(防误触/双击开出互相踩的扫描)。
+        - 已在扫描且 force=True:代际 +1,旧扫描在最近检查点合作式让位、结果作废,
+          本轮用最新配置重来(前端「弹确认再重启」走这条)。
+        同步把 scan_status 置 'scanning',使前端下一拍轮询立即可见。"""
+        with self._scan_lock:
+            if self.scan_status == "scanning" and not force:
+                return False
+            self._scan_generation += 1
+            gen = self._scan_generation
+            self.scan_status = "scanning"
+        threading.Thread(target=self._run_scan, args=(gen,), daemon=True).start()
+        return True
+
+    def _run_scan(self, gen: int):
+        """后台扫描线程体:跑 scan_markets,并兜底收敛 scan_status。被更新一轮接管
+        (ScanSuperseded)时静默退出;无可用钱包早退时也不让 scan_status 卡在 'scanning'。"""
+        try:
+            self.scan_markets(gen)
+        except ScanSuperseded:
+            logger.info("扫描被新一轮接管,放弃本轮 gen=%s", gen)
+        except Exception as e:
+            logger.error("扫描线程异常: %s", e)
+        finally:
+            # 只有「我仍是当前代」才收敛状态;已被接管则由新线程负责。
+            with self._scan_lock:
+                if gen == self._scan_generation and self.scan_status == "scanning":
+                    self.scan_status = "done"
+
+    def scan_markets(self, gen: int = None):
         """Run a single scan to produce the eligible markets list.
 
         Updates scan_status/scan_progress in real-time for frontend polling.
+        gen: 手动扫描的代际(用于合作式让位);None=自动模式/直接调用,不做让位。
         """
         self._ensure_scanner_api()
         if not self._scanner_api:
             return
 
-        eligible = self._scan_with_status()
+        eligible = self._scan_with_status(gen=gen)
 
-        # Persist to database (replace old data)
-        self.db.save_eligible_markets(eligible)
-        logger.info("Saved %d eligible markets to database", len(eligible))
+        # 被更新一轮接管时不落库(否则会用一份被作废的结果覆盖 DB);仅当仍是当前代才存。
+        if gen is None or gen == self._scan_generation:
+            self.db.save_eligible_markets(eligible)
+            logger.info("Saved %d eligible markets to database", len(eligible))
 
-    def category_catalog(self) -> dict:
-        """供配置页勾选:各 curated 品类实时市场数 + 「其他」数。600s 内存缓存。"""
+    def _static_catalog(self) -> dict:
+        """无任何计数快照时的兜底:纯静态品类清单(不联网),计数留空,列表照样秒显。"""
+        return {
+            "ready": False,
+            "categories": [
+                {"slug": c["slug"], "label": c["label"]} for c in CATEGORY_CATALOG
+            ],
+            "other_count": 0,
+        }
+
+    def _persist_catalog(self, payload: dict) -> dict:
+        """把一份计数快照写入内存缓存 + 本地库(供跨重启秒显)。"""
+        result = {
+            "categories": payload.get("categories", []),
+            "other_count": payload.get("other_count", 0),
+            "ready": True,
+            "updated_at": time.time(),
+        }
+        self._catalog_cache = result
+        self._catalog_cache_ts = time.time()
+        try:
+            self.db.save_category_catalog(result)
+        except Exception as e:
+            logger.warning("保存品类计数快照失败: %s", e)
+        return result
+
+    def _compute_category_catalog(self) -> dict:
+        """手动刷新:联网重算各品类计数并写回本地。无可用钱包时退回静态清单。"""
+        self._ensure_scanner_api()
+        if not self._scanner_api:
+            return self._static_catalog()
+        scanner = MarketScanner(self._scanner_api, self.db, "")
+        with use_proxy(getattr(self._scanner_api, "proxy_url", None)):
+            payload = scanner.category_counts(CATEGORY_CATALOG)
+        return self._persist_catalog(payload)
+
+    def category_catalog(self, refresh: bool = False) -> dict:
+        """配置页勾选用:各品类市场数 + 「其他」数。
+        默认读本地快照(内存 10 分钟,否则本地库)——秒开、跨重启不丢、不阻塞联网;
+        计数在每次「扫描市场」后自动刷新。refresh=True(手动刷新按钮)才即时联网重算。
+        从没扫描/刷新过时返回纯静态品类清单(无计数),列表仍立即可勾。"""
+        if refresh:
+            return self._compute_category_catalog()
         now = time.time()
         if self._catalog_cache and (now - self._catalog_cache_ts) < 600:
             return self._catalog_cache
-        self._ensure_scanner_api()
-        if not self._scanner_api:
-            return {"ready": False, "categories": [], "other_count": 0}
-        scanner = MarketScanner(self._scanner_api, self.db, "")
-        with use_proxy(getattr(self._scanner_api, "proxy_url", None)):
-            result = scanner.category_counts(CATEGORY_CATALOG)
-        result["ready"] = True
-        self._catalog_cache = result
-        self._catalog_cache_ts = now
-        return result
+        stored = self.db.get_category_catalog()
+        if stored:
+            self._catalog_cache = stored
+            self._catalog_cache_ts = now
+            return stored
+        return self._static_catalog()
 
     def place_all_orders(self):
         """每钱包按自己模板从候选池精筛后下单。"""
@@ -661,28 +733,40 @@ class EngineManager:
             return list(seen.values())
         return [self.db.get_template(self.db.get_default_template_id())]
 
-    def _scan_with_status(self, skip_orderbook: bool = False) -> list:
+    def _scan_with_status(self, gen: int = None, skip_orderbook: bool = False) -> list:
         """Run one scan, reporting scan_status/progress; shared by manual and
         auto paths. On success sets eligible_markets/last_scan_time and
         scan_status='done' and returns the eligible list. On failure resets
         scan_status to 'done' (never left 'scanning') WITHOUT touching
-        last_scan_time (a failed round did not complete), then re-raises."""
+        last_scan_time (a failed round did not complete), then re-raises.
+
+        gen: 手动扫描的代际。只有「仍是当前代」(gen 为 None 或等于 _scan_generation)
+        才动共享状态(进度/eligible_markets/落库);被更新一轮接管后本轮不再改任何共享
+        状态,并向采集器传 cancel() 令其在最近检查点抛 ScanSuperseded 让位。"""
         import time as _time
 
+        def is_current():
+            return gen is None or gen == self._scan_generation
+
         prev_eligible = self.eligible_markets
-        self.scan_status = "scanning"
-        self.scan_progress = "Starting..."
-        self.scan_checked = 0
-        self.scan_total = 0
-        self.eligible_markets = []
+        if is_current():
+            self.scan_status = "scanning"
+            self.scan_progress = "Starting..."
+            self.scan_checked = 0
+            self.scan_total = 0
+            self.eligible_markets = []
 
         def on_progress(checked, total, message):
-            self.scan_checked = checked
-            self.scan_total = total
-            self.scan_progress = message
+            if is_current():
+                self.scan_checked = checked
+                self.scan_total = total
+                self.scan_progress = message
 
         def on_found(entry):
-            self.eligible_markets.append(entry)
+            if is_current():
+                self.eligible_markets.append(entry)
+
+        cancel = (lambda: gen != self._scan_generation) if gen is not None else None
 
         try:
             scanner = MarketScanner(self._scanner_api, self.db, "")
@@ -695,16 +779,26 @@ class EngineManager:
                     on_progress=on_progress,
                     on_found=on_found,
                     skip_orderbook=skip_orderbook,
+                    cancel=cancel,
                 )
+        except ScanSuperseded:
+            raise  # 被接管:不碰共享状态,交给 _run_scan 静默处理
         except Exception:
-            self.eligible_markets = prev_eligible  # don't blank on failure
-            self.scan_status = "done"  # not 'scanning': progress bar won't stick
+            if is_current():
+                self.eligible_markets = prev_eligible  # don't blank on failure
+                self.scan_status = "done"  # not 'scanning': progress bar won't stick
             raise
+        if not is_current():
+            return candidate_pool  # 被接管:不提交结果、不改状态
         self.eligible_markets = candidate_pool
         self.last_scan_time = _time.time()
         self.scan_status = "done"
         self.scan_progress = f"Done: {len(candidate_pool)} candidates"
         logger.info("Scanner found %d candidates", len(candidate_pool))
+        # 扫描顺带刷新品类计数快照(复用发现阶段的 tag 数据,不额外联网)
+        catalog = getattr(scanner, "last_catalog", None)
+        if catalog:
+            self._persist_catalog(catalog)
         return candidate_pool
 
     def _should_discover(self, now: float) -> bool:

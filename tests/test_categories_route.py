@@ -35,3 +35,20 @@ def test_categories_from_manager(tmp_path, monkeypatch):
     assert data["ready"] is True
     assert data["categories"][0]["slug"] == "politics"
     assert data["other_count"] == 1
+
+
+def test_categories_refresh_param_forwarded(tmp_path, monkeypatch):
+    """?refresh=1 -> category_catalog(refresh=True);普通请求 -> refresh=False。"""
+    mgr = MagicMock()
+    mgr.category_catalog.return_value = {
+        "ready": True,
+        "categories": [],
+        "other_count": 0,
+    }
+    client = _client(tmp_path, monkeypatch, mgr)
+
+    client.get("/api/categories")
+    assert mgr.category_catalog.call_args.kwargs == {"refresh": False}
+
+    client.get("/api/categories?refresh=1")
+    assert mgr.category_catalog.call_args.kwargs == {"refresh": True}

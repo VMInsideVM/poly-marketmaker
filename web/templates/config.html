@@ -96,10 +96,13 @@
             </div>
         </div>
 
-        <h3>做市品类（只做勾选的）</h3>
+        <h3>做市品类（只做勾选的）
+            <a href="#" onclick="refreshCategories(event)" style="font-size:13px;font-weight:normal">刷新计数</a>
+            <span id="cat-updated" class="hint" style="color:#888;font-size:12px;font-weight:normal"></span>
+        </h3>
         <div id="included-categories" class="form-inline"></div>
         <label class="cat-other"><input type="checkbox" id="include-other"> 其他/未分类<span id="other-count"></span></label>
-        <p class="hint" style="color:#888;font-size:12px">数量为当前奖励市场中该品类的市场数（每次扫描后刷新）；勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。</p>
+        <p class="hint" style="color:#888;font-size:12px">括号内是当前该品类的市场数：每次「扫描市场」后自动更新，也可点上方「刷新计数」手动拉取；没有计数不影响勾选。勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。</p>
 
         <h3>单份奖励阈值（按最低份数取档）</h3>
         <label class="ps-enable"><input type="checkbox" id="per-share-enabled" checked onchange="updatePerShareEnabled()"> 启用单份奖励阈值筛选</label>
@@ -210,8 +213,8 @@ function renderCategories(catalog, selected, includeOther) {
     const sel = new Set(selected || []);
     const cats = catalog.categories || [];
     const known = new Set(cats.map(c => c.slug));
-    // 有市场(count>=1)、或未就绪(无池子)、或已选 —— 保证已选不丢、扫描前也能配
-    const shown = cats.filter(c => !catalog.ready || (c.count || 0) >= 1 || sel.has(c.slug));
+    // 全部品类都显示(不再按计数隐藏,0 个市场的也在);计数只作点缀
+    const shown = cats.slice();
     // 已选但目录里没有的(极少)补上
     (selected || []).forEach(s => { if (!known.has(s)) shown.push({slug: s, label: s, count: 0}); });
     shown.forEach(c => {
@@ -225,10 +228,41 @@ function renderCategories(catalog, selected, includeOther) {
         lab.appendChild(document.createTextNode(' ' + c.label + cnt));
         box.appendChild(lab);
     });
+    if (box.children.length === 0) {
+        box.innerHTML = '<span class="hint" style="color:#888">'
+            + (catalog.ready ? '当前无匹配品类' : '启用一个钱包后显示各品类数量')
+            + '</span>';
+    }
     const other = document.getElementById('include-other');
     if (other) other.checked = !!includeOther;
     const oc = document.getElementById('other-count');
     if (oc) oc.textContent = catalog.ready ? ' (' + (catalog.other_count || 0) + ')' : '';
+    const upd = document.getElementById('cat-updated');
+    if (upd) upd.textContent = catalog.updated_at
+        ? '· 计数更新于 ' + relTimeCat(catalog.updated_at)
+        : (catalog.ready ? '' : '· 计数待扫描或刷新');
+}
+
+function relTimeCat(sec) {
+    const d = Math.floor(Date.now() / 1000 - sec);
+    if (d < 60) return '刚刚';
+    if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+    if (d < 86400) return Math.floor(d / 3600) + ' 小时前';
+    return Math.floor(d / 86400) + ' 天前';
+}
+
+// 手动刷新:只更新计数,不动用户当前勾选。联网重算期间显示「刷新中…」。
+function refreshCategories(ev) {
+    if (ev) ev.preventDefault();
+    const sel = Array.from(
+        document.querySelectorAll('#included-categories input[type=checkbox]:checked')
+    ).map(cb => cb.value);
+    const inclOther = document.getElementById('include-other').checked;
+    document.getElementById('included-categories').innerHTML =
+        '<span class="hint" style="color:#888">刷新中…</span>';
+    fetch('/api/categories?refresh=1').then(r => r.json())
+        .then(catalog => renderCategories(catalog, sel, inclOther))
+        .catch(() => renderCategories({ready: false, categories: [], other_count: 0}, sel, inclOther));
 }
 
 function updatePerShareEnabled() {
@@ -239,16 +273,20 @@ function updatePerShareEnabled() {
 }
 
 function loadStrategy(tid) {
-    Promise.all([
-        fetch(`/api/templates/${tid}`).then(r => r.json()),
-        fetch('/api/categories').then(r => r.json()).catch(() => ({ready: false, categories: [], other_count: 0})),
-    ]).then(([data, catalog]) => {
+    document.getElementById('included-categories').innerHTML =
+        '<span class="hint" style="color:#888">加载中…</span>';
+
+    const tmplP = fetch(`/api/templates/${tid}`).then(r => r.json());
+    const catP = fetch('/api/categories').then(r => r.json())
+        .catch(() => ({ready: false, categories: [], other_count: 0}));
+
+    // 策略参数只依赖模板数据(本地库,基本瞬时)—— 立刻填好,不等慢的品类接口
+    tmplP.then(data => {
         const form = document.getElementById('strategy-form');
         Object.keys(data).forEach(key => {
             const input = form.querySelector(`[name="${key}"]`);
             if (input) input.value = data[key];
         });
-        renderCategories(catalog, data.included_categories || [], data.include_other);
         const ps = data.per_share_reward_thresholds || {};
         document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
             const b = inp.getAttribute('data-bracket');
@@ -263,6 +301,11 @@ function loadStrategy(tid) {
         renderAmountTable(data.amount_value_table || []);
         updateTierMatchVar();
         updateStopMode();
+    });
+
+    // 品类勾选要「模板(哪些已选)+ 目录(列表/计数)」都到齐再渲染,期间显示加载中
+    Promise.all([tmplP, catP]).then(([data, catalog]) => {
+        renderCategories(catalog, data.included_categories || [], data.include_other);
     });
 }
 

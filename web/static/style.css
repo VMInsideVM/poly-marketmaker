@@ -80,6 +80,22 @@ a { color: var(--accent); }
 .badge.acc { background: var(--accentsoft); color: var(--accent); }
 .badge.muted { background: var(--rowline); color: var(--muted); }
 
+/* --- 扫描进度指示 --- */
+.sidebar a.scan-indicator { margin: 8px 12px 0; padding: 6px 10px; border-radius: 8px;
+  background: var(--accentsoft); color: var(--accent); font-size: 12px; font-weight: 600;
+  text-decoration: none; text-align: center; }
+.sidebar a.scan-indicator:hover { color: var(--accent); filter: brightness(0.97); }
+.scan-banner { margin: 4px 0 12px; padding: 8px 12px; border-radius: 8px;
+  background: var(--accentsoft); color: var(--accent); font-size: 13px; font-weight: 600; }
+
+/* --- 市场发现:品类选项卡 --- */
+.cat-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+.cat-tab { cursor: pointer; user-select: none; padding: 4px 11px; border: 1px solid var(--border);
+  border-radius: 14px; font-size: 13px; color: var(--text); background: var(--panel); white-space: nowrap; }
+.cat-tab:hover { border-color: var(--accent); }
+.cat-tab.active { background: var(--accentsoft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.cat-tab .metric-note { color: inherit; opacity: .65; }
+
 /* --- 市场发现:展开梯队 --- */
 .expand-btn { cursor: pointer; color: var(--accent); font-weight: 600; user-select: none; white-space: nowrap; }
 .ladder-wrap { background: var(--panel2); padding: 12px 14px; }

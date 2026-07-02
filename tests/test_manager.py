@@ -478,3 +478,158 @@ class TestSharedScanWithStatus:
         assert manager.scan_status == "done"
         assert manager.last_scan_time == 12345.0
         assert manager.eligible_markets == [{"market_id": "prev"}]
+
+
+class TestCategoryCatalog:
+    """品类计数快照:本地持久化 + 秒显、扫描/手动刷新更新,普通打开绝不联网。"""
+
+    def _mgr(self, stored):
+        db = MagicMock()
+        db.get_category_catalog.return_value = stored
+        return EngineManager(db, encryption_key=b"x" * 32), db
+
+    def test_no_snapshot_returns_static_without_network(self):
+        from config import CATEGORY_CATALOG
+
+        mgr, db = self._mgr(None)
+        with patch("engine.manager.MarketScanner") as MS:
+            out = mgr.category_catalog()
+            MS.assert_not_called()  # 普通打开绝不联网
+        assert out["ready"] is False
+        assert {c["slug"] for c in out["categories"]} == {
+            c["slug"] for c in CATEGORY_CATALOG
+        }
+
+    def test_stored_snapshot_served_without_network(self):
+        snap = {
+            "ready": True,
+            "categories": [{"slug": "x", "label": "X", "count": 2}],
+            "other_count": 1,
+            "updated_at": 5.0,
+        }
+        mgr, db = self._mgr(snap)
+        with patch("engine.manager.MarketScanner") as MS:
+            out = mgr.category_catalog()
+            MS.assert_not_called()
+        assert out == snap
+
+    def test_persist_catalog_caches_and_saves(self):
+        mgr, db = self._mgr(None)
+        out = mgr._persist_catalog(
+            {"categories": [{"slug": "x", "label": "X", "count": 1}], "other_count": 2}
+        )
+        assert out["ready"] is True and "updated_at" in out and out["other_count"] == 2
+        db.save_category_catalog.assert_called_once_with(out)
+        # 之后普通打开命中内存缓存,不读库也不联网
+        db.get_category_catalog.reset_mock()
+        with patch("engine.manager.MarketScanner") as MS:
+            assert mgr.category_catalog() is out
+            MS.assert_not_called()
+        db.get_category_catalog.assert_not_called()
+
+    def test_scan_persists_last_catalog(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        snap = {
+            "categories": [{"slug": "x", "label": "X", "count": 3}],
+            "other_count": 0,
+        }
+
+        class OkScanner:
+            def __init__(self, api, db, addr):
+                self.last_catalog = snap
+
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
+                return [{"market_id": "m1"}]
+
+        with patch("engine.manager.MarketScanner", OkScanner):
+            manager._scan_with_status()
+        db.save_category_catalog.assert_called_once()
+        saved = db.save_category_catalog.call_args.args[0]
+        assert saved["ready"] is True
+        assert saved["categories"] == snap["categories"]
+
+
+class TestScanGuard:
+    """手动扫描是后台线程;守卫不重复开、并同步置位 scan_status 供前端立即可见。"""
+
+    def test_start_scan_async_starts_when_idle(self):
+        manager, db = _make_manager()
+        manager.scan_status = "idle"
+        with patch("engine.manager.threading.Thread") as T:
+            assert manager.start_scan_async() is True
+            assert manager.scan_status == "scanning"  # 同步置位
+            T.assert_called_once()
+            assert T.call_args.kwargs.get("target") == manager._run_scan
+        T.return_value.start.assert_called_once()
+
+    def test_start_scan_async_guards_double_scan(self):
+        manager, db = _make_manager()
+        manager.scan_status = "scanning"
+        with patch("engine.manager.threading.Thread") as T:
+            assert manager.start_scan_async() is False
+        T.assert_not_called()  # 已在扫描,不再开第二个线程
+
+    def test_run_scan_resets_stuck_status(self):
+        # 无钱包时 scan_markets 在 _ensure_scanner_api 就早退,不进 _scan_with_status;
+        # _run_scan 的 finally 必须把 scan_status 从 scanning 收敛掉,别永远卡住。
+        manager, db = _make_manager()
+        manager.scan_status = "scanning"
+        gen = manager._scan_generation
+        with patch.object(manager, "scan_markets"):  # no-op,不触碰 scan_status
+            manager._run_scan(gen)
+        assert manager.scan_status == "done"
+
+    def test_start_scan_async_force_supersedes(self):
+        manager, db = _make_manager()
+        manager.scan_status = "scanning"
+        manager._scan_generation = 5
+        with patch("engine.manager.threading.Thread") as T:
+            assert (
+                manager.start_scan_async(force=True) is True
+            )  # force 无视「已在扫描」
+            assert manager._scan_generation == 6  # 代际 +1,旧扫描据此让位
+            assert manager.scan_status == "scanning"
+            assert T.call_args.kwargs.get("args") == (6,)  # 新线程带新代际
+        T.return_value.start.assert_called_once()
+
+    def test_scan_with_status_discards_when_superseded(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        manager._scan_generation = 2
+        manager.eligible_markets = [{"market_id": "keep"}]
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                self.last_catalog = None
+
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, cancel=None, **kw
+            ):
+                return [{"market_id": "new"}]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            out = manager._scan_with_status(gen=1)  # gen 1 != 当前代 2 -> 非当前代
+        assert out == [{"market_id": "new"}]  # 结果仍返回上层
+        assert manager.eligible_markets == [{"market_id": "keep"}]  # 但共享状态没被覆盖
+        db.save_category_catalog.assert_not_called()
+
+    def test_scan_markets_skips_save_when_superseded(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        manager._scan_generation = 2
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                self.last_catalog = None
+
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, cancel=None, **kw
+            ):
+                return [{"market_id": "new"}]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager.scan_markets(gen=1)  # gen 1 != 当前代 2
+        db.save_eligible_markets.assert_not_called()  # 被接管:不落库(否则覆盖成废结果)

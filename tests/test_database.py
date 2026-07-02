@@ -613,3 +613,23 @@ def test_template_defaults_has_tier_match_and_size_range():
         {"upper": 0.25, "value": 1.5},
         {"upper": 0.30, "value": 2},
     ]
+
+
+def test_category_catalog_roundtrip(tmp_path):
+    """品类计数快照存/取往返;从没存过返回 None;且不污染引擎级 settings。"""
+    db = Database(str(tmp_path / "cat.db"))
+    db.init()
+    try:
+        assert db.get_category_catalog() is None
+        snap = {
+            "ready": True,
+            "categories": [{"slug": "politics", "label": "政治", "count": 3}],
+            "other_count": 2,
+            "updated_at": 123.0,
+        }
+        db.save_category_catalog(snap)
+        assert db.get_category_catalog() == snap
+        # 保留键不会混进引擎参数(get_settings 只认 ENGINE_DEFAULTS 键)
+        assert "category_catalog" not in db.get_settings()
+    finally:
+        db.close()

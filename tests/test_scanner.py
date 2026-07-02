@@ -433,3 +433,106 @@ class TestCategoryCounts:
         assert counts == {"politics": 1, "economy": 2}
         assert [c["label"] for c in out["categories"]] == ["政治", "经济"]
         assert out["other_count"] == 2  # C、D
+
+    def test_parallel_slug_calls_carry_proxy(self):
+        # 回归护栏:并发查各 slug 时,每个 worker 线程必须重设 current_proxy —— 否则
+        # 静态 rewards 调用会直连、泄露真实 IP(contextvar 不会继承到线程池 worker)。
+        from api.proxy import current_proxy
+
+        seen = []
+
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [{"condition_id": "A"}]
+            seen.append(current_proxy.get())  # list.append 在 GIL 下原子
+            return []
+
+        api = MagicMock()
+        api.proxy_url = "http://p:1"
+        api.get_rewards_markets.side_effect = fake_rewards
+        scanner = MarketScanner(api, MagicMock(), "")
+        catalog = [{"slug": s, "label": s} for s in ("a", "b", "c")]
+        scanner.category_counts(catalog)
+
+        assert seen == ["http://p:1"] * 3
+
+    def test_refresh_orderbooks_cancel_raises(self):
+        from engine.scanner import ScanSuperseded
+
+        scanner = MarketScanner(MagicMock(), MagicMock(), "")
+        with pytest.raises(ScanSuperseded):
+            scanner.refresh_orderbooks([{"tokens": []}], cancel=lambda: True)
+
+    def test_discover_cancel_raises(self):
+        from engine.scanner import ScanSuperseded
+
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [{"condition_id": "A", "tokens": [], "rewards_config": []}]
+            return []
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        with pytest.raises(ScanSuperseded):
+            scanner.discover_candidates(
+                [
+                    {
+                        "included_categories": [],
+                        "include_other": True,
+                        "min_reward_usd": 0,
+                    }
+                ],
+                cancel=lambda: True,
+            )
+
+    def test_catalog_payload_intersects_with_full(self):
+        from config import CATEGORY_CATALOG
+
+        s0, s1 = CATEGORY_CATALOG[0]["slug"], CATEGORY_CATALOG[1]["slug"]
+        scanner = MarketScanner(MagicMock(), MagicMock(), "")
+        full = [{"condition_id": c} for c in ("A", "B", "C", "D")]
+        category_ids = {s0: {"A", "B", "Z"}, s1: {"B"}}  # Z 不在 full,应被交集剔除
+        out = scanner._catalog_payload(full, category_ids)
+        counts = {c["slug"]: c["count"] for c in out["categories"]}
+        assert counts[s0] == 2 and counts[s1] == 1
+        assert out["other_count"] == 2  # C、D 未被任何品类覆盖
+        assert out["ready"] is True
+
+    def test_discover_sets_last_catalog(self):
+        # 扫描(发现)顺带把品类计数快照挂到 scanner.last_catalog —— manager 据此免联网刷新
+        from config import CATEGORY_CATALOG
+
+        s0 = CATEGORY_CATALOG[0]["slug"]
+
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [
+                    {
+                        "condition_id": "A",
+                        "tokens": [{"token_id": "A-y"}],
+                        "rewards_config": [],
+                    },
+                    {
+                        "condition_id": "B",
+                        "tokens": [{"token_id": "B-y"}],
+                        "rewards_config": [],
+                    },
+                ]
+            return [{"condition_id": "A"}] if tag_slug == s0 else []
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        scanner.discover_candidates(
+            [{"included_categories": [], "include_other": True, "min_reward_usd": 0}]
+        )
+        cat = scanner.last_catalog
+        assert cat["ready"] is True
+        counts = {c["slug"]: c["count"] for c in cat["categories"]}
+        assert counts[s0] == 1  # A 命中 s0
+        assert cat["other_count"] == 1  # B 落「其他」

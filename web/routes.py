@@ -355,7 +355,8 @@ def api_categories():
     if manager is None:
         return jsonify({"ready": False, "categories": [], "other_count": 0})
     try:
-        return jsonify(manager.category_catalog())
+        refresh = request.args.get("refresh") in ("1", "true", "yes")
+        return jsonify(manager.category_catalog(refresh=refresh))
     except Exception as e:
         return jsonify(
             {"ready": False, "categories": [], "other_count": 0, "error": str(e)}
@@ -668,11 +669,32 @@ def api_start_monitors():
 @app.route("/api/engine/scan", methods=["POST"])
 @login_required
 def api_scan_markets():
-    if manager:
-        import threading
+    if not manager:
+        return jsonify({"ok": False, "started": False, "scanning": False})
+    force = request.args.get("force") in ("1", "true", "yes")
+    # force=False 且已在扫描 -> started=False + scanning=True,前端据此弹确认;
+    # force=True(用户确认)-> 接管当前扫描、用最新配置重来。
+    started = manager.start_scan_async(force=force)
+    return jsonify({"ok": True, "started": started, "scanning": not started})
 
-        threading.Thread(target=manager.scan_markets, daemon=True).start()
-    return jsonify({"ok": True})
+
+@app.route("/api/engine/scan-status", methods=["GET"])
+@login_required
+def api_scan_status():
+    """轻量扫描状态(不含市场列表),供全局侧边栏进度指示在任意页面轮询。"""
+    if not manager:
+        return jsonify(
+            {"scan_status": "idle", "scan_checked": 0, "scan_total": 0, "found": 0}
+        )
+    return jsonify(
+        {
+            "scan_status": manager.scan_status,
+            "scan_checked": manager.scan_checked,
+            "scan_total": manager.scan_total,
+            "found": len(manager.eligible_markets or []),
+            "last_scan_time": manager.last_scan_time,
+        }
+    )
 
 
 @app.route("/api/engine/place-orders", methods=["POST"])
@@ -974,6 +996,17 @@ def api_eligible_markets():
 @app.route("/api/markets/<market_id>/ladder", methods=["GET"])
 @login_required
 def api_market_ladder(market_id):
+    # 预演里任何一步(建 API / 查余额 / 抓订单簿 / 推演)抛异常都要返回 JSON 错误,别让
+    # Flask 吐 HTML 报错页 —— 否则前端 r.json() 直接炸「Unexpected token '<'」,真正的原因
+    # 反被 HTML 页盖住。同时打完整 traceback 到日志便于定位。
+    try:
+        return _ladder_payload(market_id)
+    except Exception as e:
+        logger.exception("预演失败 market=%s", market_id)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+def _ladder_payload(market_id):
     from engine.laddering import preview_market_ladders
     from engine.strategy import reward_price_range
     from engine.positions import held_side_info
@@ -1008,21 +1041,33 @@ def api_market_ladder(market_id):
     budget = max(0.0, min(balance, max_exposure_usd) - held_value.get(market_id, 0.0))
     shares_budget = max(0, max_exposure_shares - int(held_shares.get(market_id, 0.0)))
 
+    # 每侧 token 来自市场的 tokens 列表(内存候选池形态);DB 落库形态只有单个 token_id
+    # 列、无 tokens 列表 —— 退化为单侧。奖励区间/最低份数是市场级,取自 market。
+    market = rows[0]
+    token_sides = market.get("tokens") or []
+    if not token_sides and market.get("token_id"):
+        token_sides = [
+            {"token_id": market["token_id"], "outcome": market.get("outcome", "")}
+        ]
+
     sides_in = []
-    for r in rows[:2]:
-        ob = api.get_orderbook(r["token_id"])
+    for tok in token_sides[:2]:
+        tid = tok.get("token_id")
+        if not tid:
+            continue
+        ob = api.get_orderbook(tid)
         bids = sorted(ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True)
         asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))
         if not bids or not asks:
             continue
         bb, ba = float(bids[0]["price"]), float(asks[0]["price"])
         mid = (bb + ba) / 2
-        rmin, rmax = reward_price_range(mid, float(r.get("rewards_max_spread", 2)))
+        rmin, rmax = reward_price_range(mid, float(market.get("rewards_max_spread", 2)))
         sides_in.append(
             {
-                "outcome": r.get("outcome", ""),
-                "token_id": r["token_id"],
-                "min_size": int(r.get("rewards_min_size", 0) or 0),
+                "outcome": tok.get("outcome", ""),
+                "token_id": tid,
+                "min_size": int(market.get("rewards_min_size", 0) or 0),
                 "reward_range_min": rmin,
                 "reward_range_max": rmax,
                 "best_bid": bb,

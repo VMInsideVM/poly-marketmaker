@@ -7,7 +7,9 @@
     </div>
 </div>
 <p id="scan-time" class="metric-note"></p>
-<div id="scan-progress" class="metric-note" style="display:none;margin-bottom:8px"></div>
+<div id="scan-progress" class="scan-banner" style="display:none"></div>
+
+<div id="cat-tabs" class="cat-tabs"></div>
 
 <table class="data-table" id="markets-table">
     <thead>
@@ -36,6 +38,8 @@ let maxSpread = null;
 let marketsData = [];
 let lastScanTime = 0;
 let scanPollTimer = null;
+let catLabels = {};   // slug -> 中文标签(取自 /api/categories)
+let activeCat = null; // 当前选中的品类选项卡(null=全部,'__other__'=其他/未分类)
 let expanded = {};   // market_id -> true(已展开)
 let ladderCache = {};   // market_id -> 已渲染梯队 HTML(展开期缓存,收起清,避免轮询反复 fetch)
 
@@ -75,14 +79,64 @@ function spreadCell(m) {
     return `<span class="metric">${m.spread_cents.toFixed(0)}¢</span>${note}`;
 }
 
+// 主品类 = tags 第一个;无 tag = 「其他/未分类」。多品类市场只归主品类(不重复)。
+function primaryCat(m) {
+    const tags = m.tags || [];
+    return tags.length ? tags[0] : '__other__';
+}
+function catLabelOf(slug) {
+    return slug === '__other__' ? '其他' : (catLabels[slug] || slug);
+}
+// 行里小字标出主品类之外的其他所属品类
+function catNote(m) {
+    const tags = m.tags || [];
+    if (tags.length <= 1) return '';
+    const others = tags.slice(1).map(catLabelOf).join('、');
+    return ` <span class="metric-note">· 也属 ${escapeHtml(others)}</span>`;
+}
+function catCounts() {
+    const counts = {};
+    marketsData.forEach(m => { const c = primaryCat(m); counts[c] = (counts[c] || 0) + 1; });
+    return counts;
+}
+function visibleMarkets() {
+    return activeCat ? marketsData.filter(m => primaryCat(m) === activeCat) : marketsData;
+}
+function setCat(key) {
+    activeCat = key;
+    renderMarkets();
+}
+function renderTabs() {
+    const bar = document.getElementById('cat-tabs');
+    if (!bar) return;
+    const counts = catCounts();
+    // 选中的品类若重扫后已无市场,回落到「全部」
+    if (activeCat && !counts[activeCat]) activeCat = null;
+    // 目录顺序(catLabels 插入顺序≈CATEGORY_CATALOG),只列有市场的品类;其他垫底
+    const ordered = Object.keys(catLabels).filter(s => counts[s]);
+    Object.keys(counts).forEach(s => {
+        if (s !== '__other__' && !ordered.includes(s)) ordered.push(s);
+    });
+    const tabs = [{key: null, label: '全部', n: marketsData.length}];
+    ordered.forEach(s => tabs.push({key: s, label: catLabelOf(s), n: counts[s]}));
+    if (counts['__other__']) tabs.push({key: '__other__', label: '其他', n: counts['__other__']});
+    bar.innerHTML = tabs.map(t => {
+        const active = (t.key === activeCat) ? ' active' : '';
+        const arg = t.key === null ? 'null' : `'${t.key}'`;
+        return `<span class="cat-tab${active}" onclick="setCat(${arg})">${escapeHtml(t.label)} <span class="metric-note">${t.n}</span></span>`;
+    }).join('');
+}
+
 function renderMarkets() {
+    renderTabs();
+    const shown = visibleMarkets();
     const tb = document.getElementById('markets-body');
-    tb.innerHTML = marketsData.map((m, i) => {
+    tb.innerHTML = shown.map((m, i) => {
         const mid = m.market_id;
         const open = !!expanded[mid];
         return `<tr id="mrow-${i}">
             <td>${i + 1}</td>
-            <td>${marketCell(m.market_name, m.market_id, m.market_url)}</td>
+            <td>${marketCell(m.market_name, m.market_id, m.market_url)}${catNote(m)}</td>
             <td>${m.outcome || ''}</td>
             <td>$${(m.daily_reward || 0).toFixed(2)}/天</td>
             <td class="metric">${m.rewards_min_size ?? '—'}</td>
@@ -94,7 +148,7 @@ function renderMarkets() {
         </tr>`;
     }).join('');
     // 跨刷新保持展开:为仍展开的市场按当前行位重插梯队(命中缓存即显,否则占位)(F10)
-    marketsData.forEach((m, i) => {
+    shown.forEach((m, i) => {
         if (expanded[m.market_id]) {
             insertLadderRow(i, ladderCache[m.market_id]
                 || (firstWallet
@@ -168,9 +222,34 @@ async function toggleLadder(mid, i) {
     if (expanded[mid]) renderMarkets();  // 回填结果(若仍展开)
 }
 
-function scanMarkets() {
-    fetch('/api/engine/scan', { method: 'POST' });
+// 点击扫描后本地即时反馈:清表 + 归零选项卡 + 横幅,再起轮询。
+// 等 POST 返回(后端此时已同步置 scan_status=scanning)再起轮询:否则第一拍轮询可能
+// 抢在 POST 前读到「非扫描」,反而把横幅藏掉、把轮询停掉。
+function startScanUI() {
+    activeCat = null;
+    marketsData = [];
+    expanded = {}; ladderCache = {};
+    renderMarkets();
+    const box = document.getElementById('scan-progress');
+    box.style.display = 'block';
+    box.textContent = '正在启动扫描…';
     ensurePoll();
+}
+
+function scanMarkets() {
+    fetch('/api/engine/scan', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d && d.scanning) {
+                // 已在扫描:弹确认,确认才用最新配置中断重来
+                if (confirm('正在扫描中，确定中断当前扫描、用最新配置重新扫描吗？')) {
+                    fetch('/api/engine/scan?force=1', { method: 'POST' }).then(() => startScanUI());
+                }
+                return;  // 取消则什么都不做,当前扫描继续
+            }
+            startScanUI();
+        })
+        .catch(() => { startScanUI(); });
 }
 function ensurePoll() {
     if (scanPollTimer) return;
@@ -212,6 +291,10 @@ fetch('/api/settings').then(r => r.json()).then(d => { maxSpread = d.max_spread_
 fetch('/api/wallets').then(r => r.json()).then(ws => {
     const en = (ws || []).filter(w => w.enabled);
     firstWallet = en.length ? en[0].address : null;
+}).catch(() => {});
+fetch('/api/categories').then(r => r.json()).then(d => {
+    (d.categories || []).forEach(c => { catLabels[c.slug] = c.label; });
+    renderMarkets();  // 标签到位后重渲染选项卡
 }).catch(() => {});
 refreshEligible();
 </script>

@@ -21,6 +21,7 @@ import re
 import time
 import logging
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from engine.categories import (
     included_union,
     any_include_other,
@@ -28,10 +29,15 @@ from engine.categories import (
     market_wanted,
     count_by_category,
 )
-from config import CATALOG_SLUGS
+from config import CATALOG_SLUGS, CATEGORY_CATALOG
 from engine.strategy import reward_price_range
+from api.proxy import use_proxy
 
 logger = logging.getLogger(__name__)
+
+
+class ScanSuperseded(Exception):
+    """本轮扫描被更新一轮接管,应立即让位(合作式取消)。"""
 
 
 def _parse_end_date(end_date_str: str) -> float:
@@ -73,7 +79,7 @@ class MarketScanner:
         self.wallet_address = wallet_address
 
     def discover_candidates(
-        self, templates, on_progress=None, on_found=None
+        self, templates, on_progress=None, on_found=None, cancel=None
     ) -> list[dict]:
         """共享发现:抓全量奖励市场,按品类交集采集阶段排除,打 tags,补精确奖励。
         钱包无关、网络密集(rewards 端点)、不抓订单簿、不算价。"""
@@ -97,12 +103,18 @@ class MarketScanner:
                 )
                 category_ids[slug] = set()
 
+        # 顺带算一份品类计数快照(配置页勾选用),直接复用刚查到的 tag 数据,
+        # 免得配置页再单独联网一遍。计数口径与 category_counts 一致(在全量集上交集)。
+        self.last_catalog = self._catalog_payload(full, category_ids)
+
         pool = tag_pool(full, category_ids, CATALOG_SLUGS)
         blacklist = self.db.get_blacklist_ids()
 
         out = []
         checked = 0
         for market in pool:
+            if cancel and cancel():
+                raise ScanSuperseded()
             cid = market.get("condition_id", "")
             if cid in blacklist:
                 continue
@@ -153,41 +165,71 @@ class MarketScanner:
         )
         return out
 
-    def refresh_orderbooks(self, pool):
+    def refresh_orderbooks(self, pool, cancel=None):
         """给候选池每个市场刷新订单簿快照(覆盖写)。钱包无关、可重复调。
         某 token 抓不到则不入该市场的 _orderbooks(filter 现有逻辑会跳过该 token),
         覆盖写保证不留上一轮的陈旧簿。"""
         for market in pool:
+            if cancel and cancel():
+                raise ScanSuperseded()
             market["_orderbooks"] = self._fetch_orderbooks(market)
 
     def fetch_candidates(
-        self, templates, on_progress=None, on_found=None, skip_orderbook=False
+        self,
+        templates,
+        on_progress=None,
+        on_found=None,
+        skip_orderbook=False,
+        cancel=None,
     ) -> list[dict]:
-        """共享采集 = 发现 + (除非 skip_orderbook)刷新订单簿。手动扫描/单测用。"""
+        """共享采集 = 发现 + (除非 skip_orderbook)刷新订单簿。手动扫描/单测用。
+        cancel(): 返回 True 时在最近的检查点抛 ScanSuperseded 让位(手动重扫接管)。"""
         pool = self.discover_candidates(
-            templates, on_progress=on_progress, on_found=on_found
+            templates, on_progress=on_progress, on_found=on_found, cancel=cancel
         )
         if not skip_orderbook:
-            self.refresh_orderbooks(pool)
+            self.refresh_orderbooks(pool, cancel=cancel)
         return pool
+
+    def _catalog_payload(self, full, category_ids) -> dict:
+        """由「全量奖励市场 + 各 slug 命中集」组装配置页品类快照。计数在全量集上交集,
+        与勾选无关;discover_candidates(扫描)与 category_counts(手动刷新)共用口径。"""
+        full_ids = {m.get("condition_id", "") for m in full if m.get("condition_id")}
+        narrowed = {s: category_ids.get(s, set()) & full_ids for s in CATALOG_SLUGS}
+        counts, other = count_by_category(full_ids, narrowed, CATALOG_SLUGS)
+        cats = [
+            {"slug": c["slug"], "label": c["label"], "count": counts.get(c["slug"], 0)}
+            for c in CATEGORY_CATALOG
+        ]
+        return {"categories": cats, "other_count": other, "ready": True}
 
     def category_counts(self, catalog) -> dict:
         """catalog: [{'slug','label'}]. 返回各 curated 品类在当前奖励市场的市场数 +
-        「其他」数。钱包无关;逐 slug 查 CLOB 奖励端点,与全量取交集计数。"""
+        「其他」数。钱包无关;各 slug 并发查 CLOB 奖励端点,与全量取交集计数。"""
         full = self.api.get_rewards_markets()
         full_ids = {m.get("condition_id", "") for m in full if m.get("condition_id")}
-        category_ids = {}
-        for c in catalog:
-            slug = c["slug"]
-            try:
+
+        # get_rewards_markets 是静态方法,靠环境 current_proxy 走代理,而 contextvar
+        # 不会自动继承到线程池 worker —— 每个 worker 必须自己重设一次代理。
+        proxy = getattr(self.api, "proxy_url", None)
+
+        def _slug_ids(slug):
+            with use_proxy(proxy):
                 rows = self.api.get_rewards_markets(tag_slug=slug)
-                category_ids[slug] = {
-                    m.get("condition_id", "") for m in rows
-                } & full_ids
-            except Exception as e:
-                logger.warning("category_counts slug %s failed: %s", slug, e)
-                category_ids[slug] = set()
+            return {m.get("condition_id", "") for m in rows} & full_ids
+
         slugs = [c["slug"] for c in catalog]
+        category_ids = {}
+        with ThreadPoolExecutor(max_workers=min(8, len(slugs) or 1)) as pool:
+            futures = {pool.submit(_slug_ids, s): s for s in slugs}
+            for fut in as_completed(futures):
+                slug = futures[fut]
+                try:
+                    category_ids[slug] = fut.result()
+                except Exception as e:
+                    logger.warning("category_counts slug %s failed: %s", slug, e)
+                    category_ids[slug] = set()
+
         counts, other = count_by_category(full_ids, category_ids, slugs)
         cats = [
             {"slug": c["slug"], "label": c["label"], "count": counts.get(c["slug"], 0)}

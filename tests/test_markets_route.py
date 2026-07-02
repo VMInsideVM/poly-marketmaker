@@ -85,3 +85,83 @@ def test_ladder_preview_route(client):
     side = data["sides"][0]
     assert side["outcome"] == "YES"
     assert "levels" in side and side["levels"][0]["thickness"] == 1.5
+
+
+def test_ladder_reads_tokens_from_pool_shape(client, monkeypatch):
+    # 内存候选池形态:一条市场 + tokens 列表、无顶层 token_id —— 不能 KeyError,
+    # 要按 tokens 迭代出各侧。
+    from unittest.mock import MagicMock
+
+    mgr = MagicMock()
+    mgr.eligible_markets = [
+        {
+            "market_id": "c1",
+            "tokens": [{"token_id": "tY", "outcome": "YES"}],
+            "rewards_min_size": 100,
+            "rewards_max_spread": 4,
+        }
+    ]
+    monkeypatch.setattr(routes, "manager", mgr)
+    r = client.get("/api/markets/c1/ladder?wallet=0xw")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["market_id"] == "c1"
+    assert data["sides"][0]["outcome"] == "YES"
+
+
+def test_ladder_returns_json_error_on_exception(client, monkeypatch):
+    # 预演中途抛异常时必须回 JSON 错误(带 500),不能吐 HTML 页 —— 否则前端 r.json()
+    # 会炸「Unexpected token '<'」把真因盖住。
+    class BoomAPI(_FakeAPI):
+        def get_balance(self):
+            raise RuntimeError("boom balance")
+
+    monkeypatch.setattr(routes, "_wallet_apis", lambda only=None: {"0xw": BoomAPI()})
+    r = client.get("/api/markets/c1/ladder?wallet=0xw")
+    assert r.status_code == 500
+    data = r.get_json()  # 若返回的是 HTML,这里会是 None
+    assert data is not None and "boom balance" in data["error"]
+
+
+def test_scan_status_no_manager(client):
+    d = client.get("/api/engine/scan-status").get_json()
+    assert d["scan_status"] == "idle" and d["scan_total"] == 0 and d["found"] == 0
+
+
+def test_scan_status_from_manager(client, monkeypatch):
+    from unittest.mock import MagicMock
+
+    mgr = MagicMock()
+    mgr.scan_status = "scanning"
+    mgr.scan_checked = 5
+    mgr.scan_total = 20
+    mgr.eligible_markets = [{"market_id": "a"}, {"market_id": "b"}]
+    mgr.last_scan_time = 111.0
+    monkeypatch.setattr(routes, "manager", mgr)
+    d = client.get("/api/engine/scan-status").get_json()
+    assert d["scan_status"] == "scanning"
+    assert d["scan_checked"] == 5 and d["scan_total"] == 20
+    assert d["found"] == 2
+
+
+def test_scan_delegates_and_reports_started(client, monkeypatch):
+    from unittest.mock import MagicMock
+
+    mgr = MagicMock()
+    mgr.start_scan_async.return_value = False  # 已在扫描
+    monkeypatch.setattr(routes, "manager", mgr)
+    d = client.post("/api/engine/scan").get_json()
+    mgr.start_scan_async.assert_called_once()
+    assert d["ok"] is True and d["started"] is False and d["scanning"] is True
+
+
+def test_scan_force_param_forwarded(client, monkeypatch):
+    from unittest.mock import MagicMock
+
+    mgr = MagicMock()
+    mgr.start_scan_async.return_value = True
+    monkeypatch.setattr(routes, "manager", mgr)
+    client.post("/api/engine/scan")
+    assert mgr.start_scan_async.call_args.kwargs == {"force": False}
+    client.post("/api/engine/scan?force=1")
+    assert mgr.start_scan_async.call_args.kwargs == {"force": True}

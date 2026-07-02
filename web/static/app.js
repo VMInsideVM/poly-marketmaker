@@ -60,6 +60,28 @@ function marketCell(name, conditionId, url) {
   return `<span title="${escapeHtml(cid)}">${inner}${copyBtn}</span>`;
 }
 
+// 全局扫描指示器:每个页面都轮询后端扫描状态,显示在侧边栏 —— 扫描是后端后台线程,
+// 切页不会停;这里让进度在任意页面都可见、切页也不丢(点击回到市场发现页)。
+(function () {
+  function tick() {
+    fetch('/api/engine/scan-status').then(r => r.json()).then(d => {
+      const el = document.getElementById('scan-indicator');
+      if (!el) return;
+      if (d && d.scan_status === 'scanning') {
+        const c = d.scan_checked || 0, t = d.scan_total || 0;
+        el.style.display = 'block';
+        el.textContent = t > 0
+          ? `⟳ 扫描中 ${c}/${t} · 已找到 ${d.found || 0}`
+          : `⟳ 扫描中 · 已找到 ${d.found || 0}`;
+      } else {
+        el.style.display = 'none';
+      }
+    }).catch(() => {});
+  }
+  setInterval(tick, 3000);
+  tick();
+})();
+
 // 全局拦截:任一 fetch 被重定向到登录/设置页(会话失效,典型场景=自动更新重启后
 // 旧标签页仍开着)时,直接跳登录,避免页面静默停更 + .json() 解析登录 HTML 报错(F12)。
 (function () {
