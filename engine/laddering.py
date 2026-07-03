@@ -84,6 +84,55 @@ def plan_gap_single_order(
     return None
 
 
+def compute_market_single_orders(
+    side_a,
+    side_b,
+    market_budget_usd,
+    max_exposure_shares,
+    amount_value_table,
+    gap_wide_cents,
+    gap_mid_cents,
+    gap_high_coeff_sum_min,
+    single_order_min_coeff,
+):
+    """两边共享敞口的网关式单档计划(每边至多一单)。
+
+    对每边调 plan_gap_single_order,再按剩余预算/敞口封顶;封顶后不足 min_size 则放弃
+    该边(不挂残档,与 compute_market_ladders 口径一致)。a 先于 b 扣预算。
+    返回 {"a":[(price,shares)]|[], "b":[...]}。
+    """
+    out = {"a": [], "b": []}
+    spent_usd = 0.0
+    spent_shares = 0
+    for key, side in (("a", side_a), ("b", side_b)):
+        if side is None:
+            continue
+        plan = plan_gap_single_order(
+            side["bids"],
+            side["reward_range_min"],
+            side["reward_range_max"],
+            side["min_size"],
+            amount_value_table,
+            gap_wide_cents,
+            gap_mid_cents,
+            gap_high_coeff_sum_min,
+            single_order_min_coeff,
+        )
+        if plan is None:
+            continue
+        price, shares = plan
+        remaining_usd = market_budget_usd - spent_usd
+        cap_usd = int(remaining_usd / price) if price > 0 else 0
+        cap_shares = max_exposure_shares - spent_shares
+        shares = min(shares, cap_usd, cap_shares)
+        if shares < side["min_size"]:
+            continue
+        out[key].append((price, shares))
+        spent_usd += price * shares
+        spent_shares += shares
+    return out
+
+
 def build_ladder(
     bids,
     reward_range_min,

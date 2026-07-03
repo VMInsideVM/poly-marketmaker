@@ -97,3 +97,41 @@ def test_tie_max_gap_splits_at_topmost():
     # (若误在第二处劈分,高位含 0.20 厚档系数和会 >=20 而误挂。)
     out = _plan([_b(0.30, 100), _b(0.20, 800), _b(0.10, 100)], wide=8)
     assert out is None
+
+
+from engine.laddering import compute_market_single_orders
+
+
+def _side(bids, rmin=0.10, rmax=0.31, min_size=20):
+    return {
+        "bids": bids,
+        "reward_range_min": rmin,
+        "reward_range_max": rmax,
+        "min_size": min_size,
+    }
+
+
+def test_single_orders_one_side_places_one():
+    side = _side([_b(0.28, 50), _b(0.27, 40)])
+    out = compute_market_single_orders(side, None, 1000.0, 500, AV, 10, 5, 20, 0)
+    assert out == {"a": [(0.28, 20)], "b": []}
+
+
+def test_single_orders_budget_too_small_skips():
+    # 预算 3 USD:0.28×20=5.6 > 3 -> 封顶 int(3/0.28)=10 < min_size 20 -> 放弃。
+    side = _side([_b(0.28, 50)])
+    out = compute_market_single_orders(side, None, 3.0, 500, AV, 10, 5, 20, 0)
+    assert out == {"a": [], "b": []}
+
+
+def test_single_orders_both_sides_share_budget():
+    a = _side([_b(0.28, 50)])
+    b = _side([_b(0.22, 400)])
+    out = compute_market_single_orders(a, b, 1000.0, 500, AV, 10, 5, 20, 0)
+    assert out["a"] == [(0.28, 20)]
+    assert out["b"] == [(0.22, 20)]
+
+
+def test_single_orders_none_side_skipped():
+    out = compute_market_single_orders(None, None, 1000.0, 500, AV, 10, 5, 20, 0)
+    assert out == {"a": [], "b": []}
