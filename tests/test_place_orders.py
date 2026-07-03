@@ -425,3 +425,27 @@ def test_dropout_cancels_only_buys_not_sells():
     worker.place_orders([_elig("A", "A-y", "Yes")], cancel_dropouts=True)
     cancelled = [oid for c in api.cancel_orders.call_args_list for oid in c.args[0]]
     assert "o-b-buy" in cancelled and "o-b-sell" not in cancelled
+
+
+def test_gap_single_places_one_order_highest_qualifying():
+    worker, api, db = _make_worker(
+        template={
+            "placement_mode": "gap_single",
+            "tier_rules": [],  # gap_single 不需要 tier_rules,不应被空 tier_rules 闸拦
+            "amount_value_table": [
+                {"upper": 0.20, "value": 1},
+                {"upper": 0.25, "value": 1.5},
+                {"upper": 0.31, "value": 2},
+            ],
+            "gap_wide_cents": 10,
+            "gap_mid_cents": 5,
+            "gap_high_coeff_sum_min": 20,
+            "single_order_min_coeff": 0,
+        }
+    )
+    # 相邻价差 1¢(规则3);买一 0.28 系数 50/(20*2)=1.25 >0 -> 挂一单 20 股 @0.28。
+    api.get_orderbook.return_value = _ob([(0.28, 50), (0.27, 40)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    assert api.place_limit_buy.call_count == 1
+    c = api.place_limit_buy.call_args_list[0]
+    assert round(c.args[1], 2) == 0.28 and c.args[2] == 20

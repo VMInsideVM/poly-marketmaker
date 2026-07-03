@@ -125,6 +125,7 @@ class WalletWorker:
         """
         from engine.laddering import (
             compute_market_ladders,
+            compute_market_single_orders,
             apply_double_sided_floor,
             reconcile_buy_orders,
         )
@@ -150,7 +151,12 @@ class WalletWorker:
         tier_rules = tmpl.get("tier_rules") or []
         tier_match_var = tmpl.get("tier_match_var", "cumulative_thickness")
         amount_value_table = tmpl.get("amount_value_table") or None
-        if not tier_rules:
+        placement_mode = tmpl.get("placement_mode", "laddering")
+        gap_wide_cents = float(tmpl.get("gap_wide_cents", 10))
+        gap_mid_cents = float(tmpl.get("gap_mid_cents", 5))
+        gap_high_coeff_sum_min = float(tmpl.get("gap_high_coeff_sum_min", 20))
+        single_order_min_coeff = float(tmpl.get("single_order_min_coeff", 0))
+        if placement_mode == "laddering" and not tier_rules:
             # 模板没配档位规则表 -> 一单都不会挂。显式告警,避免"引擎在跑却
             # 静默不下单"被误认为"没机会",便于排查模板配置问题。
             logger.warning(
@@ -290,16 +296,29 @@ class WalletWorker:
             if budget_ok:
                 ca = None if side_a["token_id"] in held_assets else side_a
                 cb = None if (side_b and side_b["token_id"] in held_assets) else side_b
-                ladders = compute_market_ladders(
-                    ca,
-                    cb,
-                    tier_rules,
-                    budget,
-                    shares_budget,
-                    tier_match_var,
-                    amount_value_table,
-                )
-                ladders = apply_double_sided_floor(ladders, min_price_double_cents)
+                if placement_mode == "gap_single":
+                    ladders = compute_market_single_orders(
+                        ca,
+                        cb,
+                        budget,
+                        shares_budget,
+                        amount_value_table,
+                        gap_wide_cents,
+                        gap_mid_cents,
+                        gap_high_coeff_sum_min,
+                        single_order_min_coeff,
+                    )
+                else:
+                    ladders = compute_market_ladders(
+                        ca,
+                        cb,
+                        tier_rules,
+                        budget,
+                        shares_budget,
+                        tier_match_var,
+                        amount_value_table,
+                    )
+                    ladders = apply_double_sided_floor(ladders, min_price_double_cents)
 
             for key, side in (("a", side_a), ("b", side_b)):
                 if side is None:
