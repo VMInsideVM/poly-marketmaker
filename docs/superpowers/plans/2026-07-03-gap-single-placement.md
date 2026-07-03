@@ -178,7 +178,9 @@ def plan_gap_single_order(
     max_gap = 0.0
     split_idx = len(in_range) - 1
     for i in range(len(in_range) - 1):
-        gap = (in_range[i]["price"] - in_range[i + 1]["price"]) * 100.0
+        # 按分四舍五入去浮点尘:否则 0.28-0.18 会算成 10.000000000000002,把恰 10¢ 的
+        # 价差误判成 >10¢ 宽断层;并列价差也会被尘埃打破而选错劈分点。
+        gap = round((in_range[i]["price"] - in_range[i + 1]["price"]) * 100.0, 6)
         if gap > max_gap:
             max_gap = gap
             split_idx = i

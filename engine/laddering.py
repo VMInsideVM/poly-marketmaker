@@ -26,6 +26,64 @@ def amount_value(price, table):
     return None
 
 
+def plan_gap_single_order(
+    bids,
+    reward_range_min,
+    reward_range_max,
+    min_size,
+    amount_value_table,
+    gap_wide_cents,
+    gap_mid_cents,
+    gap_high_coeff_sum_min,
+    single_order_min_coeff,
+):
+    """网关式单档挂单(v4 用户策略,纯函数)。
+
+    对单个 token 的买单簿:取奖励区间内买档 -> 算风险系数(份数/(最低份数×金额数值))
+    -> 按相邻在区间档的最大价差分三级(>宽 / 中~宽 / <中)-> 宽断层再查
+    「断层上方各档风险系数之和 >= gap_high_coeff_sum_min」市场闸门(不过则整市场不挂)
+    -> 自最高在区间档往下取第一个「系数 > single_order_min_coeff」的档,挂 min_size 一单。
+    返回 (price, shares) 或 None(不挂)。价差单位为美分;闸门/选档口径:价差 10/5 归中一级
+    (规则1 严格 >宽、规则3 严格 <中);高位系数和 == 门槛 放行;选档严格 > x。
+    """
+    if min_size <= 0 or not bids:
+        return None
+    in_range = sorted(
+        (
+            {"price": float(b["price"]), "size": float(b["size"])}
+            for b in bids
+            if reward_range_min <= float(b["price"]) <= reward_range_max
+        ),
+        key=lambda lv: lv["price"],
+        reverse=True,
+    )
+    if not in_range:
+        return None
+    for lv in in_range:
+        av = amount_value(lv["price"], amount_value_table)
+        lv["coeff"] = (lv["size"] / (min_size * av)) if (av and av > 0) else 0.0
+    # 最大相邻价差 + 劈分点:高位 = in_range[0 .. split_idx](价差上方一侧)。
+    max_gap = 0.0
+    split_idx = len(in_range) - 1
+    for i in range(len(in_range) - 1):
+        # 按分四舍五入去浮点尘:否则 0.28-0.18 会算成 10.000000000000002,把恰 10¢ 的
+        # 价差误判成 >10¢ 宽断层;并列价差也会被尘埃打破而选错劈分点。
+        gap = round((in_range[i]["price"] - in_range[i + 1]["price"]) * 100.0, 6)
+        if gap > max_gap:
+            max_gap = gap
+            split_idx = i
+    # 仅宽断层加「高位风险系数和」市场闸门。
+    if max_gap > gap_wide_cents:
+        high_sum = sum(lv["coeff"] for lv in in_range[: split_idx + 1])
+        if high_sum < gap_high_coeff_sum_min:
+            return None
+    # 三级统一顺延:自上而下第一个 coeff > x。
+    for lv in in_range:
+        if lv["coeff"] > single_order_min_coeff:
+            return (lv["price"], int(min_size))
+    return None
+
+
 def build_ladder(
     bids,
     reward_range_min,
