@@ -1,0 +1,155 @@
+# 网关式单档挂单 + 浮盈市价离场
+
+日期：2026-07-03
+状态：设计已确认，待写实现计划
+
+## 背景
+
+用户提出一套完整做市策略。筛选侧（奖励≥30 美金、结算日期≥1 天、奖励最低份数=20、买一 10–31 美分、品类白名单）现有配置项已能覆盖。缺口在两处，本 spec 解决：
+
+1. **挂单选择**：按买单簿「相邻档位价差」把市场分三级，宽断层再加一道「高位系数和」市场门槛，最终每市场只挂**一单**，用「系数 > x」自上而下顺延选一档。现有多档做市引擎（laddering / tier_rules）表达不了这套形状。
+2. **卖单**：浮盈（成本 < 买一）立即市价卖出兑现；保本/套牢（成本 ≥ 买一）挂成本价等回本；**完全关闭止损**。现有 `plan_exit` 浮盈是挂卖一做 maker，且总带 B0 强平。
+
+用户 2026-07-03 逐条确认了以下口径：
+- 断层看**奖励区间内**相邻档的**最大**价差。
+- 「高位买方加起来」= 断层上方各档**风险系数之和**，默认门槛 20、可配。
+- 选档三级**统一**用「自上而下、第一个风险系数 > x 的档」，x 可配。
+- 卖单 = 浮盈市价卖 + 套牢挂成本 + 无止损（用户已知晓关止损后套牢仓无兜底的风险）。
+
+## 范围
+
+**做**：新增可选「挂单模式」`gap_single` 及其纯函数、预算封顶包装、manager 接入；`plan_exit` 新增「浮盈市价」止盈模式与「关闭」止损；对应配置项与配置页；单元/契约/回归测试。
+
+**不做**：筛选侧改动（已可配）；分品类结算天数（需多模板多钱包，属另一件事）；通用脚本引擎（守 YAGNI）；单档模式的挂单份数加仓（固定最低份数）。
+
+## 架构决策
+
+新增**模板级开关** `placement_mode ∈ {"laddering"(默认), "gap_single"}`。
+
+- 默认 `laddering`，现有 `build_ladder` / `compute_market_ladders` / `apply_double_sided_floor` / tier_rules 可视化编辑器**原样保留、零回归**；其他钱包/模板不受影响。
+- 选 `gap_single` 的模板走新纯函数链。两条链并存、按模板二选一。
+- 不塞进 `tier_rules`：那套是「多档并列 + 每档份额规则」，与「单档 + 断层市场门槛 + 顺延」形状冲突，硬塞会破坏既有模型且难测。独立纯函数最干净、可单测。
+
+接入点：`engine/manager.py` 现有 `_place_round` 里 `compute_market_ladders(...)` + `apply_double_sided_floor(...)`（约 293–302 行）按 `placement_mode` 分支。`side` 字典（`token_id/outcome/min_size/bids/reward_range_min/reward_range_max/tick_size_str`）两条链共用，无需改造上游。撤改收敛 `reconcile_buy_orders`、成交后单侧暂停、预算/敞口扣减全部沿用——挂单随盘口移动、买一撤单自动跟随都不用改。
+
+## A. 挂单选择 — `plan_gap_single_order`（`engine/laddering.py`，纯函数）
+
+对**单个 token** 的买单簿返回 `(price, shares)` 或 `None`（不挂）。
+
+签名：
+```
+plan_gap_single_order(
+    bids,                      # [{"price","size"}...]
+    reward_range_min, reward_range_max,
+    min_size,                  # 该市场 rewards_min_size（本策略恒=20）
+    amount_value_table,        # 复用 laddering.amount_value 的表
+    gap_wide_cents, gap_mid_cents,
+    gap_high_coeff_sum_min,    # 规则1 高位系数和门槛
+    single_order_min_coeff,    # x：选档系数门槛
+) -> (price, shares) | None
+```
+
+算法：
+1. `min_size ≤ 0` 或无 bids → `None`。
+2. **取奖励区间内买档**：`reward_range_min ≤ price ≤ reward_range_max`，按价降序。空 → `None`。
+3. **每档风险系数** `coeff = size / (min_size × amount_value(price, table))`；`amount_value` 为空/≤0（价超表）时 `coeff = 0`（不入求和、也选不中）。
+4. **最大相邻价差 + 劈分点**：对相邻在区间档算价差（美分）`gap_i = (price_i − price_{i+1}) × 100`；取最大 `max_gap` 及其位置 `split_idx`（高位 = `in_range[0 .. split_idx]`，即价差上方那一侧）。不足 2 档 → `max_gap = 0`。
+5. **分级**：
+   - `max_gap > gap_wide_cents`（规则1，宽断层）：`high_sum = Σ coeff(高位各档)`；`high_sum < gap_high_coeff_sum_min` → `None`（整市场不挂）；否则进选档。
+   - `gap_mid_cents ≤ max_gap ≤ gap_wide_cents`（规则2）：直接进选档。
+   - `max_gap < gap_mid_cents`（规则3，正常）：直接进选档。
+6. **选档（三级统一顺延）**：自最高在区间档往下，第一个 `coeff > single_order_min_coeff` 的档 → 返回 `(该档价, int(min_size))`；都不满足 → `None`。
+
+**下单份数固定 = `min_size`**（一单）。
+
+边界口径（明确写死，供复核）：
+- 价差落点：`10` 归规则2、`5` 归规则2（规则1 严格 `>gap_wide`，规则3 严格 `<gap_mid`）。
+- 高位系数和：`< 门槛` 才拦，`== 门槛` 放行。
+- 选档：严格 `> x`（`x` 应 ≥ 0；`coeff=0` 的档在 `x≥0` 时永不入选）。
+- 「高位」= 最大价差上方（含上沿档）全部在区间档；多处并列最大价差时取**最靠上**那处（第一次出现）。
+- 选档扫描**全部在区间档**（不限高位）：规则1 过闸后，若高位无档 >x 而低位有，仍挂低位——与「统一顺延」一致。高位系数和只作**市场级闸门**，不限制落档位置。
+
+### 例（min_size=20；金额数值 ≤0.20→1 / ≤0.25→1.5 / ≤0.31→2；x=0；区间[0.12,0.30]）
+
+买档降序 `0.28×50 / 0.27×800 / 0.15×400 / 0.10×100`：
+- `0.10` 出区间剔除。在区间系数：`0.28→50/(20×2)=1.25`、`0.27→800/40=20`、`0.15→400/20=20`。
+- 相邻价差 0.28→0.27=1¢、0.27→0.15=**12¢** → `max_gap=12 > 10` → 规则1，高位=｛0.28,0.27｝，`high_sum=21.25 ≥ 20` → 通过。
+- 顺延：`0.28` 系数 1.25 > 0 → **挂 20 股 @ 0.28**。
+- 反例：`0.27×800`→`0.27×30` 则 `high_sum=1.25+0.75=2 < 20` → 整市场不挂。
+
+## B. 预算/敞口封顶 — `compute_market_single_orders`（`engine/laddering.py`）
+
+与 `compute_market_ladders` 同风格、同输出形状 `{"a":[(price,shares)]|[], "b":[...]}`（每边至多一单）。
+
+签名：
+```
+compute_market_single_orders(
+    side_a, side_b,            # 与 compute_market_ladders 同结构或 None
+    market_budget_usd, max_exposure_shares,
+    amount_value_table,
+    gap_wide_cents, gap_mid_cents,
+    gap_high_coeff_sum_min, single_order_min_coeff,
+) -> {"a":[...], "b":[...]}
+```
+
+逻辑：对每边调 `plan_gap_single_order`；得 `(price, shares)` 后按剩余预算/敞口封顶 `shares = min(shares, ⌊remaining_usd/price⌋, max_shares−spent)`；封顶后 `< side.min_size` → 放弃该边（沿用现有「不挂残档」）。a 先于 b 扣预算。**不套用** `apply_double_sided_floor`（那是 laddering §8 的双边地板；单档策略无此要求，且 10–31¢ 区间下阈值恒为 no-op）。
+
+## C. 卖单 — `plan_exit` 新增 `take_profit_mode` + 止损可关（`engine/take_profit.py`）
+
+- `take_profit_mode ∈ {"maker"(默认), "market"}`；`stop_loss_mode` 增加 `"off"`。
+- `effective_theta_stop`：`stop_loss_mode == "off"` 时返回 `None`；`plan_exit` 收到 `theta_stop is None` 即**不触发 B0**。`check_exit`（monitor）从模板读 `take_profit_mode` 与 `stop_loss_*`，算出 `theta_stop` 一并传入 `plan_exit`。
+- `plan_exit` 在 `take_profit_mode == "market"` 下：
+  - 成本 **< 买一**（浮盈）→ `{"tier":"A_market","action":"market",...}`：走现有 `_exit_position` 的 `place_market_sell` + `market_fill_price` 记真实成交价（≈买一），仅 tier 标签换成止盈语义。市价卖仅在买一>成本时触发，**成交必 ≥ 成本**，「绝不低于成本」不变量成立。
+  - 成本 **≥ 买一**（保本/套牢）→ 挂成本价 `ceil_to_tick(cost)`（`B_park`）。
+  - `theta_stop = None` → 跳过 B0；无盘口 → `noop`（同现有）。
+- `maker` 模式行为与现状完全一致（回归保护）。
+- monitor 侧：`_exit_position` 已能处理 `action=="market"`；仅需按 tier（止盈 vs 止损）区分记录的 `action_type`/reason/状态行文案。现有「下单前钳价 ≥ 成本」「每次离场打 INFO 日志」保护保留。
+
+## D. 配置项 + 配置页
+
+`config.py TEMPLATE_DEFAULTS` 新增（均在 `/api/settings`、`/api/templates/<id>` 的 `TEMPLATE_DEFAULTS` 白名单内，自动存取，无需改路由契约）：
+
+| key | 默认 | 含义 |
+|---|---|---|
+| `placement_mode` | `"laddering"` | 挂单模式 |
+| `gap_wide_cents` | `10` | 宽断层阈值（美分） |
+| `gap_mid_cents` | `5` | 中断层阈值（美分） |
+| `gap_high_coeff_sum_min` | `20` | 规则1 高位风险系数和门槛 |
+| `single_order_min_coeff` | `0` | 选档系数门槛 x |
+| `take_profit_mode` | `"maker"` | 止盈方式 |
+| `stop_loss_mode` | 增 `"off"` | 止损方式加「关闭」 |
+
+`amount_value_table` 默认最高档上界 `0.30 → 0.31`（值仍 2），使 30–31¢ 档有金额数值可算（否则该档 `coeff=0` 选不中，与 31¢ 买一区间矛盾）。此改动对 laddering 风险系数模式仅极微扩宽，无害。
+
+配置页 `web/templates/config.html`：
+- 加 `placement_mode`、`take_profit_mode` 两个 `<select>`；`stop_loss_mode` 加 `<option value="off">关闭止损</option>`。
+- 加 4 个断层参数输入（`gap_wide_cents/gap_mid_cents/gap_high_coeff_sum_min/single_order_min_coeff`）。
+- JS 按模式 show/hide：`gap_single` 显示断层参数、隐藏 tier_rules 编辑器（金额表仍显示，风险系数要用）；`stop_loss_mode=="off"` 隐藏比例/固定阈值输入；`take_profit_mode` 独立。
+- **保存 JS 显式收两个新 select**（既有坑：select 不在默认序列化路径，参照 `stop_loss_mode` 的收法）。
+- 断层参数与止损「关闭」旁加 `⚠️` 风险提示文案。
+
+## E. 测试
+
+- `tests/` 新增 `plan_gap_single_order` 纯函数用例：三级分级；规则1 求和门槛（`<20` 跳过 / `≥20` 挂 / `==20` 放行）；顺延取首个 `>x`；全不满足跳过；区间过滤；金额表 None→coeff 0；`<2` 档当正常；边界（gap=10/5、x 严格 >）；并列最大价差取最上。
+- `compute_market_single_orders`：预算/敞口封顶、封顶后不足 min_size 跳过、a 先扣 b 后、双边/单边。
+- `plan_exit` market 模式：浮盈→market、成本==买一→挂成本、套牢→挂成本、`theta_stop=None`→无 B0、`maker` 模式回归不变、止损 on 时 B0 照常。
+- 契约测试：`/api/settings`、`/api/templates/<id>` 往返新键不丢。
+- 回归：现有 laddering 全套测试保持全绿（默认模式不变）。
+
+## 预演页（次要，可作最后增量）
+
+`/api/markets/<id>/ladder`（市场发现「梯队预演」）当前恒走 `preview_market_ladders`。`gap_single` 模板打开会展示误导性的多档预演。取舍：
+- 首选：加 `preview_gap_single_market`（返回逐档 price/size/coeff/是否高位/命中或跳过原因、max_gap、规则级、门槛结果），路由按 `placement_mode` 分支；前端加相应渲染。
+- 若压缩范围：路由在 `gap_single` 时返回带 `mode` 标记的简版（选中档 + 规则级 + 门槛结果），前端顶部加「当前为网关式单档模式」提示。
+排在实现计划最后；核心（A/B/C/D + 测试）不依赖它。
+
+## 风险与留档
+
+**关闭止损**：套牢仓（成本 > 买一且不回本）将一直挂成本价、无 B0 兜底，极端行情可扛到归零。与系统历史上多次救过用户的强平保护相反，属用户明确选择。缓解：配置页醒目 `⚠️` 提示；发布说明写清；保留「下单前钳价 ≥ 成本」与离场 INFO 日志取证。浮盈市价卖本身安全（仅买一>成本时触发，成交必 ≥ 成本）。
+
+## 验收标准
+
+1. 某模板设 `placement_mode=gap_single`，其钱包按 A/B 逻辑每市场至多挂一单、断层分级与顺延正确；默认模板行为不变。
+2. 该模板设 `take_profit_mode=market` + `stop_loss_mode=off`：浮盈市价清仓、套牢挂成本、无强平。
+3. 配置页可编辑并持久化全部新键；`maker`/`laddering` 组合行为与现状一致。
+4. 新增测试通过，既有测试全绿。
