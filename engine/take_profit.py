@@ -162,14 +162,17 @@ def describe_cost_basis(cost, lots: list[dict], max_lots: int = 6) -> str:
 
 
 def effective_theta_stop(cost, mode, percent, cents):
-    """B0 强平的有效阈值(价位单位 = ¢/100)。两种可配置模式:
+    """B0 强平的有效阈值(价位单位 = ¢/100)。三种模式:
 
+    - "off":返回 None,调用方据此彻底关闭 B0 强平(套牢仓无兜底,用户明确选择)。
     - "percent"(默认):成本 × 百分比/100,即相对成本的最大回撤(默认 20%)。成本越高、
       允许的绝对亏损越大;成本越低、止损越紧。
     - "fixed":固定美分 / 100(原行为,默认 5¢),与成本无关的固定亏损额。
 
     任一参数异常时回退固定美分,绝不让止损阈值算成 0/负(那会一触即发或永不触发)。
     """
+    if str(mode) == "off":
+        return None
     try:
         if str(mode) == "fixed":
             return max(0.0, float(cents) / 100.0)
@@ -207,24 +210,49 @@ def market_fill_price(resp, best_bid, cur):
 
 
 def plan_exit(
-    cost, best_bid, best_ask, tick, theta_loss, theta_stop, case_a_mode, size
+    cost,
+    best_bid,
+    best_ask,
+    tick,
+    theta_loss,
+    theta_stop,
+    case_a_mode,
+    size,
+    take_profit_mode="maker",
 ):
-    """两段式离场决策。theta_stop 为价位单位(=¢/100)。
+    """两段式离场决策。theta_stop 为价位单位(=¢/100),None 表示关闭 B0 强平。
+
+    take_profit_mode:
+      - "maker"(默认,现状):盈利(成本 ≤ 买一)挂卖一做 maker 捕价差(对成本取下限);
+        套牢挂成本价;亏损 ≥ theta_stop 市价止损(B0)。
+      - "market":浮盈(成本 < 买一)立即市价清仓(A_market;买一>成本,成交必 ≥ 成本);
+        保本/套牢(成本 ≥ 买一)挂成本价等回本;theta_stop 非 None 时仍有 B0 兜底。
 
     返回 {"tier","action","price","size"};action ∈ {"rest","market","noop"}。
     cost>0、size>0 由调用方在调用前保证(成本取不到 -> 裸奔跳过,不进此函数)。
-    - 成本 ≤ 买一(盈利):挂卖一(best_ask)做 maker 捕捉价差;无卖一则挂成本价
-      (成本≤买一,仍按 ≥成本 成交)。
-    - 成本 > 买一(保本/套牢):挂成本价 ceil_to_tick(cost) 被动等回本,绝不挂在成本下方。
-      唯一例外是兜底止损:亏损(成本−买一) ≥ theta_stop 时市价清仓(B0),防极端套牢无限扛单。
-
-    两个分支都绝不低于成本卖出 —— 盈利侧 best_ask>买一≥成本,套牢侧挂成本价;唯一认亏
-    出口是 B0 强平。无买盘时无法判断盈亏、也无从兜底止损:挂成本价等回本(无盘口则跳过)。
-    theta_loss / case_a_mode 已不再使用(签名保留以免改动调用方);旧 B_sweep 封顶亏与
-    case_a 的 market/cost 模式已移除。
+    两个模式都绝不低于成本卖出 —— 唯一认亏出口是 B0 强平(theta_stop 为 None 时无此出口)。
+    theta_loss / case_a_mode 已不再使用(签名保留以免改动调用方)。
     """
     cost_floor = ceil_to_tick(cost, tick)
 
+    if take_profit_mode == "market":
+        # 浮盈:成本 < 买一 -> 立即市价卖出(买一>成本,成交必 ≥ 成本)。
+        if best_bid is not None and cost < best_bid:
+            return {"tier": "A_market", "action": "market", "price": None, "size": size}
+        # 兜底止损(仅在开启时):亏损 ≥ theta_stop 市价清仓。
+        if (
+            theta_stop is not None
+            and best_bid is not None
+            and (cost - best_bid) >= theta_stop
+        ):
+            return {"tier": "B0", "action": "market", "price": None, "size": size}
+        # 完全无盘口:不挂进死 book。
+        if best_bid is None and (best_ask is None or best_ask <= 0):
+            return {"tier": "none", "action": "noop", "price": None, "size": 0.0}
+        # 保本/套牢:挂成本价等回本(绝不低于成本)。
+        return {"tier": "B_park", "action": "rest", "price": cost_floor, "size": size}
+
+    # --- maker 模式(默认,现状) ---
     # 盈利:成本 ≤ 买一 -> 挂卖一做 maker 捕捉价差;但**绝不挂在成本下方**——盘口异常/买一
     # 是幻影滞后报价时,卖一可能 < 成本(正常簿里卖一≥买一≥成本,这是对异常簿的兜底),
     # 故对成本取下限。无卖一则回退成本价。
@@ -235,8 +263,12 @@ def plan_exit(
             price = cost_floor
         return {"tier": "A", "action": "rest", "price": price, "size": size}
 
-    # 成本 > 买一:套牢/保本。亏损过大兜底市价止损(无买盘时无从计算,跳过止损)。
-    if best_bid is not None and (cost - best_bid) >= theta_stop:
+    # 成本 > 买一:套牢/保本。亏损过大兜底市价止损(theta_stop None 时关闭,无买盘时跳过)。
+    if (
+        theta_stop is not None
+        and best_bid is not None
+        and (cost - best_bid) >= theta_stop
+    ):
         return {"tier": "B0", "action": "market", "price": None, "size": size}
 
     # 完全无盘口(无买无卖):不挂进死 book。

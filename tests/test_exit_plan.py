@@ -128,6 +128,79 @@ def test_market_fill_no_bid_falls_back_to_cur():
     assert market_fill_price({}, None, 0.13) == 0.13
 
 
+# --- take_profit_mode="market" + 止损可关(effective_theta_stop off)---
+
+
+def test_effective_theta_stop_off_returns_none():
+    assert effective_theta_stop(0.30, "off", 20, 5) is None
+
+
+def _pm(
+    cost,
+    best_bid,
+    best_ask,
+    tier,
+    action,
+    price=None,
+    theta_stop=0.05,
+    size=100,
+    tick=0.01,
+):
+    out = plan_exit(
+        cost,
+        best_bid,
+        best_ask,
+        tick,
+        0.02,
+        theta_stop,
+        "ask",
+        size,
+        take_profit_mode="market",
+    )
+    assert out["tier"] == tier and out["action"] == action
+    if price is not None:
+        assert abs(out["price"] - price) < 1e-9
+    return out
+
+
+def test_market_mode_profit_cost_below_bid_market_sells():
+    # 成本 0.28 < 买一 0.30(浮盈)-> 市价清仓。
+    _pm(0.28, 0.30, 0.33, "A_market", "market")
+
+
+def test_market_mode_boundary_cost_equals_bid_rests_at_cost():
+    # 成本 == 买一 归保本侧 -> 挂成本价。
+    _pm(0.30, 0.30, 0.33, "B_park", "rest", price=0.30)
+
+
+def test_market_mode_underwater_stop_off_rests_at_cost():
+    # 套牢 + 止损关(theta_stop None)-> 挂成本价,绝不 B0。
+    out = plan_exit(
+        0.40, 0.30, 0.42, 0.01, 0.02, None, "ask", 100, take_profit_mode="market"
+    )
+    assert out["tier"] == "B_park" and out["action"] == "rest"
+    assert abs(out["price"] - 0.40) < 1e-9
+
+
+def test_market_mode_underwater_stop_on_fires_b0():
+    # 套牢 + 止损开:亏损 0.10 >= theta_stop 0.05 -> B0 市价。
+    _pm(0.40, 0.30, 0.42, "B0", "market", theta_stop=0.05)
+
+
+def test_market_mode_no_book_noops():
+    out = plan_exit(
+        0.30, None, None, 0.01, 0.02, None, "ask", 100, take_profit_mode="market"
+    )
+    assert out["tier"] == "none" and out["action"] == "noop"
+
+
+def test_maker_mode_stop_off_no_b0():
+    # maker 默认 + 止损关:套牢挂成本价、不 B0(theta_stop None 被安全跳过)。
+    out = plan_exit(0.40, 0.30, 0.42, 0.01, 0.02, None, "ask", 100)
+    assert out["tier"] == "B_park" and out["action"] == "rest"
+    assert abs(out["price"] - 0.40) < 1e-9
+
+
 # --- effective_theta_stop: 可配置强平阈值(比例 / 固定金额)---
 
 
