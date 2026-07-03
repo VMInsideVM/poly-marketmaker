@@ -51,6 +51,14 @@ TEMPLATE_DEFAULTS = {
     "stop_loss_percent": 20,  # 按比例时:成本的百分比(最大回撤)
     "theta_stop_cents": 5,  # 按固定金额时:亏损达到这么多美分即强平
     "case_a_mode": "ask",
+    # 挂单模式(v4 用户策略):laddering=多档做市(默认);gap_single=断层分级单档。
+    "placement_mode": "laddering",
+    "gap_wide_cents": 10,
+    "gap_mid_cents": 5,
+    "gap_high_coeff_sum_min": 20,
+    "single_order_min_coeff": 0,
+    # 止盈方式:maker=挂卖一吃价差(默认);market=浮盈(成本<买一)立即市价清仓。
+    "take_profit_mode": "maker",
     "included_categories": DEFAULT_INCLUDED_CATEGORIES,
     "include_other": True,
     # 多档挂单(SP2)
@@ -77,7 +85,7 @@ TEMPLATE_DEFAULTS = {
     "amount_value_table": [
         {"upper": 0.20, "value": 1},
         {"upper": 0.25, "value": 1.5},
-        {"upper": 0.30, "value": 2},
+        {"upper": 0.31, "value": 2},
     ],
 }
 

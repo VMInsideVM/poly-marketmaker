@@ -79,3 +79,26 @@ def test_post_settings_routes_engine_vs_template(tmp_path, monkeypatch):
     assert db.get_template(db.get_default_template_id())["max_exposure_usd"] == 99
     assert "scan_interval_sec" not in db.get_template(db.get_default_template_id())
     assert "max_exposure_usd" not in db.get_settings()
+
+
+def test_post_settings_roundtrips_gap_single_keys(tmp_path, monkeypatch):
+    client, db = _client_with_db(tmp_path, monkeypatch)
+    payload = {
+        "placement_mode": "gap_single",
+        "gap_wide_cents": 10,
+        "gap_mid_cents": 5,
+        "gap_high_coeff_sum_min": 20,
+        "single_order_min_coeff": 1.5,
+        "take_profit_mode": "market",
+        "stop_loss_mode": "off",
+    }
+    resp = client.post("/api/settings", json=payload)
+    assert resp.status_code == 200
+    tmpl = db.get_template(db.get_default_template_id())
+    assert tmpl["placement_mode"] == "gap_single"
+    assert tmpl["gap_wide_cents"] == 10
+    assert tmpl["gap_mid_cents"] == 5
+    assert tmpl["gap_high_coeff_sum_min"] == 20
+    assert tmpl["single_order_min_coeff"] == 1.5
+    assert tmpl["take_profit_mode"] == "market"
+    assert tmpl["stop_loss_mode"] == "off"

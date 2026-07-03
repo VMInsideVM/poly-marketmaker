@@ -611,7 +611,7 @@ def test_template_defaults_has_tier_match_and_size_range():
     assert table == [
         {"upper": 0.20, "value": 1},
         {"upper": 0.25, "value": 1.5},
-        {"upper": 0.30, "value": 2},
+        {"upper": 0.31, "value": 2},
     ]
 
 
