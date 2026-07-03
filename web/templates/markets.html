@@ -168,6 +168,9 @@ function insertLadderRow(i, html) {
 }
 
 function renderLadder(data) {
+    if (data.placement_mode === 'gap_single') {
+        return '<span class="metric-note">此模板为「网关式单档」模式：每市场按断层分级只挂一单，梯队预演仅适用于多档模式（此处仅供参考盘口）。</span>';
+    }
     if (!data.sides || !data.sides.length) {
         return '<span class="metric-note">无可预演的方向（订单簿缺失或预算为 0）</span>';
     }

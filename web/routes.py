@@ -1092,6 +1092,7 @@ def _ladder_payload(market_id):
             "shares_budget": shares_budget,
             "sides": sides,
             "tier_match_var": tier_match_var,
+            "placement_mode": tmpl.get("placement_mode", "laddering"),
         }
     )
 
