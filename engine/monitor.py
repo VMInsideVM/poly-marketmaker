@@ -304,6 +304,7 @@ class OrderMonitor:
         stop_percent = tmpl.get("stop_loss_percent", 20)
         stop_cents = tmpl.get("theta_stop_cents", 5)
         case_a_mode = tmpl.get("case_a_mode", "ask")
+        take_profit_mode = tmpl.get("take_profit_mode", "maker")
         try:
             positions = self.api.get_user_positions(self._funder())
         except Exception as e:
@@ -324,6 +325,7 @@ class OrderMonitor:
                     stop_percent,
                     stop_cents,
                     case_a_mode,
+                    take_profit_mode,
                 )
             except Exception as e:
                 logger.error("Exit error on %s: %s", pos.get("asset"), e)
@@ -337,6 +339,7 @@ class OrderMonitor:
         stop_percent,
         stop_cents,
         case_a_mode,
+        take_profit_mode="maker",
     ):
         asset_id = pos.get("asset", "")
         size = float(pos.get("size", 0) or 0)
@@ -366,19 +369,28 @@ class OrderMonitor:
         # 强平阈值按成本现算(比例模式 = 成本×%;固定模式 = 美分)。
         theta_stop = effective_theta_stop(cost, stop_mode, stop_percent, stop_cents)
         plan = plan_exit(
-            cost, best_bid, best_ask, tick, theta_loss, theta_stop, case_a_mode, size
+            cost,
+            best_bid,
+            best_ask,
+            tick,
+            theta_loss,
+            theta_stop,
+            case_a_mode,
+            size,
+            take_profit_mode,
         )
         # 每次离场都把盘口+成本+强平阈值+决策打进日志,留作抓现行的证据(下次再现 0.13 卖,可
         # 一眼分清是成本算错[成本=0.13]还是盘口抽风[成本=0.14 却挂穿])。
+        stop_txt = f"{theta_stop:.4f}" if theta_stop is not None else "关闭"
         logger.info(
-            "离场决策 asset=%s 成本=%.4f 买一=%s 卖一=%s tick=%s size=%s 强平阈值=%.4f(%s) -> tier=%s action=%s 挂价=%s",
+            "离场决策 asset=%s 成本=%.4f 买一=%s 卖一=%s tick=%s size=%s 强平阈值=%s(%s) -> tier=%s action=%s 挂价=%s",
             asset_id,
             cost,
             best_bid,
             best_ask,
             tick_str,
             size,
-            theta_stop,
+            stop_txt,
             stop_mode,
             plan["tier"],
             plan["action"],
@@ -528,6 +540,7 @@ class OrderMonitor:
             # 真实成交价(≈盘口买一,FAK 从买一往下吃),绝不用 Data API 现价——现价常与盘口
             # 背离,会把亏损显示成盈利(2026-06-24 用户实报:现价 0.13 记成盈利,实为 6.5¢ 止损)。
             fill = market_fill_price(resp, best_bid, cur)
+            is_profit = plan["tier"] == "A_market"
             if plan["tier"] == "B0":
                 self.db.record_trade(
                     wallet=self.wallet_address,
@@ -544,7 +557,11 @@ class OrderMonitor:
                 side="卖出",
                 price=fill,
                 size=size,
-                reason=f"{plan['tier']}：市价清仓离场",
+                reason=(
+                    f"{plan['tier']}：浮盈市价止盈离场"
+                    if is_profit
+                    else f"{plan['tier']}：市价清仓离场"
+                ),
                 price_basis=(
                     f"{basis}；市价清仓·成交≈买一{fill:.4f}（精确成交以链上为准）；"
                     f"来源：CLOB get_trades+get_orderbook"
@@ -557,7 +574,11 @@ class OrderMonitor:
                 size=str(size),
                 matched="-",
                 stage="离场",
-                action=f"市价清仓({plan['tier']})",
+                action=(
+                    f"浮盈市价止盈({plan['tier']})"
+                    if is_profit
+                    else f"市价清仓({plan['tier']})"
+                ),
                 detail=f"成本{cost:.4f} 成交≈{fill:.4f}",
             )
             return

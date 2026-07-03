@@ -870,7 +870,9 @@ def api_get_positions():
                         "buy_price": avg,
                         "size": size,
                         "current_price": cur,
-                        "stop_price": max(0.0, avg - eff),
+                        "stop_price": (
+                            max(0.0, avg - eff) if eff is not None else None
+                        ),
                         "pnl": (cur - avg) * size,
                     }
                 )

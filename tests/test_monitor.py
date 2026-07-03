@@ -1346,3 +1346,43 @@ class TestCheckResolution:
         monitor.check_resolution()
         ats = [c.kwargs.get("action_type") for c in db.record_action.call_args_list]
         assert "uma_resolution_cancel" not in ats
+
+
+class TestExitTakeProfitMode:
+    """离场 take_profit_mode=market + 止损关(stop_loss_mode=off)的接线行为。"""
+
+    def _pos(self):
+        return {
+            "asset": "tok1",
+            "size": 100.0,
+            "curPrice": 0.30,
+            "conditionId": "mkt1",
+        }
+
+    def test_market_mode_profit_market_sells(self):
+        monitor, api, db = _make_monitor(
+            {"take_profit_mode": "market", "stop_loss_mode": "off"}
+        )
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        monitor._cost_lots = MagicMock(return_value=(0.30, []))
+        # 买一 0.35 > 成本 0.30 -> 浮盈。
+        monitor._sell_book = MagicMock(return_value=(0.01, "0.01", 0.35, 0.40))
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once()
+        api.place_limit_sell.assert_not_called()
+
+    def test_market_mode_underwater_stop_off_rests_at_cost(self):
+        monitor, api, db = _make_monitor(
+            {"take_profit_mode": "market", "stop_loss_mode": "off"}
+        )
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        monitor._cost_lots = MagicMock(return_value=(0.40, []))
+        # 买一 0.30 < 成本 0.40 -> 套牢;止损关 -> 挂成本价,不 B0。
+        monitor._sell_book = MagicMock(return_value=(0.01, "0.01", 0.30, 0.42))
+        monitor.check_exit()
+        api.place_market_sell.assert_not_called()
+        api.place_limit_sell.assert_called_once()
+        args, kwargs = api.place_limit_sell.call_args
+        assert abs(args[1] - 0.40) < 1e-9
