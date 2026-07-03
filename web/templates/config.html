@@ -68,6 +68,7 @@
                 <select name="stop_loss_mode" id="stop-loss-mode" onchange="updateStopMode()">
                     <option value="percent">按比例（占成本 %）</option>
                     <option value="fixed">按固定金额（美分）</option>
+                    <option value="off">关闭止损（⚠️套牢仓无兜底，可能扛到归零）</option>
                 </select>
             </div>
             <div class="form-group" id="stop-percent-group">
@@ -94,6 +95,31 @@
                 <label>双边挂单价格下限 (美分)</label>
                 <input type="number" name="min_price_double_cents" step="1">
             </div>
+        </div>
+
+        <h3>挂单模式</h3>
+        <div class="form-group">
+            <label>挂单模式</label>
+            <select name="placement_mode" id="placement-mode" onchange="updatePlacementMode()">
+                <option value="laddering">多档做市（默认）</option>
+                <option value="gap_single">网关式单档（断层分级 · 每市场一单）</option>
+            </select>
+        </div>
+        <div id="gap-single-params">
+            <div class="form-grid">
+                <div class="form-group"><label>宽断层阈值 (美分，&gt;此值走规则1)</label><input type="number" name="gap_wide_cents" step="0.1"></div>
+                <div class="form-group"><label>中断层阈值 (美分，≥此值走规则2)</label><input type="number" name="gap_mid_cents" step="0.1"></div>
+                <div class="form-group"><label>规则1 高位风险系数和门槛</label><input type="number" name="gap_high_coeff_sum_min" step="0.1"></div>
+                <div class="form-group"><label>选档风险系数门槛 x（&gt;x 才挂）</label><input type="number" name="single_order_min_coeff" step="0.1"></div>
+            </div>
+            <p class="hint" style="color:#888;font-size:12px">按买单簿「奖励区间内相邻档最大价差」分三级：&gt;宽断层→规则1（再查断层上方各档风险系数之和≥门槛，不过则整市场不挂）；中~宽→规则2；&lt;中→规则3。三级都从买一往下取第一个「风险系数&gt;x」的档，挂最低份数一单。风险系数＝盘口量÷(最低份数×金额数值)，金额数值用下方表。</p>
+        </div>
+        <div class="form-group">
+            <label>止盈方式</label>
+            <select name="take_profit_mode" id="take-profit-mode">
+                <option value="maker">挂卖一做 maker（默认 · 吃价差）</option>
+                <option value="market">浮盈市价卖（成本&lt;买一立即市价清仓）</option>
+            </select>
         </div>
 
         <h3>做市品类（只做勾选的）
@@ -130,10 +156,12 @@
         </div>
         <p class="hint" style="color:#888;font-size:12px">累计厚度＝从买一往下累加的盘口深度(以最低份数为单位)；风险系数＝本档厚度 ÷ 金额数值(该档价)，价越高系数越低、价超金额表则该档不挂。</p>
 
+        <div id="tier-rules-section">
         <h3>多档挂单规则</h3>
         <p style="color:#888;font-size:12px;margin-top:4px;">每档从买一往下；每行「<b id="tier-var-name">累计厚度</b> &gt; X → 动作」，取第一个命中的区间，末行「其余」兜底。多行阈值须<b>从大到小</b>填（否则小阈值会遮住大的）。动作：最小份数 / 固定份数 / 固定金额 / 钱包全额 / 不挂。</p>
         <div id="tier-rules-editor"></div>
         <button type="button" class="btn" onclick="addTier()">+ 加一档</button>
+        </div>
         <button type="submit" class="btn btn-primary">保存策略参数</button>
     </form>
 </section>
@@ -301,6 +329,7 @@ function loadStrategy(tid) {
         renderAmountTable(data.amount_value_table || []);
         updateTierMatchVar();
         updateStopMode();
+        updatePlacementMode();
     });
 
     // 品类勾选要「模板(哪些已选)+ 目录(列表/计数)」都到齐再渲染,期间显示加载中
@@ -316,6 +345,15 @@ function updateStopMode() {
     const cents = document.getElementById('stop-cents-group');
     if (pct) pct.style.display = (mode === 'percent') ? '' : 'none';
     if (cents) cents.style.display = (mode === 'fixed') ? '' : 'none';
+}
+
+// 挂单模式切换:单档模式显示断层参数、隐藏多档规则编辑器(其配置在单档模式不参与)。
+function updatePlacementMode() {
+    const mode = (document.getElementById('placement-mode') || {}).value || 'laddering';
+    const gap = document.getElementById('gap-single-params');
+    if (gap) gap.style.display = (mode === 'gap_single') ? '' : 'none';
+    const tierSec = document.getElementById('tier-rules-section');
+    if (tierSec) tierSec.style.display = (mode === 'gap_single') ? 'none' : '';
 }
 
 // 区间变量当前中文名(累计厚度 / 风险系数),供档规则的行标签与说明动态显示。
@@ -554,6 +592,8 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     // select 不在 input[type=number] 里,单独收。
     data.stop_loss_mode = (document.getElementById('stop-loss-mode') || {}).value || 'percent';
     data.tier_match_var = (document.getElementById('tier-match-var') || {}).value || 'cumulative_thickness';
+    data.placement_mode = (document.getElementById('placement-mode') || {}).value || 'laddering';
+    data.take_profit_mode = (document.getElementById('take-profit-mode') || {}).value || 'maker';
     data.amount_value_table = serializeAmountTable();
     data.included_categories = Array.from(
         document.querySelectorAll('#included-categories input[type=checkbox]:checked')
@@ -565,19 +605,21 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     });
     data.per_share_reward_thresholds = ps;
     data.per_share_reward_enabled = document.getElementById('per-share-enabled').checked;
-    const badUpper = Array.from(
-        document.querySelectorAll('#tier-rules-editor .interval-row:not(.catch-all) .upper-input')
-    ).some(inp => inp.value === '' || isNaN(parseFloat(inp.value)));
-    if (badUpper) { alert('请填写每个区间的' + tierVarName() + '阈值'); return; }
-    const badParam = Array.from(
-        document.querySelectorAll('#tier-rules-editor .interval-row')
-    ).some(row => {
-        const sel = row.querySelector('.action-select');
-        if (!sel || (sel.value !== 'fixed_shares' && sel.value !== 'fixed_amount')) return false;
-        const v = parseFloat(row.querySelector('.param-input').value);
-        return isNaN(v) || v <= 0;
-    });
-    if (badParam) { alert('「固定份数 / 固定金额」必须填写大于 0 的数值'); return; }
+    if (data.placement_mode !== 'gap_single') {
+        const badUpper = Array.from(
+            document.querySelectorAll('#tier-rules-editor .interval-row:not(.catch-all) .upper-input')
+        ).some(inp => inp.value === '' || isNaN(parseFloat(inp.value)));
+        if (badUpper) { alert('请填写每个区间的' + tierVarName() + '阈值'); return; }
+        const badParam = Array.from(
+            document.querySelectorAll('#tier-rules-editor .interval-row')
+        ).some(row => {
+            const sel = row.querySelector('.action-select');
+            if (!sel || (sel.value !== 'fixed_shares' && sel.value !== 'fixed_amount')) return false;
+            const v = parseFloat(row.querySelector('.param-input').value);
+            return isNaN(v) || v <= 0;
+        });
+        if (badParam) { alert('「固定份数 / 固定金额」必须填写大于 0 的数值'); return; }
+    }
     data.tier_rules = serializeTierRules();
     fetch(`/api/templates/${currentTemplateId}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
