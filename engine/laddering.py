@@ -35,16 +35,19 @@ def plan_gap_single_order(
     gap_wide_cents,
     gap_mid_cents,
     gap_high_coeff_sum_min,
-    single_order_min_coeff,
+    rule1_min_coeff,
+    rule2_min_coeff,
+    rule3_min_coeff,
 ):
     """网关式单档挂单(v4 用户策略,纯函数)。
 
     对单个 token 的买单簿:取奖励区间内买档 -> 算风险系数(份数/(最低份数×金额数值))
-    -> 按相邻在区间档的最大价差分三级(>宽 / 中~宽 / <中)-> 宽断层再查
-    「断层上方各档风险系数之和 >= gap_high_coeff_sum_min」市场闸门(不过则整市场不挂)
-    -> 自最高在区间档往下取第一个「系数 > single_order_min_coeff」的档,挂 min_size 一单。
-    返回 (price, shares) 或 None(不挂)。价差单位为美分;闸门/选档口径:价差 10/5 归中一级
-    (规则1 严格 >宽、规则3 严格 <中);高位系数和 == 门槛 放行;选档严格 > x。
+    -> 按相邻在区间档的最大价差把整个市场归到三级之一(>宽=规则1 / 中~宽=规则2 / <中=规则3)
+    -> 规则1(宽断层)再查「断层上方各档风险系数之和 >= gap_high_coeff_sum_min」市场闸门
+    (不过则整市场不挂)-> 自最高在区间档往下取第一个「系数 > 该规则选档门槛」的档,挂 min_size 一单。
+    三级各用自己的选档门槛:规则1=rule1_min_coeff、规则2=rule2_min_coeff、规则3=rule3_min_coeff。
+    返回 (price, shares) 或 None(不挂)。价差单位为美分;归级口径:价差 10/5 归中一级
+    (规则1 严格 >宽、规则3 严格 <中);高位系数和 == 门槛 放行;选档严格 > 门槛。
     """
     if min_size <= 0 or not bids:
         return None
@@ -72,14 +75,19 @@ def plan_gap_single_order(
         if gap > max_gap:
             max_gap = gap
             split_idx = i
-    # 仅宽断层加「高位风险系数和」市场闸门。
+    # 按最大价差归级,取该级的选档门槛;仅规则1(宽断层)加「高位风险系数和」市场闸门。
     if max_gap > gap_wide_cents:
         high_sum = sum(lv["coeff"] for lv in in_range[: split_idx + 1])
         if high_sum < gap_high_coeff_sum_min:
             return None
-    # 三级统一顺延:自上而下第一个 coeff > x。
+        min_coeff = rule1_min_coeff
+    elif max_gap >= gap_mid_cents:
+        min_coeff = rule2_min_coeff
+    else:
+        min_coeff = rule3_min_coeff
+    # 顺延:自上而下第一个 coeff > 该级门槛。
     for lv in in_range:
-        if lv["coeff"] > single_order_min_coeff:
+        if lv["coeff"] > min_coeff:
             return (lv["price"], int(min_size))
     return None
 
@@ -93,7 +101,9 @@ def compute_market_single_orders(
     gap_wide_cents,
     gap_mid_cents,
     gap_high_coeff_sum_min,
-    single_order_min_coeff,
+    rule1_min_coeff,
+    rule2_min_coeff,
+    rule3_min_coeff,
 ):
     """两边共享敞口的网关式单档计划(每边至多一单)。
 
@@ -116,7 +126,9 @@ def compute_market_single_orders(
             gap_wide_cents,
             gap_mid_cents,
             gap_high_coeff_sum_min,
-            single_order_min_coeff,
+            rule1_min_coeff,
+            rule2_min_coeff,
+            rule3_min_coeff,
         )
         if plan is None:
             continue

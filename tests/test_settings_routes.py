@@ -88,7 +88,9 @@ def test_post_settings_roundtrips_gap_single_keys(tmp_path, monkeypatch):
         "gap_wide_cents": 10,
         "gap_mid_cents": 5,
         "gap_high_coeff_sum_min": 20,
-        "single_order_min_coeff": 1.5,
+        "rule1_min_coeff": 1,
+        "rule2_min_coeff": 1.5,
+        "rule3_min_coeff": 2,
         "take_profit_mode": "market",
         "stop_loss_mode": "off",
     }
@@ -99,6 +101,8 @@ def test_post_settings_roundtrips_gap_single_keys(tmp_path, monkeypatch):
     assert tmpl["gap_wide_cents"] == 10
     assert tmpl["gap_mid_cents"] == 5
     assert tmpl["gap_high_coeff_sum_min"] == 20
-    assert tmpl["single_order_min_coeff"] == 1.5
+    assert tmpl["rule1_min_coeff"] == 1
+    assert tmpl["rule2_min_coeff"] == 1.5
+    assert tmpl["rule3_min_coeff"] == 2
     assert tmpl["take_profit_mode"] == "market"
     assert tmpl["stop_loss_mode"] == "off"

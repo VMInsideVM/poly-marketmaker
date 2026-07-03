@@ -155,7 +155,9 @@ class WalletWorker:
         gap_wide_cents = float(tmpl.get("gap_wide_cents", 10))
         gap_mid_cents = float(tmpl.get("gap_mid_cents", 5))
         gap_high_coeff_sum_min = float(tmpl.get("gap_high_coeff_sum_min", 20))
-        single_order_min_coeff = float(tmpl.get("single_order_min_coeff", 0))
+        rule1_min_coeff = float(tmpl.get("rule1_min_coeff", 0))
+        rule2_min_coeff = float(tmpl.get("rule2_min_coeff", 0))
+        rule3_min_coeff = float(tmpl.get("rule3_min_coeff", 0))
         if placement_mode == "laddering" and not tier_rules:
             # 模板没配档位规则表 -> 一单都不会挂。显式告警,避免"引擎在跑却
             # 静默不下单"被误认为"没机会",便于排查模板配置问题。
@@ -306,7 +308,9 @@ class WalletWorker:
                         gap_wide_cents,
                         gap_mid_cents,
                         gap_high_coeff_sum_min,
-                        single_order_min_coeff,
+                        rule1_min_coeff,
+                        rule2_min_coeff,
+                        rule3_min_coeff,
                     )
                 else:
                     ladders = compute_market_ladders(

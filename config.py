@@ -56,7 +56,10 @@ TEMPLATE_DEFAULTS = {
     "gap_wide_cents": 10,
     "gap_mid_cents": 5,
     "gap_high_coeff_sum_min": 20,
-    "single_order_min_coeff": 0,
+    # 三级各自的选档系数门槛(>门槛才挂):规则1=宽断层、规则2=中断层、规则3=密盘。
+    "rule1_min_coeff": 0,
+    "rule2_min_coeff": 0,
+    "rule3_min_coeff": 0,
     # 止盈方式:maker=挂卖一吃价差(默认);market=浮盈(成本<买一)立即市价清仓。
     "take_profit_mode": "maker",
     "included_categories": DEFAULT_INCLUDED_CATEGORIES,

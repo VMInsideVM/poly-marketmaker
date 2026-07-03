@@ -45,7 +45,9 @@ plan_gap_single_order(
     amount_value_table,        # 复用 laddering.amount_value 的表
     gap_wide_cents, gap_mid_cents,
     gap_high_coeff_sum_min,    # 规则1 高位系数和门槛
-    single_order_min_coeff,    # x：选档系数门槛
+    rule1_min_coeff,           # 规则1（宽断层）选档系数门槛
+    rule2_min_coeff,           # 规则2（中断层）选档系数门槛
+    rule3_min_coeff,           # 规则3（密盘）选档系数门槛
 ) -> (price, shares) | None
 ```
 
@@ -54,18 +56,18 @@ plan_gap_single_order(
 2. **取奖励区间内买档**：`reward_range_min ≤ price ≤ reward_range_max`，按价降序。空 → `None`。
 3. **每档风险系数** `coeff = size / (min_size × amount_value(price, table))`；`amount_value` 为空/≤0（价超表）时 `coeff = 0`（不入求和、也选不中）。
 4. **最大相邻价差 + 劈分点**：对相邻在区间档算价差（美分）`gap_i = (price_i − price_{i+1}) × 100`；取最大 `max_gap` 及其位置 `split_idx`（高位 = `in_range[0 .. split_idx]`，即价差上方那一侧）。不足 2 档 → `max_gap = 0`。
-5. **分级**：
-   - `max_gap > gap_wide_cents`（规则1，宽断层）：`high_sum = Σ coeff(高位各档)`；`high_sum < gap_high_coeff_sum_min` → `None`（整市场不挂）；否则进选档。
-   - `gap_mid_cents ≤ max_gap ≤ gap_wide_cents`（规则2）：直接进选档。
-   - `max_gap < gap_mid_cents`（规则3，正常）：直接进选档。
-6. **选档（三级统一顺延）**：自最高在区间档往下，第一个 `coeff > single_order_min_coeff` 的档 → 返回 `(该档价, int(min_size))`；都不满足 → `None`。
+5. **分级（整个市场归一级，选用该级门槛）**：
+   - `max_gap > gap_wide_cents`（规则1，宽断层）：`high_sum = Σ coeff(高位各档)`；`high_sum < gap_high_coeff_sum_min` → `None`（整市场不挂）；否则用 `rule1_min_coeff` 进选档。
+   - `gap_mid_cents ≤ max_gap ≤ gap_wide_cents`（规则2）：用 `rule2_min_coeff` 进选档。
+   - `max_gap < gap_mid_cents`（规则3，正常）：用 `rule3_min_coeff` 进选档。
+6. **选档（顺延）**：自最高在区间档往下，第一个 `coeff > 该级门槛` 的档 → 返回 `(该档价, int(min_size))`；都不满足 → `None`。
 
 **下单份数固定 = `min_size`**（一单）。
 
 边界口径（明确写死，供复核）：
 - 价差落点：`10` 归规则2、`5` 归规则2（规则1 严格 `>gap_wide`，规则3 严格 `<gap_mid`）。
 - 高位系数和：`< 门槛` 才拦，`== 门槛` 放行。
-- 选档：严格 `> x`（`x` 应 ≥ 0；`coeff=0` 的档在 `x≥0` 时永不入选）。
+- 选档：严格 `> 该级门槛`（门槛应 ≥ 0；`coeff=0` 的档在门槛 `≥0` 时永不入选）。三级各用自己的门槛，互不影响。
 - 「高位」= 最大价差上方（含上沿档）全部在区间档；多处并列最大价差时取**最靠上**那处（第一次出现）。
 - 选档扫描**全部在区间档**（不限高位）：规则1 过闸后，若高位无档 >x 而低位有，仍挂低位——与「统一顺延」一致。高位系数和只作**市场级闸门**，不限制落档位置。
 
@@ -88,7 +90,8 @@ compute_market_single_orders(
     market_budget_usd, max_exposure_shares,
     amount_value_table,
     gap_wide_cents, gap_mid_cents,
-    gap_high_coeff_sum_min, single_order_min_coeff,
+    gap_high_coeff_sum_min,
+    rule1_min_coeff, rule2_min_coeff, rule3_min_coeff,
 ) -> {"a":[...], "b":[...]}
 ```
 
@@ -115,7 +118,9 @@ compute_market_single_orders(
 | `gap_wide_cents` | `10` | 宽断层阈值（美分） |
 | `gap_mid_cents` | `5` | 中断层阈值（美分） |
 | `gap_high_coeff_sum_min` | `20` | 规则1 高位风险系数和门槛 |
-| `single_order_min_coeff` | `0` | 选档系数门槛 x |
+| `rule1_min_coeff` | `0` | 规则1（宽断层）选档系数门槛 |
+| `rule2_min_coeff` | `0` | 规则2（中断层）选档系数门槛 |
+| `rule3_min_coeff` | `0` | 规则3（密盘）选档系数门槛 |
 | `take_profit_mode` | `"maker"` | 止盈方式 |
 | `stop_loss_mode` | 增 `"off"` | 止损方式加「关闭」 |
 
@@ -123,7 +128,7 @@ compute_market_single_orders(
 
 配置页 `web/templates/config.html`：
 - 加 `placement_mode`、`take_profit_mode` 两个 `<select>`；`stop_loss_mode` 加 `<option value="off">关闭止损</option>`。
-- 加 4 个断层参数输入（`gap_wide_cents/gap_mid_cents/gap_high_coeff_sum_min/single_order_min_coeff`）。
+- 加断层参数输入（`gap_wide_cents/gap_mid_cents/gap_high_coeff_sum_min` + 三级选档门槛 `rule1_min_coeff/rule2_min_coeff/rule3_min_coeff`）。
 - JS 按模式 show/hide：`gap_single` 显示断层参数、隐藏 tier_rules 编辑器（金额表仍显示，风险系数要用）；`stop_loss_mode=="off"` 隐藏比例/固定阈值输入；`take_profit_mode` 独立。
 - **保存 JS 显式收两个新 select**（既有坑：select 不在默认序列化路径，参照 `stop_loss_mode` 的收法）。
 - 断层参数与止损「关闭」旁加 `⚠️` 风险提示文案。

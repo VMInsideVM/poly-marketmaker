@@ -440,7 +440,9 @@ def test_gap_single_places_one_order_highest_qualifying():
             "gap_wide_cents": 10,
             "gap_mid_cents": 5,
             "gap_high_coeff_sum_min": 20,
-            "single_order_min_coeff": 0,
+            "rule1_min_coeff": 0,
+            "rule2_min_coeff": 0,
+            "rule3_min_coeff": 0,
         }
     )
     # 相邻价差 1¢(规则3);买一 0.28 系数 50/(20*2)=1.25 >0 -> 挂一单 20 股 @0.28。

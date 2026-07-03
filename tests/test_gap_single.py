@@ -14,7 +14,17 @@ def _b(price, size):
 
 
 def _plan(
-    bids, rmin=0.10, rmax=0.31, min_size=20, av=None, wide=10, mid=5, gate=20, x=0
+    bids,
+    rmin=0.10,
+    rmax=0.31,
+    min_size=20,
+    av=None,
+    wide=10,
+    mid=5,
+    gate=20,
+    x1=0,
+    x2=0,
+    x3=0,
 ):
     return plan_gap_single_order(
         bids,
@@ -25,7 +35,9 @@ def _plan(
         wide,
         mid,
         gate,
-        x,
+        x1,
+        x2,
+        x3,
     )
 
 
@@ -60,14 +72,35 @@ def test_mid_gap_no_gate_places():
 
 
 def test_fallthrough_to_lower_when_top_below_x():
-    # x=2:买一 0.28 系数 1.25 不>2 -> 顺延买二 0.27 系数 200/40=5 >2 -> 挂 0.27。
-    out = _plan([_b(0.28, 50), _b(0.27, 200)], x=2)
+    # 密盘(价差1¢)走规则3;x3=2:买一 0.28 系数 1.25 不>2 -> 顺延买二 0.27 系数 200/40=5 >2 -> 挂 0.27。
+    out = _plan([_b(0.28, 50), _b(0.27, 200)], x3=2)
     assert out == (0.27, 20)
 
 
 def test_none_qualify_returns_none():
-    out = _plan([_b(0.28, 50), _b(0.27, 40)], x=10)
+    out = _plan([_b(0.28, 50), _b(0.27, 40)], x3=10)
     assert out is None
+
+
+def test_rule1_selection_uses_only_rule1_coeff():
+    # 宽断层 12¢ 过闸(高位系数和 1.25+20=21.25>=20)。x1=2 跳过买一 0.28(系数1.25),
+    # 顺延买二 0.27(系数 800/(20*2)=20)。x2/x3=100 证明规则1只看 rule1_min_coeff。
+    bids = [_b(0.28, 50), _b(0.27, 800), _b(0.15, 400)]
+    assert _plan(bids, x1=2, x2=100, x3=100) == (0.27, 20)
+
+
+def test_rule2_selection_uses_only_rule2_coeff():
+    # 中断层 7¢ -> 规则2。x2=2 跳过买一 0.28(1.25),顺延 0.21(系数 400/(20*1.5)=13.33)。
+    # x1/x3=100 证明规则2只看 rule2_min_coeff。
+    bids = [_b(0.28, 50), _b(0.21, 400)]
+    assert _plan(bids, x1=100, x2=2, x3=100) == (0.21, 20)
+
+
+def test_rule3_selection_uses_only_rule3_coeff():
+    # 密盘 1¢ -> 规则3。x3=2 跳过买一 0.28(1.25),顺延 0.27(系数 200/(20*2)=5)。
+    # x1/x2=100 证明规则3只看 rule3_min_coeff。
+    bids = [_b(0.28, 50), _b(0.27, 200)]
+    assert _plan(bids, x1=100, x2=100, x3=2) == (0.27, 20)
 
 
 def test_empty_or_zero_min_size_returns_none():
@@ -113,25 +146,25 @@ def _side(bids, rmin=0.10, rmax=0.31, min_size=20):
 
 def test_single_orders_one_side_places_one():
     side = _side([_b(0.28, 50), _b(0.27, 40)])
-    out = compute_market_single_orders(side, None, 1000.0, 500, AV, 10, 5, 20, 0)
+    out = compute_market_single_orders(side, None, 1000.0, 500, AV, 10, 5, 20, 0, 0, 0)
     assert out == {"a": [(0.28, 20)], "b": []}
 
 
 def test_single_orders_budget_too_small_skips():
     # 预算 3 USD:0.28×20=5.6 > 3 -> 封顶 int(3/0.28)=10 < min_size 20 -> 放弃。
     side = _side([_b(0.28, 50)])
-    out = compute_market_single_orders(side, None, 3.0, 500, AV, 10, 5, 20, 0)
+    out = compute_market_single_orders(side, None, 3.0, 500, AV, 10, 5, 20, 0, 0, 0)
     assert out == {"a": [], "b": []}
 
 
 def test_single_orders_both_sides_share_budget():
     a = _side([_b(0.28, 50)])
     b = _side([_b(0.22, 400)])
-    out = compute_market_single_orders(a, b, 1000.0, 500, AV, 10, 5, 20, 0)
+    out = compute_market_single_orders(a, b, 1000.0, 500, AV, 10, 5, 20, 0, 0, 0)
     assert out["a"] == [(0.28, 20)]
     assert out["b"] == [(0.22, 20)]
 
 
 def test_single_orders_none_side_skipped():
-    out = compute_market_single_orders(None, None, 1000.0, 500, AV, 10, 5, 20, 0)
+    out = compute_market_single_orders(None, None, 1000.0, 500, AV, 10, 5, 20, 0, 0, 0)
     assert out == {"a": [], "b": []}
