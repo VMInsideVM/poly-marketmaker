@@ -35,7 +35,7 @@ from api.proxy import use_proxy, current_proxy
 
 logger = logging.getLogger(__name__)
 
-_DISCOVERY_MAX_WORKERS = 8  # 发现阶段奖励端点并发上限(端点较娇气,有界并发)
+_DISCOVERY_MAX_WORKERS = 4  # 发现阶段奖励端点并发上限(端点/代理娇气,降到 4 减轻挤压)
 
 
 def _parallel_map(func, items, max_workers=_DISCOVERY_MAX_WORKERS):
@@ -212,11 +212,16 @@ class MarketScanner:
     def refresh_orderbooks(self, pool, cancel=None):
         """给候选池每个市场刷新订单簿快照(覆盖写)。钱包无关、可重复调。
         某 token 抓不到则不入该市场的 _orderbooks(filter 现有逻辑会跳过该 token),
-        覆盖写保证不留上一轮的陈旧簿。"""
-        for market in pool:
-            if cancel and cancel():
-                raise ScanSuperseded()
-            market["_orderbooks"] = self._fetch_orderbooks(market)
+        覆盖写保证不留上一轮的陈旧簿。
+
+        **并发**拉:串行拉整池(~180 市场 × 每市场 4 次网络)过代理要几十分钟、下单轮
+        基本跑不完,filter 拿不到簿 -> eligible 空 -> 不挂单(2026-07-04 实盘)。_fetch_
+        orderbooks 自带 per-token 容错、不抛,_parallel_map 保序 + 带 current_proxy。"""
+        if cancel and cancel():
+            raise ScanSuperseded()
+        results = _parallel_map(lambda m: self._fetch_orderbooks(m), pool)
+        for market, books in zip(pool, results):
+            market["_orderbooks"] = books
 
     def fetch_candidates(
         self,
