@@ -31,9 +31,34 @@ from engine.categories import (
 )
 from config import CATALOG_SLUGS, CATEGORY_CATALOG
 from engine.strategy import reward_price_range
-from api.proxy import use_proxy
+from api.proxy import use_proxy, current_proxy
 
 logger = logging.getLogger(__name__)
+
+_DISCOVERY_MAX_WORKERS = 8  # 发现阶段奖励端点并发上限(端点较娇气,有界并发)
+
+
+def _parallel_map(func, items, max_workers=_DISCOVERY_MAX_WORKERS):
+    """并发对 items 跑 func,结果按输入序返回。
+
+    关键:ThreadPoolExecutor 的 worker 线程默认 current_proxy=None(会直连、泄露真实
+    IP,违反「绝不直连」铁律)。这里捕获**调用线程**的 current_proxy,在每个 worker 里
+    设回,保住代理 IP 隔离。func 应自带异常处理(否则异常在收结果时抛出)。
+    """
+    items = list(items)
+    if not items:
+        return []
+    proxy = current_proxy.get()
+
+    def _task(item):
+        token = current_proxy.set(proxy)
+        try:
+            return func(item)
+        finally:
+            current_proxy.reset(token)
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as ex:
+        return list(ex.map(_task, items))
 
 
 class ScanSuperseded(Exception):
@@ -89,11 +114,11 @@ class MarketScanner:
         min_floor = min(floors) if floors else 0
 
         full = self.api.get_rewards_markets()
-        category_ids = {}
-        for slug in CATALOG_SLUGS:  # 对整份 catalog 打标签(否则"其他"判定不准)
+
+        def _tag_slug(slug):  # 对整份 catalog 打标签(否则"其他"判定不准)
             try:
                 rows = self.api.get_rewards_markets(tag_slug=slug)
-                category_ids[slug] = {m.get("condition_id", "") for m in rows}
+                return slug, {m.get("condition_id", "") for m in rows}
             except Exception as e:
                 # 单个品类查询失败不拖垮整轮发现(奖励端点偶发 500):该 slug 记空集,
                 # 其命中市场退化为"其他"(include_other 时仍会被采集)。尤其冷启动无缓存池
@@ -101,7 +126,10 @@ class MarketScanner:
                 logger.warning(
                     "Discovery tag_slug %s failed (treated as empty): %s", slug, e
                 )
-                category_ids[slug] = set()
+                return slug, set()
+
+        # 14 个品类各查一次奖励端点:并发拉(原为串行,是"开始扫描到出结果"慢的一段)。
+        category_ids = dict(_parallel_map(_tag_slug, CATALOG_SLUGS))
 
         # 顺带算一份品类计数快照(配置页勾选用),直接复用刚查到的 tag 数据,
         # 免得配置页再单独联网一遍。计数口径与 category_counts 一致(在全量集上交集)。
@@ -110,8 +138,9 @@ class MarketScanner:
         pool = tag_pool(full, category_ids, CATALOG_SLUGS)
         blacklist = self.db.get_blacklist_ids()
 
-        out = []
-        checked = 0
+        # 先无网络地筛出「想要且过粗筛」的市场(黑名单/品类/奖励地板),再**并发**拉每
+        # 市场精确奖励——原来是每候选一次串行网络请求(≈一秒蹦一个),并发后成批产出。
+        wanted = []
         for market in pool:
             if cancel and cancel():
                 raise ScanSuperseded()
@@ -125,35 +154,50 @@ class MarketScanner:
             )
             if total_rate < min_floor:
                 continue  # 比最宽松模板还低,任何模板都不会要
-            self.db.upsert_market_meta(
-                cid,
-                market.get("question", ""),
-                market.get("market_slug", ""),
-                market.get("event_slug", ""),
+            wanted.append(market)
+
+        def _precise_reward(market):
+            # 精确每市场奖励(与旧 scan 一致:/rewards/markets/{cid});失败退回批量 total_rate。
+            cid = market.get("condition_id", "")
+            total_rate = sum(
+                rc.get("rate_per_day", 0) for rc in market.get("rewards_config", [])
             )
-            # 精确每市场奖励(与旧 scan 一致:/rewards/markets/{cid})
-            market_reward = total_rate
             try:
                 raw = self.api.get_rewards_for_market(cid)
                 if raw:
-                    market_reward = sum(
+                    return sum(
                         rc.get("rate_per_day", 0)
                         for rd in raw
                         for rc in rd.get("rewards_config", [])
                     )
             except Exception as e:
                 logger.warning("Precise reward fetch failed for %s: %s", cid, e)
-            market["market_reward"] = market_reward
+            return total_rate
+
+        rewards = _parallel_map(_precise_reward, wanted)
+
+        out = []
+        for i, market in enumerate(wanted):
+            if cancel and cancel():
+                raise ScanSuperseded()
+            cid = market.get("condition_id", "")
+            self.db.upsert_market_meta(
+                cid,
+                market.get("question", ""),
+                market.get("market_slug", ""),
+                market.get("event_slug", ""),
+            )
+            market_reward = rewards[i]
             # 候选池展示就绪键(供 /api/eligible 与持久化显示市场名/奖励)。
             # 不含 order_price/outcome:候选池是按市场的,单价改为每钱包下单时
             # 实时计算(见 filter_for_template),前端对缺失价格以「—」兜底。
+            market["market_reward"] = market_reward
             market["market_id"] = cid
             market["market_name"] = market.get("question", "")
             market["daily_reward"] = market_reward
-            checked += 1
             if on_progress:
                 on_progress(
-                    checked, len(pool), f"Checking: {market.get('question','')}"
+                    i + 1, len(wanted), f"Checking: {market.get('question','')}"
                 )
             if on_found:
                 on_found(market)
