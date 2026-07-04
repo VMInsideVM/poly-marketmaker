@@ -158,3 +158,17 @@ compute_market_single_orders(
 2. 该模板设 `take_profit_mode=market` + `stop_loss_mode=off`：浮盈市价清仓、套牢挂成本、无强平。
 3. 配置页可编辑并持久化全部新键；`maker`/`laddering` 组合行为与现状一致。
 4. 新增测试通过，既有测试全绿。
+
+## 追加（2026-07-04）：断层单档处理透明化
+
+用户要求历史/前端能看到「每个市场按断层单档规则怎么判、判的原因、价格依据来源」。原实现只有挂成功的市场记一条 `place_buy`，且原因是写死的 laddering 文案（「多档…累计厚度」），跳过的市场无任何记录。
+
+核心：抽出**一个纯函数产出完整判断**，记账/预演都从它格式化，避免断层逻辑在三处各写一遍。
+
+- **`explain_gap_single_order`**（`engine/laddering.py`）：`plan_gap_single_order` 的底座，返回完整决策 dict（`action/rule/max_gap/min_coeff/high_sum/gate_passed/levels（逐档 price/size/coeff/high_side/chosen）/chosen_index/price/skip_reason`）。`plan_gap_single_order` 改成它的薄壳（行为不变，既有测试全绿）。
+- **`gap_single_reason` / `gap_single_price_basis`**：把决策格式化成中文原因/价格依据。
+- **① place_buy 正确记账**：`manager.place_orders` gap_single 分支对每边算 `explain`，`_record_place_buy_tier` 加可选 `reason/price_basis`，挂单时传断层真实原因（规则级·最大断层·高位系数和·顺延第几档·系数>门槛）；laddering 文案不变。
+- **② 跳过留痕**：判成不挂的边记 `gap_skip` 动作，**按 token 去重**（`WalletWorker._last_gap_skip`，判断变化才记），避免每轮下单往历史刷同一条。history.html `ACTION_LABELS` 加 `gap_skip`。
+- **③ gap_single 预演**：`preview_gap_single_market`（`engine/laddering.py`）+ `/api/markets/<id>/ladder` 按 `placement_mode` 分支；markets.html `renderGapSingle` 渲染逐市场判断（逐档系数表 + 高位/选中标记 + 规则/闸门/选中或跳过原因）。替掉了原「仅供参考盘口」占位。
+
+测试：`explain`/formatter/`preview` 纯函数用例 + manager 记账（挂单原因、跳过去重、laddering 回归）。

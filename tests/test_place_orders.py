@@ -451,3 +451,69 @@ def test_gap_single_places_one_order_highest_qualifying():
     assert api.place_limit_buy.call_count == 1
     c = api.place_limit_buy.call_args_list[0]
     assert round(c.args[1], 2) == 0.28 and c.args[2] == 20
+
+
+def _gap_template():
+    return {
+        "placement_mode": "gap_single",
+        "tier_rules": [],
+        "amount_value_table": [
+            {"upper": 0.20, "value": 1},
+            {"upper": 0.25, "value": 1.5},
+            {"upper": 0.31, "value": 2},
+        ],
+        "gap_wide_cents": 10,
+        "gap_mid_cents": 5,
+        "gap_high_coeff_sum_min": 20,
+        "rule1_min_coeff": 0,
+        "rule2_min_coeff": 0,
+        "rule3_min_coeff": 0,
+    }
+
+
+def _actions(db, atype):
+    return [
+        c
+        for c in db.record_action.call_args_list
+        if c.kwargs.get("action_type") == atype
+    ]
+
+
+def test_gap_single_place_buy_records_rule_reason():
+    # ① 断层单档挂单记真实原因(规则级/断层/系数),不再是 laddering 死文案。
+    worker, api, db = _make_worker(template=_gap_template())
+    api.get_orderbook.return_value = _ob([(0.28, 50), (0.27, 40)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    calls = _actions(db, "place_buy")
+    assert len(calls) == 1
+    reason = calls[0].kwargs["reason"]
+    assert "规则3" in reason
+    assert "累计厚度" not in reason
+    assert "最大断层" in calls[0].kwargs["price_basis"]
+
+
+def test_gap_single_skip_records_reason_and_dedups():
+    # ② 判成不挂的市场记 gap_skip;同一判断第二轮去重不再记。
+    tmpl = _gap_template()
+    tmpl["rule3_min_coeff"] = 100  # 无档系数 >100 -> 规则3 但不挂
+    worker, api, db = _make_worker(template=tmpl)
+    api.get_orderbook.return_value = _ob([(0.28, 50), (0.27, 40)], [(0.31, 1000)])
+    elig = [_elig("A", "A-y", "Yes", min_size=20)]
+    worker.place_orders(elig)
+    skips = _actions(db, "gap_skip")
+    assert len(skips) == 1
+    assert "规则3" in skips[0].kwargs["reason"]
+    api.place_limit_buy.assert_not_called()
+    db.record_action.reset_mock()
+    worker.place_orders(elig)
+    assert _actions(db, "gap_skip") == []
+
+
+def test_laddering_place_buy_keeps_default_reason():
+    # 回归:laddering 模式 place_buy 文案保持「累计厚度多档」。
+    worker, api, db = _make_worker()
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    calls = _actions(db, "place_buy")
+    assert calls
+    assert "累计厚度" in calls[0].kwargs["reason"]

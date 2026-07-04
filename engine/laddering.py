@@ -26,7 +26,7 @@ def amount_value(price, table):
     return None
 
 
-def plan_gap_single_order(
+def explain_gap_single_order(
     bids,
     reward_range_min,
     reward_range_max,
@@ -39,18 +39,39 @@ def plan_gap_single_order(
     rule2_min_coeff,
     rule3_min_coeff,
 ):
-    """网关式单档挂单(v4 用户策略,纯函数)。
+    """网关式单档挂单的完整判断(纯函数,不下单)。
 
-    对单个 token 的买单簿:取奖励区间内买档 -> 算风险系数(份数/(最低份数×金额数值))
-    -> 按相邻在区间档的最大价差把整个市场归到三级之一(>宽=规则1 / 中~宽=规则2 / <中=规则3)
-    -> 规则1(宽断层)再查「断层上方各档风险系数之和 >= gap_high_coeff_sum_min」市场闸门
-    (不过则整市场不挂)-> 自最高在区间档往下取第一个「系数 > 该规则选档门槛」的档,挂 min_size 一单。
-    三级各用自己的选档门槛:规则1=rule1_min_coeff、规则2=rule2_min_coeff、规则3=rule3_min_coeff。
-    返回 (price, shares) 或 None(不挂)。价差单位为美分;归级口径:价差 10/5 归中一级
-    (规则1 严格 >宽、规则3 严格 <中);高位系数和 == 门槛 放行;选档严格 > 门槛。
+    单个 token 的买单簿 -> 决策 dict,既驱动 plan_gap_single_order,也供记账/预演
+    展示完整依据(每个市场怎么按断层单档规则判、判的原因、价格依据)。字段:
+      action: "place"|"skip"
+      rule: 1|2|3|None(None=区间内无买档/无簿)
+      max_gap: 最大相邻价差(美分);<2 档时 0
+      min_coeff: 该级选档门槛(rule1/2/3 之一);rule=None 时 None
+      high_sum: 规则1 高位系数和;非规则1 为 None
+      gate_passed: 规则1 闸门是否通过;规则2/3 恒 True;rule=None 为 False
+      levels: 区间内买档(价降序),每项 {price,size,coeff,high_side,chosen}
+      chosen_index: 选中档在 levels 的下标;跳过为 None
+      price/shares: 选中档价 / int(min_size);跳过为 None
+      skip_reason: 跳过原因(中文);挂单为 None
+    归级口径:价差 10/5 归中一级(规则1 严格 >宽、规则3 严格 <中);高位系数和 ==
+    门槛放行;选档严格 > 门槛。价差按分四舍五入去浮点尘。
     """
+    d = {
+        "action": "skip",
+        "rule": None,
+        "max_gap": 0.0,
+        "min_coeff": None,
+        "high_sum": None,
+        "gate_passed": False,
+        "levels": [],
+        "chosen_index": None,
+        "price": None,
+        "shares": None,
+        "skip_reason": None,
+    }
     if min_size <= 0 or not bids:
-        return None
+        d["skip_reason"] = "无买单簿或最低份数<=0"
+        return d
     in_range = sorted(
         (
             {"price": float(b["price"]), "size": float(b["size"])}
@@ -61,7 +82,8 @@ def plan_gap_single_order(
         reverse=True,
     )
     if not in_range:
-        return None
+        d["skip_reason"] = "奖励区间内无买档"
+        return d
     for lv in in_range:
         av = amount_value(lv["price"], amount_value_table)
         lv["coeff"] = (lv["size"] / (min_size * av)) if (av and av > 0) else 0.0
@@ -75,21 +97,112 @@ def plan_gap_single_order(
         if gap > max_gap:
             max_gap = gap
             split_idx = i
+    for idx, lv in enumerate(in_range):
+        lv["high_side"] = idx <= split_idx
+        lv["chosen"] = False
+    d["max_gap"] = max_gap
+    d["levels"] = in_range
+
     # 按最大价差归级,取该级的选档门槛;仅规则1(宽断层)加「高位风险系数和」市场闸门。
     if max_gap > gap_wide_cents:
+        rule, min_coeff = 1, rule1_min_coeff
         high_sum = sum(lv["coeff"] for lv in in_range[: split_idx + 1])
+        d["rule"], d["min_coeff"], d["high_sum"] = 1, min_coeff, high_sum
         if high_sum < gap_high_coeff_sum_min:
-            return None
-        min_coeff = rule1_min_coeff
+            d["skip_reason"] = (
+                f"规则1(宽断层,最大断层{max_gap:g}¢):高位系数和 {high_sum:g}"
+                f" < 门槛 {gap_high_coeff_sum_min:g} → 整市场不挂"
+            )
+            return d
+        d["gate_passed"] = True
     elif max_gap >= gap_mid_cents:
-        min_coeff = rule2_min_coeff
+        rule, min_coeff = 2, rule2_min_coeff
+        d["rule"], d["min_coeff"], d["gate_passed"] = 2, min_coeff, True
     else:
-        min_coeff = rule3_min_coeff
+        rule, min_coeff = 3, rule3_min_coeff
+        d["rule"], d["min_coeff"], d["gate_passed"] = 3, min_coeff, True
+
     # 顺延:自上而下第一个 coeff > 该级门槛。
-    for lv in in_range:
+    for idx, lv in enumerate(in_range):
         if lv["coeff"] > min_coeff:
-            return (lv["price"], int(min_size))
-    return None
+            lv["chosen"] = True
+            d["action"] = "place"
+            d["chosen_index"] = idx
+            d["price"] = lv["price"]
+            d["shares"] = int(min_size)
+            return d
+    d["skip_reason"] = (
+        f"规则{rule}(最大断层{max_gap:g}¢):无档系数 > 门槛 {min_coeff:g} → 不挂"
+    )
+    return d
+
+
+def plan_gap_single_order(
+    bids,
+    reward_range_min,
+    reward_range_max,
+    min_size,
+    amount_value_table,
+    gap_wide_cents,
+    gap_mid_cents,
+    gap_high_coeff_sum_min,
+    rule1_min_coeff,
+    rule2_min_coeff,
+    rule3_min_coeff,
+):
+    """网关式单档挂单(v4 用户策略)。explain_gap_single_order 的薄壳:
+    返回 (price, shares) 或 None(不挂)。完整判断依据见 explain_gap_single_order。"""
+    d = explain_gap_single_order(
+        bids,
+        reward_range_min,
+        reward_range_max,
+        min_size,
+        amount_value_table,
+        gap_wide_cents,
+        gap_mid_cents,
+        gap_high_coeff_sum_min,
+        rule1_min_coeff,
+        rule2_min_coeff,
+        rule3_min_coeff,
+    )
+    return (d["price"], d["shares"]) if d["action"] == "place" else None
+
+
+_GAP_RULE_LABEL = {1: "规则1(宽断层)", 2: "规则2(中断层)", 3: "规则3(密盘)"}
+
+
+def gap_single_reason(d):
+    """把 explain_gap_single_order 决策格式化成中文原因(挂单/跳过通用)。
+
+    跳过 -> 直接用决策里的 skip_reason;挂单 -> 规则级·最大断层·(规则1)高位系数和·
+    选中第几档@价 系数>门槛。供 place_buy 记账与预演展示。"""
+    if d.get("action") != "place" or d.get("chosen_index") is None:
+        return d.get("skip_reason") or "不挂"
+    parts = [f"{_GAP_RULE_LABEL.get(d['rule'], '规则?')}·最大断层{d['max_gap']:g}¢"]
+    if d["rule"] == 1 and d.get("high_sum") is not None:
+        parts.append(f"高位系数和{d['high_sum']:g}(过闸)")
+    lv = d["levels"][d["chosen_index"]]
+    parts.append(
+        f"选中第{d['chosen_index'] + 1}档 @{lv['price']:.4f}"
+        f" 系数{lv['coeff']:g} > 门槛{d['min_coeff']:g}"
+    )
+    return "·".join(parts)
+
+
+def gap_single_price_basis(d, reward_range_min, reward_range_max):
+    """挂单的价格依据/来源串:选中档价 + 系数构成 + 断层分级 + 数据来源。"""
+    src = (
+        f"奖励区间[{reward_range_min:.4f},{reward_range_max:.4f}];"
+        f"来源:CLOB get_orderbook"
+    )
+    if d.get("action") != "place" or d.get("chosen_index") is None:
+        return src
+    lv = d["levels"][d["chosen_index"]]
+    return (
+        f"档价 {lv['price']:.4f};系数 {lv['coeff']:g}=挂量{lv['size']:g}÷(最低份数×金额数值);"
+        f"最大断层 {d['max_gap']:g}¢→{_GAP_RULE_LABEL.get(d['rule'], '')};"
+        f"选档门槛 {d['min_coeff']:g};" + src
+    )
 
 
 def compute_market_single_orders(
@@ -462,4 +575,64 @@ def preview_market_ladders(
         out[key]["total_tiers"] = len(placed)
         out[key]["total_shares"] = sum(L["shares"] for L in placed)
         out[key]["total_amount"] = sum(L["amount"] for L in placed)
+    return out
+
+
+def preview_gap_single_market(
+    side_a,
+    side_b,
+    amount_value_table,
+    gap_wide_cents,
+    gap_mid_cents,
+    gap_high_coeff_sum_min,
+    rule1_min_coeff,
+    rule2_min_coeff,
+    rule3_min_coeff,
+):
+    """两边的网关式单档只读预演:对每边调 explain_gap_single_order,组装展示用 side。
+
+    展示「每个市场怎么按断层单档规则判、判成什么、选中/跳过原因」。不做预算封顶
+    (单档=最低份数,是否够预算另由下单时判);held 侧暂停等运行态也不在此体现。
+    side_x:{"outcome","token_id","min_size","reward_range_min","reward_range_max",
+            "best_bid","best_ask","spread_cents","bids":[{price,size}...]} 或 None。
+    返回 {"a":<side|None>,"b":<side|None>};side 含 rule/max_gap/high_sum/gate_passed/
+    action/chosen_*/skip_reason/levels(逐档 price/size/coeff/high_side/chosen)。
+    """
+    out = {}
+    for key, side in (("a", side_a), ("b", side_b)):
+        if side is None:
+            out[key] = None
+            continue
+        d = explain_gap_single_order(
+            side["bids"],
+            side["reward_range_min"],
+            side["reward_range_max"],
+            side["min_size"],
+            amount_value_table,
+            gap_wide_cents,
+            gap_mid_cents,
+            gap_high_coeff_sum_min,
+            rule1_min_coeff,
+            rule2_min_coeff,
+            rule3_min_coeff,
+        )
+        out[key] = {
+            "outcome": side.get("outcome", ""),
+            "token_id": side.get("token_id", ""),
+            "best_bid": side.get("best_bid"),
+            "best_ask": side.get("best_ask"),
+            "spread_cents": side.get("spread_cents"),
+            "reward_range": [side["reward_range_min"], side["reward_range_max"]],
+            "rule": d["rule"],
+            "rule_label": _GAP_RULE_LABEL.get(d["rule"], "无区间档"),
+            "max_gap": d["max_gap"],
+            "min_coeff": d["min_coeff"],
+            "high_sum": d["high_sum"],
+            "gate_passed": d["gate_passed"],
+            "action": d["action"],
+            "chosen_index": d["chosen_index"],
+            "chosen_price": d["price"],
+            "skip_reason": d["skip_reason"],
+            "levels": d["levels"],
+        }
     return out

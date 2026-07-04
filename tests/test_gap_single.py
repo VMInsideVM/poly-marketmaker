@@ -132,6 +132,172 @@ def test_tie_max_gap_splits_at_topmost():
     assert out is None
 
 
+from engine.laddering import explain_gap_single_order
+
+
+def _explain(
+    bids,
+    rmin=0.10,
+    rmax=0.31,
+    min_size=20,
+    av=None,
+    wide=10,
+    mid=5,
+    gate=20,
+    x1=0,
+    x2=0,
+    x3=0,
+):
+    return explain_gap_single_order(
+        bids,
+        rmin,
+        rmax,
+        min_size,
+        AV if av is None else av,
+        wide,
+        mid,
+        gate,
+        x1,
+        x2,
+        x3,
+    )
+
+
+def test_explain_normal_market_full_decision():
+    d = _explain([_b(0.28, 50), _b(0.27, 40)])
+    assert d["action"] == "place"
+    assert d["rule"] == 3
+    assert d["max_gap"] == 1.0
+    assert d["min_coeff"] == 0
+    assert d["high_sum"] is None
+    assert d["gate_passed"] is True
+    assert d["chosen_index"] == 0
+    assert d["price"] == 0.28
+    assert d["shares"] == 20
+    assert d["skip_reason"] is None
+    assert d["levels"][0]["coeff"] == 1.25  # 50/(20*2)
+    assert d["levels"][0]["chosen"] is True
+    assert d["levels"][1]["chosen"] is False
+
+
+def test_explain_wide_gap_gate_fail():
+    d = _explain([_b(0.28, 50), _b(0.27, 30), _b(0.15, 400)])
+    assert d["action"] == "skip"
+    assert d["rule"] == 1
+    assert d["max_gap"] == 12.0
+    assert d["high_sum"] == 2.0  # 1.25 + 0.75
+    assert d["gate_passed"] is False
+    assert d["chosen_index"] is None
+    assert d["price"] is None
+    # 高位 = 断层上方两档;低位不算入高位
+    assert [lv["high_side"] for lv in d["levels"]] == [True, True, False]
+    assert "规则1" in d["skip_reason"]
+    assert "20" in d["skip_reason"]
+
+
+def test_explain_wide_gap_gate_pass():
+    d = _explain([_b(0.28, 50), _b(0.27, 800), _b(0.15, 400)])
+    assert d["action"] == "place"
+    assert d["rule"] == 1
+    assert d["high_sum"] == 21.25  # 1.25 + 20
+    assert d["gate_passed"] is True
+    assert d["chosen_index"] == 0
+    assert d["price"] == 0.28
+
+
+def test_explain_mid_gap_no_gate():
+    d = _explain([_b(0.28, 50), _b(0.21, 400)])
+    assert d["rule"] == 2
+    assert d["max_gap"] == 7.0
+    assert d["high_sum"] is None
+    assert d["gate_passed"] is True
+    assert d["chosen_index"] == 0
+
+
+def test_explain_fallthrough_marks_chosen():
+    d = _explain([_b(0.28, 50), _b(0.27, 200)], x3=2)
+    assert d["chosen_index"] == 1
+    assert d["price"] == 0.27
+    assert d["levels"][0]["chosen"] is False
+    assert d["levels"][1]["chosen"] is True
+
+
+def test_explain_none_qualify_skip_reason_names_threshold():
+    d = _explain([_b(0.28, 50), _b(0.27, 40)], x3=10)
+    assert d["action"] == "skip"
+    assert d["rule"] == 3
+    assert d["chosen_index"] is None
+    assert "规则3" in d["skip_reason"]
+    assert "10" in d["skip_reason"]
+
+
+def test_explain_no_in_range_rule_none():
+    d = _explain([_b(0.05, 500), _b(0.04, 500)])
+    assert d["action"] == "skip"
+    assert d["rule"] is None
+    assert d["levels"] == []
+    assert "奖励区间" in d["skip_reason"]
+
+
+def test_plan_matches_explain_wrapper():
+    # plan 是 explain 的薄壳:决策一致。
+    bids = [_b(0.28, 50), _b(0.27, 800), _b(0.15, 400)]
+    d = _explain(bids)
+    assert _plan(bids) == (d["price"], d["shares"])
+    assert _plan([_b(0.05, 500)]) is None
+
+
+from engine.laddering import gap_single_reason, gap_single_price_basis
+
+
+def test_reason_placed_rule2():
+    d = _explain([_b(0.28, 50), _b(0.21, 400)])
+    r = gap_single_reason(d)
+    assert "规则2(中断层)" in r
+    assert "最大断层7¢" in r
+    assert "选中第1档" in r
+    assert "@0.2800" in r
+    assert "门槛" in r
+
+
+def test_reason_placed_rule1_shows_high_sum():
+    d = _explain([_b(0.28, 50), _b(0.27, 800), _b(0.15, 400)])
+    r = gap_single_reason(d)
+    assert "规则1(宽断层)" in r
+    assert "高位系数和21.25" in r
+    assert "过闸" in r
+
+
+def test_reason_skip_uses_skip_reason():
+    d = _explain([_b(0.28, 50), _b(0.27, 30), _b(0.15, 400)])
+    assert gap_single_reason(d) == d["skip_reason"]
+
+
+def test_reason_fallthrough_shows_second_tier():
+    d = _explain([_b(0.28, 50), _b(0.27, 200)], x3=2)
+    r = gap_single_reason(d)
+    assert "选中第2档" in r
+    assert "@0.2700" in r
+
+
+def test_price_basis_placed_has_coeff_and_source():
+    d = _explain([_b(0.28, 50), _b(0.21, 400)])
+    b = gap_single_price_basis(d, 0.10, 0.31)
+    assert "档价 0.2800" in b
+    assert "系数" in b
+    assert "最大断层" in b
+    assert "奖励区间[0.1000,0.3100]" in b
+    assert "get_orderbook" in b
+
+
+def test_price_basis_skip_is_minimal():
+    d = _explain([_b(0.05, 500), _b(0.04, 500)])
+    b = gap_single_price_basis(d, 0.10, 0.31)
+    assert "奖励区间" in b
+    assert "get_orderbook" in b
+    assert "档价" not in b
+
+
 from engine.laddering import compute_market_single_orders
 
 
@@ -168,3 +334,57 @@ def test_single_orders_both_sides_share_budget():
 def test_single_orders_none_side_skipped():
     out = compute_market_single_orders(None, None, 1000.0, 500, AV, 10, 5, 20, 0, 0, 0)
     assert out == {"a": [], "b": []}
+
+
+from engine.laddering import preview_gap_single_market
+
+
+def _pside(bids, outcome="Yes", rmin=0.10, rmax=0.31, min_size=20):
+    return {
+        "outcome": outcome,
+        "token_id": outcome + "-t",
+        "min_size": min_size,
+        "reward_range_min": rmin,
+        "reward_range_max": rmax,
+        "best_bid": 0.28,
+        "best_ask": 0.30,
+        "spread_cents": 2,
+        "bids": bids,
+    }
+
+
+def test_preview_places_side_carries_full_judgment():
+    a = _pside([_b(0.28, 50), _b(0.21, 400)])
+    out = preview_gap_single_market(a, None, AV, 10, 5, 20, 0, 0, 0)
+    assert out["b"] is None
+    sa = out["a"]
+    assert sa["outcome"] == "Yes"
+    assert sa["rule"] == 2
+    assert sa["rule_label"] == "规则2(中断层)"
+    assert sa["action"] == "place"
+    assert sa["max_gap"] == 7.0
+    assert sa["chosen_price"] == 0.28
+    assert sa["reward_range"] == [0.10, 0.31]
+    # 逐档带系数 + 高位/选中标记,供前端表格展示
+    assert sa["levels"][0]["coeff"] == 1.25
+    assert sa["levels"][0]["chosen"] is True
+
+
+def test_preview_skip_side_shows_reason():
+    a = _pside([_b(0.28, 50), _b(0.27, 30), _b(0.15, 400)])  # 规则1 闸门不过
+    out = preview_gap_single_market(a, None, AV, 10, 5, 20, 0, 0, 0)
+    sa = out["a"]
+    assert sa["action"] == "skip"
+    assert sa["rule"] == 1
+    assert sa["gate_passed"] is False
+    assert sa["high_sum"] == 2.0
+    assert "规则1" in sa["skip_reason"]
+
+
+def test_preview_both_sides():
+    a = _pside([_b(0.28, 50), _b(0.21, 400)], outcome="Yes")
+    b = _pside([_b(0.27, 200), _b(0.26, 200)], outcome="No")
+    out = preview_gap_single_market(a, b, AV, 10, 5, 20, 0, 0, 0)
+    assert out["a"]["outcome"] == "Yes"
+    assert out["b"]["outcome"] == "No"
+    assert out["b"]["action"] == "place"

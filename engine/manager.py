@@ -47,6 +47,9 @@ class WalletWorker:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self.running = False
+        # gap_single 「判成不挂」的去重:token -> 上次记录的原因(None=上次是挂单),
+        # 只在判断变化时记 gap_skip,避免每轮下单都往历史刷同一条跳过。
+        self._last_gap_skip: dict = {}
 
     def start(self):
         self._stop_event.clear()
@@ -126,6 +129,9 @@ class WalletWorker:
         from engine.laddering import (
             compute_market_ladders,
             compute_market_single_orders,
+            explain_gap_single_order,
+            gap_single_reason,
+            gap_single_price_basis,
             apply_double_sided_floor,
             reconcile_buy_orders,
         )
@@ -295,6 +301,8 @@ class WalletWorker:
             shares_budget = max(0, max_exposure_shares - int(held_shares.get(mid, 0.0)))
             budget_ok = budget > 0 and shares_budget > 0
             ladders = {"a": [], "b": []}
+            # gap_single 每边的完整判断(供 place_buy 记真实原因、判成不挂时记 gap_skip)。
+            gap_explains = {"a": None, "b": None}
             if budget_ok:
                 ca = None if side_a["token_id"] in held_assets else side_a
                 cb = None if (side_b and side_b["token_id"] in held_assets) else side_b
@@ -312,6 +320,21 @@ class WalletWorker:
                         rule2_min_coeff,
                         rule3_min_coeff,
                     )
+                    for gkey, gside in (("a", ca), ("b", cb)):
+                        if gside is not None:
+                            gap_explains[gkey] = explain_gap_single_order(
+                                gside["bids"],
+                                gside["reward_range_min"],
+                                gside["reward_range_max"],
+                                gside["min_size"],
+                                amount_value_table,
+                                gap_wide_cents,
+                                gap_mid_cents,
+                                gap_high_coeff_sum_min,
+                                rule1_min_coeff,
+                                rule2_min_coeff,
+                                rule3_min_coeff,
+                            )
                 else:
                     ladders = compute_market_ladders(
                         ca,
@@ -360,6 +383,9 @@ class WalletWorker:
                         logger.warning(
                             "Reconcile/pause cancel %s failed: %s", token_id, ex
                         )
+                gap_d = (
+                    gap_explains.get(key) if placement_mode == "gap_single" else None
+                )
                 for price, shares in to_place:
                     try:
                         self.api.place_limit_buy(
@@ -371,14 +397,35 @@ class WalletWorker:
                         )
                         placed += 1
                         markets_with_open.add(mid)
-                        self._record_place_buy_tier(mid, side, price, shares)
+                        if gap_d and gap_d.get("action") == "place":
+                            self._record_place_buy_tier(
+                                mid,
+                                side,
+                                price,
+                                shares,
+                                reason=gap_single_reason(gap_d),
+                                price_basis=gap_single_price_basis(
+                                    gap_d,
+                                    side["reward_range_min"],
+                                    side["reward_range_max"],
+                                ),
+                            )
+                            self._last_gap_skip[token_id] = None  # 挂成功->清跳过去重
+                        else:
+                            self._record_place_buy_tier(mid, side, price, shares)
                         if limit is not None and placed >= limit:
                             return
                     except Exception as ex:
                         logger.error("place_limit_buy failed %s: %s", token_id, ex)
+                # ② 判成不挂:记 gap_skip(按 token 去重,判断变化才记)。
+                if placement_mode == "gap_single":
+                    self._maybe_record_gap_skip(mid, side, gap_explains.get(key))
 
-    def _record_place_buy_tier(self, market_id, side, price, shares):
-        """记一档买单到 actions(不抛异常)。"""
+    def _record_place_buy_tier(
+        self, market_id, side, price, shares, reason=None, price_basis=None
+    ):
+        """记一档买单到 actions(不抛异常)。reason/price_basis 缺省用 laddering 文案;
+        gap_single 由调用方传入断层单档的真实原因/价格依据。"""
         try:
             self.db.record_action(
                 wallet=self.wallet_address,
@@ -387,8 +434,9 @@ class WalletWorker:
                 side="买入",
                 price=price,
                 size=shares,
-                reason="多档:在奖励区间内按累计厚度规则表挂买单",
-                price_basis=(
+                reason=reason or "多档:在奖励区间内按累计厚度规则表挂买单",
+                price_basis=price_basis
+                or (
                     f"档价 {price:.4f}（{side.get('outcome','')}）；"
                     f"奖励区间[{side['reward_range_min']:.4f},{side['reward_range_max']:.4f}]；"
                     f"来源：CLOB get_orderbook"
@@ -396,6 +444,34 @@ class WalletWorker:
             )
         except Exception as e:
             logger.warning("record_action(place_buy) failed: %s", e)
+
+    def _maybe_record_gap_skip(self, market_id, side, decision):
+        """gap_single 判成不挂时记一条 gap_skip(按 token 去重:同一原因只记一次,
+        避免每轮下单往历史刷同一条)。decision=None/非 skip -> 不记。"""
+        token_id = side["token_id"]
+        if not decision or decision.get("action") != "skip":
+            return
+        reason = decision.get("skip_reason") or "断层单档判定不挂"
+        if self._last_gap_skip.get(token_id) == reason:
+            return
+        self._last_gap_skip[token_id] = reason
+        try:
+            self.db.record_action(
+                wallet=self.wallet_address,
+                market_id=market_id,
+                action_type="gap_skip",
+                side=side.get("outcome", "-") or "-",
+                price=-1,
+                size=0,
+                reason=reason,
+                price_basis=(
+                    f"断层单档判定不挂（{side.get('outcome','')}）；"
+                    f"奖励区间[{side['reward_range_min']:.4f},{side['reward_range_max']:.4f}]；"
+                    f"来源：CLOB get_orderbook"
+                ),
+            )
+        except Exception as e:
+            logger.warning("record_action(gap_skip) failed: %s", e)
 
 
 class EngineManager:

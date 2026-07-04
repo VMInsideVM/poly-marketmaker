@@ -167,9 +167,41 @@ function insertLadderRow(i, html) {
     row.parentNode.insertBefore(tr, row.nextSibling);
 }
 
+function renderGapSingle(data) {
+    // 网关式单档预演:逐市场按断层分级判(选中哪档 / 为何不挂),含逐档系数与高位标记。
+    if (!data.sides || !data.sides.length) {
+        return '<span class="metric-note">无可预演的方向（订单簿缺失）</span>';
+    }
+    return data.sides.map(s => {
+        const rows = s.levels.map((L, i) => `<tr class="${L.chosen ? 'profit' : ''}">
+                <td>买${i + 1}档</td>
+                <td>${fmtP(L.price)}</td>
+                <td>${L.size}</td>
+                <td>${L.coeff != null ? L.coeff.toFixed(2) : '—'}</td>
+                <td>${L.high_side ? '高位' : '—'}</td>
+                <td>${L.chosen ? '✓ 选中' : ''}</td></tr>`).join('');
+        const gateTxt = s.rule === 1
+            ? ` · 高位系数和 ${s.high_sum != null ? s.high_sum.toFixed(2) : '—'} ${s.gate_passed ? '≥ 闸门(过闸)' : '< 闸门(拦下)'}`
+            : '';
+        const minCoeff = s.min_coeff != null ? s.min_coeff : '—';
+        const result = s.action === 'place'
+            ? `<span class="profit">✓ 挂一单 @ ${fmtP(s.chosen_price)}（第 ${s.chosen_index + 1} 档，系数 > 门槛 ${minCoeff}）</span>`
+            : `<span class="loss">✗ 不挂：${escapeHtml(s.skip_reason || '')}</span>`;
+        return `<div class="metric-note" style="margin-bottom:6px">${escapeHtml(s.outcome)} 方向 · 奖励范围 [${s.reward_range[0].toFixed(2)}, ${s.reward_range[1].toFixed(2)}] · 盘口价差 ${s.spread_cents != null ? s.spread_cents.toFixed(0) : '—'}¢</div>
+        <div style="margin-bottom:6px"><b>${escapeHtml(s.rule_label)}</b> · 最大断层 ${s.max_gap.toFixed(1)}¢${gateTxt} · 选档门槛 ${minCoeff}</div>
+        <div style="margin-bottom:6px">${result}</div>
+        <table class="data-table">
+            <thead><tr>
+                <th>档位</th><th>价格</th><th>盘口量</th><th>风险系数</th><th>高位</th><th>选档</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    }).join('<div style="height:12px"></div>');
+}
+
 function renderLadder(data) {
     if (data.placement_mode === 'gap_single') {
-        return '<span class="metric-note">此模板为「网关式单档」模式：每市场按断层分级只挂一单，梯队预演仅适用于多档模式（此处仅供参考盘口）。</span>';
+        return renderGapSingle(data);
     }
     if (!data.sides || !data.sides.length) {
         return '<span class="metric-note">无可预演的方向（订单簿缺失或预算为 0）</span>';
