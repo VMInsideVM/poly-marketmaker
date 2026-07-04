@@ -96,6 +96,29 @@ class TestEngineLifecycle:
         assert isinstance(status, dict)
         assert "engines" in status
 
+    def test_reset_discovery_cache_forces_rediscovery(self):
+        # 清空内存候选池后,_should_discover 立刻为 True(即便刚扫过、离 4h 还远)。
+        manager, db = _make_manager()
+        manager.eligible_markets = [{"market_id": "stale"}]
+        manager.last_scan_time = time.time()
+        assert manager._should_discover(time.time()) is False  # 复用旧池:不发现
+        manager._reset_discovery_cache()
+        assert manager.eligible_markets == []
+        assert manager._should_discover(time.time()) is True  # 清空后:强制发现
+
+    def test_start_all_clears_stale_pool(self):
+        # 「启动/重启引擎」须清空上一轮内存候选池,否则扫描线程因 _should_discover=False
+        # 复用旧结果、市场发现一直不刷新(用户实报的「重启不刷新市场」)。
+        manager, db = _make_manager()
+        manager.eligible_markets = [{"market_id": "stale"}]
+        manager.last_scan_time = time.time()
+        with patch("engine.manager.decrypt", return_value="k"):
+            with patch("engine.manager.PolymarketAPI"):
+                with patch.object(manager, "_scanner_loop"):  # 不真跑循环,免它又填充池
+                    manager.start_all()
+                    assert manager.eligible_markets == []
+                    manager.stop_all()
+
 
 class TestWalletWorkerTick:
     def test_tick_runs_check_exit_between_fills_and_compliance(self):

@@ -503,8 +503,19 @@ class EngineManager:
 
     # === Auto mode: full engine lifecycle ===
 
+    def _reset_discovery_cache(self):
+        """清空内存候选池,使下一轮扫描线程强制重新发现(_should_discover 转 True)。
+
+        (重)启动引擎时调用。restart_all/start_all 复用同一 manager 实例,若不清空,
+        4h 发现间隔内 _should_discover 恒为 False,「市场发现」永远停在上次结果——即
+        用户实报的「点重启引擎但市场发现不刷新」。last_scan_time 保留供仪表盘扫描时效
+        显示,清空 eligible_markets 一项即足以触发重新发现。
+        """
+        self.eligible_markets = []
+
     def start_all(self):
         """Start everything: wallet workers + recovery + auto scanner loop."""
+        self._reset_discovery_cache()  # (重)启动强制重新发现,不复用旧候选池
         wallets = self.db.list_wallets()
         for w in wallets:
             if w["enabled"]:
