@@ -104,23 +104,23 @@ class OrderMonitor:
         times = [r.get("created_at", 0) or 0 for r in rows]
         times += [a.get("created_at", 0) or 0 for a in actions]
         self._after_ts = max(times) if times else 0.0
-        # Prime dedup with the fills the tick will actually see so a restart never
-        # re-handles pre-startup fills. priming 用与 check_buy_orders **相同**的
-        # get_trades(after=水位) 查询——旧实现用无 after 查询,与 tick 的 after 查询
-        # 取到的成交集可能不一致,历史成交漏进去重、每次重启被重放(cancel_remainder
-        # 洪水,2026-07-04 实盘)。失败(启动网络抖)则置 pending,check_buy_orders 重试、
-        # 建好前不处理成交。
+        # Prime dedup with ALL historical fills (get_trades 无 after,稳拿全部)so a
+        # restart never re-handles pre-startup fills. after 时间过滤不可靠——水位在今天
+        # 时 tick 的 after 仍可能把 6 月的历史成交捞回,若 priming 也用 after=水位 就会
+        # 漏灌(0 条)、tick 照样重放(cancel_remainder 洪水,2026-07-04 实盘)。失败
+        # (启动网络抖)则置 pending,check_buy_orders 重试、建好前不处理成交。
         if not self._prime_seen_keys():
             self._prime_pending = True
 
     def _prime_seen_keys(self) -> bool:
-        """用与 check_buy_orders 相同的 get_trades(after=水位) 预灌去重集,并把水位推进过
-        这些成交的 match_time(同一查询保证覆盖到 tick 会遇到的每一笔成交)。成功返回 True
-        并清 _prime_pending;失败返回 False。"""
+        """预灌去重集 + 推进水位。用 get_trades(**无 after**) 可靠拉回全部历史成交——
+        Polymarket 的 after 时间过滤不可靠(实测:水位在今天时,tick 的 after 仍可能把
+        6 月的历史成交捞回来,类似已知的 asset_id 过滤失效),不能靠它保证覆盖;只有无
+        after 才稳拿全部。把全部成交灌进 _seen_fill_keys(dedup 才是真幂等),并把水位
+        推进过其 match_time。成功返回 True 并清 _prime_pending;失败返回 False。"""
         funder = self._funder()
-        after = str(int(self._after_ts)) if self._after_ts else None
         try:
-            trades = self.api.get_trades(TradeParams(maker_address=funder, after=after))
+            trades = self.api.get_trades(TradeParams(maker_address=funder))
             for ev in select_new_buy_fills(trades, funder, set()):
                 self._seen_fill_keys.add((ev.get("trade_id"), ev.get("order_id")))
                 self._after_ts = max(self._after_ts, float(ev.get("ts", 0) or 0))

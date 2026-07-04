@@ -235,17 +235,39 @@ class TestInitWatermark:
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
         assert "cancel_remainder" in ats
 
-    def test_priming_uses_same_after_watermark_as_tick(self):
-        # 修 bug:priming 必须用与 tick 相同的 get_trades(after=水位) 查询。旧实现 priming
-        # 用无 after 查询,与 tick 的 after 查询取到的成交集可能不一致 -> 历史成交漏进去重、
-        # 每次重启被重放(用户实报 cancel_remainder 洪水)。
+    def test_priming_uses_no_after_to_cover_all_fills(self):
+        # priming 必须用无 after 查询稳拿全部历史成交:after 时间过滤不可靠,水位偏高时
+        # priming 若也带 after 就漏灌、tick 又把历史成交捞回来重放(用户 2026-07-04 实盘:
+        # 水位=今天,after=水位 拉回 0 -> seen 空 -> 洪水)。
         monitor, api, db = _make_monitor()
-        db.get_trade_history.return_value = [{"created_at": 500.0}]
-        db.get_actions.return_value = []
-        api.get_trades.return_value = []
+        db.get_trade_history.return_value = []
+        db.get_actions.return_value = [
+            {"created_at": 9_000_000_000.0}
+        ]  # 水位很高(今天之后)
+        old = self._buy_trade("T", "O", ts="100")
+
+        def by_after(params=None):
+            # 复现:带 after 拉回空(漏),无 after 才拿到全部
+            return [] if getattr(params, "after", None) else [old]
+
+        api.get_trades.side_effect = by_after
         monitor.init_watermark()
+        assert ("T", "O") in monitor._seen_fill_keys  # priming 无 after -> 灌到了
         params = api.get_trades.call_args.args[0]
-        assert params.after == "500"
+        assert params.after is None  # priming 不带 after
+
+    def test_flood_stops_when_after_filter_returns_history_despite_high_watermark(self):
+        # 端到端复现:水位=今天,但 tick 的 after 被服务端忽略、仍返回 6 月历史成交。
+        # priming 已用无 after 把它们灌进 seen -> tick 全被去重 -> 不重放(不再刷洪水)。
+        monitor, api, db = _make_monitor()
+        db.get_trade_history.return_value = []
+        db.get_actions.return_value = [{"created_at": 9_000_000_000.0}]  # 高水位=今天
+        old = self._buy_trade("T-old", "O-old", ts="100")
+        api.get_trades.return_value = [old]  # after 被忽略:无论传不传都返回历史成交
+        monitor.init_watermark()
+        monitor.check_buy_orders()
+        db.set_cooldown.assert_not_called()
+        api.cancel_orders.assert_not_called()
 
     def test_failed_priming_skips_fills_then_recovers_without_reprocess(self):
         # priming 失败(启动瞬间网络抖)时,check_buy_orders 先不处理成交(不重放历史),
