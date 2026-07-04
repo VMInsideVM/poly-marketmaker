@@ -23,6 +23,8 @@ def _make_monitor(settings=None):
     api.get_funder.return_value = "0xFUNDER"
     # sane default so methods that read get_trades don't iterate a MagicMock
     api.get_trades.return_value = []
+    # Step 1 只撤仍在挂的单;默认无在挂单(测试按需覆盖)
+    api.get_open_orders.return_value = []
     monitor = OrderMonitor(api, db, "0xABC")
     return monitor, api, db
 
@@ -39,6 +41,7 @@ class TestCheckBuyOrders:
         # only sets the cooldown and cancels the filled buy's remainder.
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = []
+        api.get_open_orders.return_value = [{"id": "ord1"}]  # 该单仍在挂 -> 有余量可撤
 
         with patch("engine.monitor.select_new_buy_fills") as mock_fills:
             mock_fills.return_value = [
@@ -63,6 +66,28 @@ class TestCheckBuyOrders:
         ]
         assert "take_profit_sell" not in action_types
         assert "cancel_remainder" in action_types
+
+    def test_old_fill_of_gone_order_not_cancelled(self):
+        # 根治重放洪水:成交回放里那些早已成交/消失的单不在当前挂单里 -> 不撤(不刷
+        # already-canceled)。即便 get_trades 去重在并发下失效、把老成交当"新成交",只要
+        # 它的单已不在挂单,就不撤——这个护栏不依赖 get_trades/水位是否可靠。
+        monitor, api, db = _make_monitor()
+        api.get_trades.return_value = []
+        api.get_open_orders.return_value = []  # 钱包无在挂单(单早成交消失)
+        with patch("engine.monitor.select_new_buy_fills") as mock_fills:
+            mock_fills.return_value = [
+                {
+                    "trade_id": "T",
+                    "order_id": "gone-ord",
+                    "asset_id": "tok",
+                    "price": 0.2,
+                    "size": 20.0,
+                    "market": "mkt",
+                    "ts": 1.0,
+                }
+            ]
+            monitor.check_buy_orders()
+        api.cancel_orders.assert_not_called()  # 单不在挂单 -> 不撤
 
     def test_partial_fill_writes_no_trade(self):
         monitor, api, db = _make_monitor()
@@ -228,6 +253,7 @@ class TestInitWatermark:
         monitor.init_watermark()
 
         api.get_trades.return_value = [self._buy_trade("T-new", "O-new", ts="200")]
+        api.get_open_orders.return_value = [{"id": "O-new"}]  # 新成交的单仍在挂
         monitor.check_buy_orders()
 
         db.set_cooldown.assert_called_once()
@@ -677,6 +703,7 @@ class TestMonitorStatusSnapshot:
                 "order_id": "o9",
             },
             set(),
+            {"o9"},  # open_ids:该单仍在挂
         )
         monitor.publish_status()
         rows = get_snapshot()["rows"]
@@ -734,6 +761,7 @@ class TestStep1ActionLog:
     def test_record_action_never_breaks_fill(self):
         monitor, api, db = _make_monitor()
         api.get_trades.return_value = []
+        api.get_open_orders.return_value = [{"id": "o1"}]  # 该单仍在挂 -> 会撤余量
         db.record_action.side_effect = RuntimeError("db down")
         with patch("engine.monitor.select_new_buy_fills") as mf:
             mf.return_value = [

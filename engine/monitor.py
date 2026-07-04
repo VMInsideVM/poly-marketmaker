@@ -174,10 +174,22 @@ class OrderMonitor:
             logger.error("get_trades failed for %s: %s", self.wallet_address, e)
             return
         fills = select_new_buy_fills(trades, funder, self._seen_fill_keys)
+        # 只对**当前仍在挂**的买单撤余量。成交回放里那些几个月前早已成交/消失的单根本
+        # 不在挂单里,撤它们只会报 already-canceled 刷屏(get_trades 去重在并发下不可靠,
+        # 不能只靠它)。「是否仍在挂」才是「撤剩余未成交量」的真实前提,且 get_open_orders
+        # 可靠——这是根治重放洪水的护栏,不依赖 get_trades/水位。
+        open_ids: set = set()
+        if fills:
+            try:
+                open_ids = {o.get("id") for o in self.api.get_open_orders()}
+            except Exception as e:
+                logger.warning(
+                    "get_open_orders failed in Step 1 (本轮跳过撤余量): %s", e
+                )
         cancelled_orders: set = set()
         for ev in fills:
             try:
-                self._handle_fill(ev, cancelled_orders)
+                self._handle_fill(ev, cancelled_orders, open_ids)
             except Exception as e:
                 logger.error(
                     "Error handling fill %s/%s: %s",
@@ -189,7 +201,7 @@ class OrderMonitor:
                 self._seen_fill_keys.add((ev.get("trade_id"), ev.get("order_id")))
                 self._after_ts = max(self._after_ts, float(ev.get("ts", 0) or 0))
 
-    def _handle_fill(self, ev: dict, cancelled_orders: set):
+    def _handle_fill(self, ev: dict, cancelled_orders: set, open_ids: set):
         size = float(ev.get("size", 0) or 0)  # real data is fractional
         price = float(ev.get("price", 0) or 0)
         market_id = ev.get("market", "")
@@ -202,7 +214,7 @@ class OrderMonitor:
         self.db.set_cooldown(
             self.wallet_address, market_id, self.db.get_settings()["cooldown_minutes"]
         )
-        if order_id and order_id not in cancelled_orders:
+        if order_id and order_id in open_ids and order_id not in cancelled_orders:
             try:
                 self.api.cancel_orders([order_id])
                 cancelled_orders.add(order_id)
