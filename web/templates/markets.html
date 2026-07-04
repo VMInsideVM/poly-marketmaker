@@ -208,7 +208,12 @@ function renderLadder(data) {
     }
     const isRisk = data.tier_match_var === 'risk_coefficient';
     return data.sides.map(s => {
-        const rows = s.levels.map(L => {
+        // 上限 6 档:只展示前 6 档(买一~买六),但已挂份额的档(shares>0)即使在 6 档之外
+        // 也保留可见,避免把真挂出的档藏掉;多出的更低档用一句带过。
+        const shown = s.levels.slice(0, 6)
+            .concat(s.levels.slice(6).filter(L => L.shares > 0));
+        const hidden = s.levels.length - shown.length;
+        const rows = shown.map(L => {
             const tier = L.tier_index != null
                 ? `<span class="tier-label">档${L.tier_index + 1}${L.tier_index === 0 ? '（买一）' : ''}</span>`
                 : '— 跳过 —';
@@ -231,6 +236,7 @@ function renderLadder(data) {
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>
+        ${hidden > 0 ? `<div class="metric-note" style="margin-top:6px">…另有 ${hidden} 档更低(仅展示前 6 档)</div>` : ''}
         <div class="metric-note" style="margin-top:6px">合计 ${s.total_tiers} 档 · ${s.total_shares} 份 · $${s.total_amount.toFixed(2)}</div>`;
     }).join('<div style="height:12px"></div>');
 }
