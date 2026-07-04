@@ -32,6 +32,9 @@ class OrderMonitor:
         # Watermark: lower bound for get_trades(after=) — bounds fetch size;
         # real idempotency is _seen_fill_keys.
         self._after_ts: float = 0.0
+        # init_watermark priming 失败(启动瞬间网络抖)时置 True:check_buy_orders 每轮
+        # 重试 priming,建好去重集前不处理成交,避免重放整批历史成交。
+        self._prime_pending: bool = False
         # condition_id -> (max_spread, fetched_at) TTL cache for Step 3.
         self._max_spread_cache: dict = {}
         self._status_rows: list = []
@@ -101,16 +104,31 @@ class OrderMonitor:
         times = [r.get("created_at", 0) or 0 for r in rows]
         times += [a.get("created_at", 0) or 0 for a in actions]
         self._after_ts = max(times) if times else 0.0
-        # Prime dedup with all currently-visible fills so a restart never
-        # re-handles pre-startup fills. Best-effort: a fetch failure just leaves
-        # the (conservative) watermark in charge, same as before.
+        # Prime dedup with the fills the tick will actually see so a restart never
+        # re-handles pre-startup fills. priming 用与 check_buy_orders **相同**的
+        # get_trades(after=水位) 查询——旧实现用无 after 查询,与 tick 的 after 查询
+        # 取到的成交集可能不一致,历史成交漏进去重、每次重启被重放(cancel_remainder
+        # 洪水,2026-07-04 实盘)。失败(启动网络抖)则置 pending,check_buy_orders 重试、
+        # 建好前不处理成交。
+        if not self._prime_seen_keys():
+            self._prime_pending = True
+
+    def _prime_seen_keys(self) -> bool:
+        """用与 check_buy_orders 相同的 get_trades(after=水位) 预灌去重集,并把水位推进过
+        这些成交的 match_time(同一查询保证覆盖到 tick 会遇到的每一笔成交)。成功返回 True
+        并清 _prime_pending;失败返回 False。"""
         funder = self._funder()
+        after = str(int(self._after_ts)) if self._after_ts else None
         try:
-            trades = self.api.get_trades(TradeParams(maker_address=funder))
+            trades = self.api.get_trades(TradeParams(maker_address=funder, after=after))
             for ev in select_new_buy_fills(trades, funder, set()):
                 self._seen_fill_keys.add((ev.get("trade_id"), ev.get("order_id")))
+                self._after_ts = max(self._after_ts, float(ev.get("ts", 0) or 0))
         except Exception as e:
-            logger.warning("init_watermark seed seen-keys failed: %s", e)
+            logger.warning("seen-fill priming 失败(下一轮重试): %s", e)
+            return False
+        self._prime_pending = False
+        return True
 
     def _funder(self) -> str:
         """Proxy/funder address — used for get_trades maker filter and Data API."""
@@ -141,6 +159,10 @@ class OrderMonitor:
 
     # --- Step 1: fills via get_trades (flatten maker_orders) ---
     def check_buy_orders(self):
+        # 去重集未就绪(启动 priming 失败、网络还没恢复):先补 priming;仍失败就本轮
+        # 不处理成交,避免把整批历史成交当"新成交"重放(cancel_remainder 洪水)。
+        if self._prime_pending and not self._prime_seen_keys():
+            return
         funder = self._funder()
         try:
             params = TradeParams(

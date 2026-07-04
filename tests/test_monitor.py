@@ -235,6 +235,37 @@ class TestInitWatermark:
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
         assert "cancel_remainder" in ats
 
+    def test_priming_uses_same_after_watermark_as_tick(self):
+        # 修 bug:priming 必须用与 tick 相同的 get_trades(after=水位) 查询。旧实现 priming
+        # 用无 after 查询,与 tick 的 after 查询取到的成交集可能不一致 -> 历史成交漏进去重、
+        # 每次重启被重放(用户实报 cancel_remainder 洪水)。
+        monitor, api, db = _make_monitor()
+        db.get_trade_history.return_value = [{"created_at": 500.0}]
+        db.get_actions.return_value = []
+        api.get_trades.return_value = []
+        monitor.init_watermark()
+        params = api.get_trades.call_args.args[0]
+        assert params.after == "500"
+
+    def test_failed_priming_skips_fills_then_recovers_without_reprocess(self):
+        # priming 失败(启动瞬间网络抖)时,check_buy_orders 先不处理成交(不重放历史),
+        # 网络恢复后自动补 priming、把历史成交灌进去重集 -> 仍不重放。
+        monitor, api, db = _make_monitor()
+        db.get_trade_history.return_value = []
+        db.get_actions.return_value = []
+        api.get_trades.side_effect = Exception("network down")
+        monitor.init_watermark()  # priming 失败
+
+        monitor.check_buy_orders()  # 网络仍断:不处理成交(不重放)
+        db.set_cooldown.assert_not_called()
+        api.cancel_orders.assert_not_called()
+
+        api.get_trades.side_effect = None
+        api.get_trades.return_value = [self._buy_trade("T-old", "O-old")]
+        monitor.check_buy_orders()  # 网络恢复:补 priming -> 历史成交进 seen -> 不重放
+        db.set_cooldown.assert_not_called()
+        api.cancel_orders.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Step 3: check_sell_orders — strategy compliance on resting buys
