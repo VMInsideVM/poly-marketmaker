@@ -766,7 +766,7 @@ class OrderMonitor:
             )
             return
 
-        # --- 奖励区间合规检查（SP2：不重挂，多档引擎在下次下单周期重挂）---
+        # --- 奖励区间合规检查（不重挂，下单引擎在下次下单周期重挂）---
         if not bids or not asks:
             logger.info(
                 "[Step3] 单 %s 市场 %s | 盘口为空，本轮跳过",
@@ -852,7 +852,7 @@ class OrderMonitor:
             )
             return
 
-        # 挂单价不在奖励区间 → 撤单不重挂（多档引擎下次 place_orders 重挂）。
+        # 挂单价不在奖励区间 → 撤单不重挂（下单引擎下次 place_orders 重挂）。
         if not (rmin <= cur_price <= rmax):
             reason = (
                 f"挂单价 {cur_price:.4f} 不在奖励区间 "

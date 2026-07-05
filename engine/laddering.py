@@ -261,7 +261,7 @@ def compute_market_single_orders(
 def reconcile_buy_orders(ladder, resting_buys):
     """撤改收敛(v4 §6):把某 token 的现挂买单收敛到目标 ladder。
 
-    ladder: [(price, shares), ...] 该 token 的目标多档。
+    ladder: [(price, shares), ...] 该 token 的目标挂单(gap_single 为至多一档)。
     resting_buys: [{"id","price","original_size"/"size"}, ...] 该 token 当前在挂买单。
     返回 (cancel_ids, to_place):
       - 现挂单价不在目标、或同价但量不符(容差 max(1,1%)) -> 撤(进 cancel_ids)。

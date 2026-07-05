@@ -121,7 +121,7 @@ class WalletWorker:
         limit: int | None = None,
         cancel_dropouts: bool = False,
     ):
-        """多档挂单:按市场分组,下单时算 K 档/边,整市场敞口共享,§8 <10¢ 双边。
+        """断层单档挂单:按市场分组,每市场按断层分级选一档挂一单,整市场敞口两边共享。
 
         eligible_markets = filter_for_template 的轻量 per-token 条目。
         limit 设置时,达到该数量的成功下单后停止。
@@ -395,8 +395,8 @@ class WalletWorker:
     def _record_place_buy_tier(
         self, market_id, side, price, shares, reason=None, price_basis=None
     ):
-        """记一档买单到 actions(不抛异常)。reason/price_basis 缺省用 laddering 文案;
-        gap_single 由调用方传入断层单档的真实原因/价格依据。"""
+        """记一档买单到 actions(不抛异常)。reason/price_basis 缺省用通用文案;
+        正常路径由调用方传入断层单档的真实原因/价格依据。"""
         try:
             self.db.record_action(
                 wallet=self.wallet_address,
@@ -405,7 +405,7 @@ class WalletWorker:
                 side="买入",
                 price=price,
                 size=shares,
-                reason=reason or "多档:在奖励区间内按累计厚度规则表挂买单",
+                reason=reason or "断层单档:在奖励区间内按风险系数选一档挂买单",
                 price_basis=price_basis
                 or (
                     f"档价 {price:.4f}（{side.get('outcome','')}）；"
