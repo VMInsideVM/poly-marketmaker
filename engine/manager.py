@@ -365,7 +365,11 @@ class WalletWorker:
                             price,
                             shares,
                             tick_size=side["tick_size_str"],
-                            neg_risk=side["neg_risk"],
+                            # 奖励端点(get_rewards_markets)不含 neg_risk 字段,候选里的
+                            # neg_risk 恒为 False -> 负风险市场买单会被 CLOB 拒(invalid
+                            # POLY_GNOSIS_SAFE signature)。传 None 让客户端按 token_id 自查
+                            # 真实 neg_risk,与卖单一致(2026-07-05 事故)。
+                            neg_risk=None,
                         )
                         placed += 1
                         markets_with_open.add(mid)

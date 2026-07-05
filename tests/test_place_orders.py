@@ -73,6 +73,19 @@ def test_places_normally_when_not_in_resolution():
     api.place_limit_buy.assert_called()
 
 
+def test_buy_passes_neg_risk_none_for_client_autoresolve():
+    # 奖励端点不含 neg_risk 字段 -> 买单绝不能写死 False:负风险市场会被 CLOB 拒
+    # (invalid POLY_GNOSIS_SAFE signature,2026-07-05 真实事故——天气类负风险市场
+    # 全被拒、一单挂不出)。传 None 让客户端按 token_id 自查真实 neg_risk,与卖单一致。
+    worker, api, db = _make_worker()
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    assert api.place_limit_buy.call_count >= 1
+    assert all(
+        c.kwargs.get("neg_risk") is None for c in api.place_limit_buy.call_args_list
+    )
+
+
 def test_reconcile_replaces_partial_fill_remnant():
     # 现象2 端到端:某买单原始 100、已成交 60(剩 40 < min_size 100),持仓已平(不在
     # held_assets)。下单轮 reconcile 须按剩余量(原始-已成交)判定量不符,撤掉残单并
