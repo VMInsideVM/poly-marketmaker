@@ -97,20 +97,9 @@
                 <label>最大并发做市市场数</label>
                 <input type="number" name="max_concurrent_markets" step="1">
             </div>
-            <div class="form-group">
-                <label>双边挂单价格下限 (美分)</label>
-                <input type="number" name="min_price_double_cents" step="1">
-            </div>
         </div>
 
-        <h3>挂单模式</h3>
-        <div class="form-group">
-            <label>挂单模式</label>
-            <select name="placement_mode" id="placement-mode" onchange="updatePlacementMode()">
-                <option value="laddering">多档做市（默认）</option>
-                <option value="gap_single">网关式单档（断层分级 · 每市场一单）</option>
-            </select>
-        </div>
+        <h3>挂单参数（断层单档选一档）</h3>
         <div id="gap-single-params">
             <div class="form-grid">
                 <div class="form-group"><label>宽断层阈值 (美分，&gt;此值走规则1)</label><input type="number" name="gap_wide_cents" step="0.1"></div>
@@ -138,38 +127,14 @@
         <label class="cat-other"><input type="checkbox" id="include-other"> 其他/未分类<span id="other-count"></span></label>
         <p class="hint" style="color:#888;font-size:12px">括号内是当前该品类的市场数：每次「扫描市场」后自动更新，也可点上方「刷新计数」手动拉取；没有计数不影响勾选。勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。</p>
 
-        <h3>单份奖励阈值（按最低份数取档）</h3>
-        <label class="ps-enable"><input type="checkbox" id="per-share-enabled" checked onchange="updatePerShareEnabled()"> 启用单份奖励阈值筛选</label>
-        <p class="hint" style="color:#888;font-size:12px">单份奖励 = 市场每日奖励 ÷ 该市场最低下单份数；按最低份数所在档(20/50/100/200/250)分别设阈值，低于阈值不做该市场。</p>
-        <div id="per-share-thresholds" class="form-grid">
-            <div class="form-group"><label>20 档</label><input type="number" step="0.01" data-bracket="20"></div>
-            <div class="form-group"><label>50 档</label><input type="number" step="0.01" data-bracket="50"></div>
-            <div class="form-group"><label>100 档</label><input type="number" step="0.01" data-bracket="100"></div>
-            <div class="form-group"><label>200 档</label><input type="number" step="0.01" data-bracket="200"></div>
-            <div class="form-group"><label>250 档</label><input type="number" step="0.01" data-bracket="250"></div>
-        </div>
-
-        <h3>区间变量与金额数值表</h3>
-        <div class="form-group">
-            <label>区间变量（下方多档规则的阈值按此匹配）</label>
-            <select name="tier_match_var" id="tier-match-var" onchange="updateTierMatchVar()">
-                <option value="cumulative_thickness">累计厚度</option>
-                <option value="risk_coefficient">风险系数</option>
-            </select>
-        </div>
+        <h3>金额数值表</h3>
         <div class="form-group" id="amount-value-group">
             <label>金额数值表（价格档[美分] → 数值；价超此表则该档不挂）</label>
             <div id="amount-value-rows"></div>
             <button type="button" class="btn" onclick="addAmountRow()">+ 价格档</button>
         </div>
-        <p class="hint" style="color:#888;font-size:12px">累计厚度＝从买一往下累加的盘口深度(以最低份数为单位)；风险系数＝本档厚度 ÷ 金额数值(该档价)，价越高系数越低、价超金额表则该档不挂。</p>
+        <p class="hint" style="color:#888;font-size:12px">金额数值供算风险系数用：风险系数＝盘口量 ÷ (最低份数 × 金额数值)，价越高系数越低；价超此表则该档不挂。</p>
 
-        <div id="tier-rules-section">
-        <h3>多档挂单规则</h3>
-        <p style="color:#888;font-size:12px;margin-top:4px;">每档从买一往下；每行「<b id="tier-var-name">累计厚度</b> &gt; X → 动作」，取第一个命中的区间，末行「其余」兜底。多行阈值须<b>从大到小</b>填（否则小阈值会遮住大的）。动作：最小份数 / 固定份数 / 固定金额 / 钱包全额 / 不挂。</p>
-        <div id="tier-rules-editor"></div>
-        <button type="button" class="btn" onclick="addTier()">+ 加一档</button>
-        </div>
         <button type="submit" class="btn btn-primary">保存策略参数</button>
     </form>
 </section>
@@ -301,13 +266,6 @@ function refreshCategories(ev) {
         .catch(() => renderCategories({ready: false, categories: [], other_count: 0}, sel, inclOther));
 }
 
-function updatePerShareEnabled() {
-    const on = document.getElementById('per-share-enabled').checked;
-    document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
-        inp.disabled = !on;
-    });
-}
-
 function loadStrategy(tid) {
     document.getElementById('included-categories').innerHTML =
         '<span class="hint" style="color:#888">加载中…</span>';
@@ -323,21 +281,8 @@ function loadStrategy(tid) {
             const input = form.querySelector(`[name="${key}"]`);
             if (input) input.value = data[key];
         });
-        const ps = data.per_share_reward_thresholds || {};
-        document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
-            const b = inp.getAttribute('data-bracket');
-            inp.value = (ps[b] !== undefined) ? ps[b] : 0.30;
-        });
-        document.getElementById('per-share-enabled').checked =
-            (data.per_share_reward_enabled !== false);
-        updatePerShareEnabled();
-        renderTierEditor(data.tier_rules || []);
-        document.getElementById('tier-match-var').value =
-            data.tier_match_var || 'cumulative_thickness';
         renderAmountTable(data.amount_value_table || []);
-        updateTierMatchVar();
         updateStopMode();
-        updatePlacementMode();
     });
 
     // 品类勾选要「模板(哪些已选)+ 目录(列表/计数)」都到齐再渲染,期间显示加载中
@@ -353,32 +298,6 @@ function updateStopMode() {
     const cents = document.getElementById('stop-cents-group');
     if (pct) pct.style.display = (mode === 'percent') ? '' : 'none';
     if (cents) cents.style.display = (mode === 'fixed') ? '' : 'none';
-}
-
-// 挂单模式切换:单档模式显示断层参数、隐藏多档规则编辑器(其配置在单档模式不参与)。
-function updatePlacementMode() {
-    const mode = (document.getElementById('placement-mode') || {}).value || 'laddering';
-    const gap = document.getElementById('gap-single-params');
-    if (gap) gap.style.display = (mode === 'gap_single') ? '' : 'none';
-    const tierSec = document.getElementById('tier-rules-section');
-    if (tierSec) tierSec.style.display = (mode === 'gap_single') ? 'none' : '';
-}
-
-// 区间变量当前中文名(累计厚度 / 风险系数),供档规则的行标签与说明动态显示。
-function tierVarName() {
-    const v = (document.getElementById('tier-match-var') || {}).value || 'cumulative_thickness';
-    return (v === 'risk_coefficient') ? '风险系数' : '累计厚度';
-}
-
-// 区间变量切换:切金额表显隐,并把档规则里的「阈值变量」标签/说明同步成当前变量名。
-function updateTierMatchVar() {
-    const v = (document.getElementById('tier-match-var') || {}).value || 'cumulative_thickness';
-    const g = document.getElementById('amount-value-group');
-    if (g) g.style.display = (v === 'risk_coefficient') ? '' : 'none';
-    const name = tierVarName();
-    const noteVar = document.getElementById('tier-var-name');
-    if (noteVar) noteVar.textContent = name;
-    document.querySelectorAll('#tier-rules-editor .thr-prefix').forEach(s => { s.textContent = name; });
 }
 
 function makeAmountRow(cents, value) {
@@ -412,131 +331,6 @@ function serializeAmountTable() {
         if (!isNaN(cents) && !isNaN(value)) rows.push({upper: cents / 100, value: value});
     });
     return rows;
-}
-
-const ACTION_LABELS = {
-    min_size: '最小份数', fixed_shares: '固定份数', fixed_amount: '固定金额',
-    wallet_total: '钱包全额', skip: '不挂',
-};
-
-function actionSelectHtml(selectedType) {
-    return Object.keys(ACTION_LABELS).map(t =>
-        `<option value="${t}" ${t === selectedType ? 'selected' : ''}>${ACTION_LABELS[t]}</option>`
-    ).join('');
-}
-
-function makeIntervalRow(interval, isCatchAll) {
-    const action = (interval && interval.action) || {type: 'min_size'};
-    const type = action.type || 'min_size';
-    const row = document.createElement('div');
-    row.className = 'interval-row' + (isCatchAll ? ' catch-all' : '');
-    row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:4px 0;flex-wrap:wrap';
-    const upperHtml = isCatchAll
-        ? '<span>其余</span>'
-        : `<span class="thr-prefix">${tierVarName()}</span> &gt; <input class="upper-input" type="number" step="0.1" style="width:70px" value="${(interval && interval.upper != null) ? interval.upper : ''}">`;
-    let paramVal = '';
-    if (type === 'fixed_shares') paramVal = (action.shares != null) ? action.shares : '';
-    if (type === 'fixed_amount') paramVal = (action.usd != null) ? action.usd : '';
-    const paramHidden = (type === 'fixed_shares' || type === 'fixed_amount') ? '' : 'style="display:none"';
-    const paramLabel = (type === 'fixed_amount') ? '金额(USD)' : '份数';
-    const delBtn = isCatchAll ? ''
-        : '<button type="button" class="btn btn-sm" onclick="this.closest(\'.interval-row\').remove()">✕</button>';
-    row.innerHTML =
-        `${upperHtml} → ` +
-        `<select class="action-select" onchange="onActionChange(this)">${actionSelectHtml(type)}</select> ` +
-        `<span class="param-wrap" ${paramHidden}><span class="param-label">${paramLabel}</span> ` +
-        `<input class="param-input" type="number" step="0.01" style="width:90px" value="${paramVal}"></span> ` +
-        delBtn;
-    return row;
-}
-
-function onActionChange(sel) {
-    const row = sel.closest('.interval-row');
-    const wrap = row.querySelector('.param-wrap');
-    const t = sel.value;
-    if (t === 'fixed_shares' || t === 'fixed_amount') {
-        wrap.style.display = '';
-        row.querySelector('.param-label').textContent = (t === 'fixed_amount') ? '金额(USD)' : '份数';
-    } else {
-        wrap.style.display = 'none';
-    }
-}
-
-function makeTierCard(tierIntervals) {
-    const card = document.createElement('div');
-    card.className = 'tier-card';
-    card.style.cssText = 'border:1px solid #ddd;border-radius:4px;padding:8px;margin:8px 0';
-    const head = document.createElement('div');
-    head.className = 'tier-head';
-    head.style.cssText = 'font-weight:bold;margin-bottom:4px';
-    card.appendChild(head);
-    const body = document.createElement('div');
-    body.className = 'tier-body';
-    card.appendChild(body);
-    const numbered = (tierIntervals || []).filter(iv => iv && iv.upper != null);
-    let catchAll = (tierIntervals || []).find(iv => iv && iv.upper == null);
-    if (!catchAll) catchAll = {upper: null, action: {type: 'min_size'}};
-    numbered.forEach(iv => body.appendChild(makeIntervalRow(iv, false)));
-    body.appendChild(makeIntervalRow(catchAll, true));
-    const ctrls = document.createElement('div');
-    ctrls.style.cssText = 'margin-top:4px';
-    ctrls.innerHTML =
-        '<button type="button" class="btn btn-sm" onclick="addInterval(this.closest(\'.tier-card\'))">+ 区间</button> ' +
-        '<button type="button" class="btn btn-sm btn-danger" onclick="removeTier(this.closest(\'.tier-card\'))">删此档</button>';
-    card.appendChild(ctrls);
-    return card;
-}
-
-function addInterval(card) {
-    const body = card.querySelector('.tier-body');
-    const catchAll = body.querySelector('.interval-row.catch-all');
-    body.insertBefore(makeIntervalRow({upper: '', action: {type: 'min_size'}}, false), catchAll);
-}
-
-function addTier() {
-    document.getElementById('tier-rules-editor').appendChild(makeTierCard([]));
-    relabelTiers();
-}
-
-function removeTier(card) {
-    card.remove();
-    relabelTiers();
-}
-
-function relabelTiers() {
-    document.querySelectorAll('#tier-rules-editor .tier-card').forEach((card, i) => {
-        card.querySelector('.tier-head').textContent = (i === 0) ? '档 1（买一）' : `档 ${i + 1}`;
-    });
-}
-
-function renderTierEditor(tierRules) {
-    const ed = document.getElementById('tier-rules-editor');
-    ed.innerHTML = '';
-    const tiers = (tierRules && tierRules.length) ? tierRules : [[]];
-    tiers.forEach(t => ed.appendChild(makeTierCard(t)));
-    relabelTiers();
-}
-
-function serializeTierRules() {
-    const tiers = [];
-    document.querySelectorAll('#tier-rules-editor .tier-card').forEach(card => {
-        const intervals = [];
-        card.querySelectorAll('.interval-row').forEach(row => {
-            const type = row.querySelector('.action-select').value;
-            const action = {type};
-            if (type === 'fixed_shares') {
-                action.shares = parseInt(row.querySelector('.param-input').value, 10) || 0;
-            }
-            if (type === 'fixed_amount') {
-                action.usd = parseFloat(row.querySelector('.param-input').value) || 0;
-            }
-            const upper = row.classList.contains('catch-all')
-                ? null : parseFloat(row.querySelector('.upper-input').value);
-            intervals.push({upper, action});
-        });
-        tiers.push(intervals);
-    });
-    return tiers;
 }
 
 function loadEngine() {
@@ -605,36 +399,12 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     }
     // select 不在 input[type=number] 里,单独收。
     data.stop_loss_mode = (document.getElementById('stop-loss-mode') || {}).value || 'percent';
-    data.tier_match_var = (document.getElementById('tier-match-var') || {}).value || 'cumulative_thickness';
-    data.placement_mode = (document.getElementById('placement-mode') || {}).value || 'laddering';
     data.take_profit_mode = (document.getElementById('take-profit-mode') || {}).value || 'maker';
     data.amount_value_table = serializeAmountTable();
     data.included_categories = Array.from(
         document.querySelectorAll('#included-categories input[type=checkbox]:checked')
     ).map(cb => cb.value);
     data.include_other = !!document.getElementById('include-other').checked;
-    const ps = {};
-    document.querySelectorAll('#per-share-thresholds input[data-bracket]').forEach(inp => {
-        ps[inp.getAttribute('data-bracket')] = parseFloat(inp.value);
-    });
-    data.per_share_reward_thresholds = ps;
-    data.per_share_reward_enabled = document.getElementById('per-share-enabled').checked;
-    if (data.placement_mode !== 'gap_single') {
-        const badUpper = Array.from(
-            document.querySelectorAll('#tier-rules-editor .interval-row:not(.catch-all) .upper-input')
-        ).some(inp => inp.value === '' || isNaN(parseFloat(inp.value)));
-        if (badUpper) { alert('请填写每个区间的' + tierVarName() + '阈值'); return; }
-        const badParam = Array.from(
-            document.querySelectorAll('#tier-rules-editor .interval-row')
-        ).some(row => {
-            const sel = row.querySelector('.action-select');
-            if (!sel || (sel.value !== 'fixed_shares' && sel.value !== 'fixed_amount')) return false;
-            const v = parseFloat(row.querySelector('.param-input').value);
-            return isNaN(v) || v <= 0;
-        });
-        if (badParam) { alert('「固定份数 / 固定金额」必须填写大于 0 的数值'); return; }
-    }
-    data.tier_rules = serializeTierRules();
     fetch(`/api/templates/${currentTemplateId}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data),

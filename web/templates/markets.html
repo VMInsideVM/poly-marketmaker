@@ -27,7 +27,7 @@
     </thead>
     <tbody id="markets-body"></tbody>
 </table>
-<p class="metric-note">市场级 3 指标(最低份数 / 奖励范围 / 盘口价差)扫描时即有;点「展开」实时拉订单簿、跑 v4 推演看梯队(订单厚度 / 累计厚度 / 有效价格)。</p>
+<p class="metric-note">市场级 3 指标(最低份数 / 奖励范围 / 盘口价差)扫描时即有;点「展开」实时拉订单簿、按断层单档规则推演选档(相邻价差分级 / 风险系数 / 选中档)。</p>
 {% endblock %}
 
 {% block scripts %}
@@ -145,7 +145,7 @@ function renderMarkets() {
             insertLadderRow(i, ladderCache[m.market_id]
                 || (firstWallet
                     ? '<span class="metric-note">预演中…</span>'
-                    : '<span class="metric-note">需要先启用一个钱包才能预演梯队</span>'));
+                    : '<span class="metric-note">需要先启用一个钱包才能预演选档</span>'));
         }
     });
 }
@@ -192,45 +192,10 @@ function renderGapSingle(data) {
 }
 
 function renderLadder(data) {
-    if (data.placement_mode === 'gap_single') {
-        return renderGapSingle(data);
-    }
     if (!data.sides || !data.sides.length) {
         return '<span class="metric-note">无可预演的方向（订单簿缺失或预算为 0）</span>';
     }
-    const isRisk = data.tier_match_var === 'risk_coefficient';
-    return data.sides.map(s => {
-        // 上限 6 档:只展示前 6 档(买一~买六),但已挂份额的档(shares>0)即使在 6 档之外
-        // 也保留可见,避免把真挂出的档藏掉;多出的更低档用一句带过。
-        const shown = s.levels.slice(0, 6)
-            .concat(s.levels.slice(6).filter(L => L.shares > 0));
-        const hidden = s.levels.length - shown.length;
-        const rows = shown.map(L => {
-            const tier = L.tier_index != null
-                ? `<span class="tier-label">档${L.tier_index + 1}${L.tier_index === 0 ? '（买一）' : ''}</span>`
-                : '— 跳过 —';
-            const last = L.skip_reason
-                ? `<td colspan="2">${escapeHtml(L.skip_reason)}</td>`
-                : `<td><b>${L.shares}</b></td><td>$${L.amount.toFixed(2)}</td>`;
-            return `<tr class="${L.skip_reason ? 'skip' : ''}">
-                <td>${tier}</td>
-                <td>${fmtP(L.price)}</td>
-                <td>${L.size}</td>
-                <td>${L.thickness.toFixed(2)}</td>
-                <td>${L.cumulative_thickness.toFixed(2)}</td>
-                ${isRisk ? `<td>${L.match_value != null ? L.match_value.toFixed(2) : '—'}</td>` : ''}
-                ${last}</tr>`;
-        }).join('');
-        return `<div class="metric-note" style="margin-bottom:6px">${escapeHtml(s.outcome)} 方向 · 奖励范围 [${s.reward_range[0].toFixed(2)}, ${s.reward_range[1].toFixed(2)}] · 盘口价差 ${s.spread_cents.toFixed(0)}¢</div>
-        <table class="data-table">
-            <thead><tr>
-                <th>档</th><th>有效价格</th><th>盘口量</th><th>订单厚度</th><th>累计厚度</th>${isRisk ? '<th>风险系数</th>' : ''}<th>命中 → 份额</th><th>金额</th>
-            </tr></thead>
-            <tbody>${rows}</tbody>
-        </table>
-        ${hidden > 0 ? `<div class="metric-note" style="margin-top:6px">…另有 ${hidden} 档更低(仅展示前 6 档)</div>` : ''}
-        <div class="metric-note" style="margin-top:6px">合计 ${s.total_tiers} 档 · ${s.total_shares} 份 · $${s.total_amount.toFixed(2)}</div>`;
-    }).join('<div style="height:12px"></div>');
+    return renderGapSingle(data);
 }
 
 async function toggleLadder(mid, i) {
