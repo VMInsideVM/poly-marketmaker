@@ -48,6 +48,7 @@ def explain_gap_single_order(
       max_gap: 最大相邻价差(美分);<2 档时 0
       min_coeff: 该级选档门槛(rule1/2/3 之一);rule=None 时 None
       high_sum: 规则1 高位系数和;非规则1 为 None
+      gate_min: 规则1 高位系数和门槛(=gap_high_coeff_sum_min);非规则1 为 None
       gate_passed: 规则1 闸门是否通过;规则2/3 恒 True;rule=None 为 False
       levels: 区间内买档(价降序),每项 {price,size,coeff,high_side,chosen}
       chosen_index: 选中档在 levels 的下标;跳过为 None
@@ -192,13 +193,46 @@ def gap_single_reason(d):
 
 
 def gap_single_price_basis(d, reward_range_min, reward_range_max):
-    """挂单的价格依据/来源串:选中档价 + 系数构成 + 断层分级 + 数据来源。"""
+    """价格依据/来源串。挂单:选中档价 + 系数构成 + 断层分级 + 数据来源;
+    跳过:区间内有买档时逐档展开(价×量→系数[高位]) + 断层分级 + 闸门/门槛判定,
+    区间内无买档时退化简洁版。"""
     src = (
         f"奖励区间[{reward_range_min:.4f},{reward_range_max:.4f}];"
         f"来源:CLOB get_orderbook"
     )
     if d.get("action") != "place" or d.get("chosen_index") is None:
-        return src
+        # 跳过:展开逐档盘口证据(完整逐档),供历史「价格依据/来源」不点代码即可复盘。
+        levels = d.get("levels") or []
+        if not levels:
+            # 无簿/最低份数≤0/全在区间外:无档可枚举,退化简洁版(两类区别在「原因」列)。
+            return (
+                f"奖励区间[{reward_range_min:.4f},{reward_range_max:.4f}]内无可评估买档;"
+                f"来源:CLOB get_orderbook"
+            )
+        per = " · ".join(
+            f"{lv['price']:.4f}×{lv['size']:g}→系数{lv['coeff']:g}"
+            + ("[高位]" if lv.get("high_side") else "")
+            for lv in levels
+        )
+        parts = [
+            f"区间内买档(价降序):{per}",
+            f"最大断层 {d['max_gap']:g}¢→{_GAP_RULE_LABEL.get(d['rule'], '')}",
+        ]
+        if d.get("rule") == 1 and not d.get("gate_passed"):
+            addends = "+".join(
+                f"{lv['coeff']:g}" for lv in levels if lv.get("high_side")
+            )
+            parts.append(
+                f"高位系数和 {addends}={d['high_sum']:g} < 门槛{d['gate_min']:g}"
+                f" → 整市场不挂"
+            )
+        else:
+            if d.get("rule") == 1 and d.get("high_sum") is not None:
+                parts.append(f"高位系数和{d['high_sum']:g}(过闸)")
+            parts.append(f"各档系数均 ≤ 选档门槛{d['min_coeff']:g}")
+        parts.append("系数=挂量÷(最低份数×金额数值)")
+        parts.append(src)
+        return ";".join(parts)
     lv = d["levels"][d["chosen_index"]]
     return (
         f"档价 {lv['price']:.4f};系数 {lv['coeff']:g}=挂量{lv['size']:g}÷(最低份数×金额数值);"

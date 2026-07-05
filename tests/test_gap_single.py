@@ -308,12 +308,38 @@ def test_price_basis_placed_has_coeff_and_source():
     assert "get_orderbook" in b
 
 
-def test_price_basis_skip_is_minimal():
+def test_price_basis_skip_no_in_range_is_minimal():
+    # 区间内无买档(全在区间外):无档可枚举,退化简洁版。
     d = _explain([_b(0.05, 500), _b(0.04, 500)])
     b = gap_single_price_basis(d, 0.10, 0.31)
-    assert "奖励区间" in b
+    assert "无可评估买档" in b
     assert "get_orderbook" in b
     assert "档价" not in b
+    assert "→系数" not in b
+
+
+def test_price_basis_skip_rule1_high_sum_shows_evidence():
+    # 规则1 高位系数和不足:逐档证据 + 断层 + 高位系数和 + 门槛。
+    d = _explain([_b(0.28, 30), _b(0.27, 20), _b(0.15, 400)])  # gate 默认 20
+    assert d["action"] == "skip" and d["rule"] == 1
+    b = gap_single_price_basis(d, 0.10, 0.31)
+    assert "0.2800×30→系数" in b
+    assert "[高位]" in b
+    assert "最大断层" in b
+    assert "高位系数和" in b
+    assert "门槛20" in b
+    assert "整市场不挂" in b
+    assert "get_orderbook" in b
+
+
+def test_price_basis_skip_no_coeff_shows_evidence():
+    # 顺延无档过门槛(规则3):逐档系数 + 门槛。
+    d = _explain([_b(0.28, 50), _b(0.27, 40)], x3=100)
+    assert d["action"] == "skip" and d["rule"] == 3
+    b = gap_single_price_basis(d, 0.10, 0.31)
+    assert "0.2800×50→系数" in b
+    assert "各档系数均 ≤ 选档门槛100" in b
+    assert "get_orderbook" in b
 
 
 from engine.laddering import compute_market_single_orders
