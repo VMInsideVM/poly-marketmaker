@@ -239,6 +239,24 @@ def test_explain_no_in_range_rule_none():
     assert "奖励区间" in d["skip_reason"]
 
 
+def test_explain_rule1_carries_gate_min():
+    # 规则1 决策带 gate_min(=高位系数和门槛),供价格依据自解释门槛数值。
+    d = _explain([_b(0.28, 30), _b(0.27, 20), _b(0.15, 400)], gate=25)
+    assert d["rule"] == 1
+    assert d["gate_min"] == 25
+
+
+def test_explain_non_rule1_gate_min_none():
+    d = _explain([_b(0.28, 50), _b(0.21, 400)])  # 断层7¢ -> 规则2
+    assert d["rule"] == 2
+    assert d["gate_min"] is None
+    d3 = _explain([_b(0.28, 50), _b(0.27, 40)])  # 断层1¢ -> 规则3
+    assert d3["rule"] == 3
+    assert d3["gate_min"] is None
+    dn = _explain([_b(0.05, 500)])  # 区间外 -> rule None
+    assert dn["gate_min"] is None
+
+
 def test_plan_matches_explain_wrapper():
     # plan 是 explain 的薄壳:决策一致。
     bids = [_b(0.28, 50), _b(0.27, 800), _b(0.15, 400)]

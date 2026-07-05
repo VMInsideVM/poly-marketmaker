@@ -62,6 +62,7 @@ def explain_gap_single_order(
         "max_gap": 0.0,
         "min_coeff": None,
         "high_sum": None,
+        "gate_min": None,
         "gate_passed": False,
         "levels": [],
         "chosen_index": None,
@@ -108,6 +109,7 @@ def explain_gap_single_order(
         rule, min_coeff = 1, rule1_min_coeff
         high_sum = sum(lv["coeff"] for lv in in_range[: split_idx + 1])
         d["rule"], d["min_coeff"], d["high_sum"] = 1, min_coeff, high_sum
+        d["gate_min"] = gap_high_coeff_sum_min
         if high_sum < gap_high_coeff_sum_min:
             d["skip_reason"] = (
                 f"规则1(宽断层,最大断层{max_gap:g}¢):高位系数和 {high_sum:g}"
