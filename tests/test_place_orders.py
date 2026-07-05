@@ -15,13 +15,16 @@ def _make_worker(balance=10000.0, template=None):
     db.get_blacklist_ids.return_value = set()
     db.is_in_cooldown.return_value = False
     tmpl = {
-        "tier_rules": [
-            [{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)
-        ],
         "max_exposure_usd": 250,
         "max_exposure_shares": 500,
         "max_concurrent_markets": 10,
-        "min_price_double_cents": 10,
+        "amount_value_table": [{"upper": 1.0, "value": 1}],
+        "gap_wide_cents": 10,
+        "gap_mid_cents": 5,
+        "gap_high_coeff_sum_min": 20,
+        "rule1_min_coeff": 0,
+        "rule2_min_coeff": 0,
+        "rule3_min_coeff": 0,
     }
     if template:
         tmpl.update(template)
@@ -51,16 +54,6 @@ def _elig(market_id, token_id, outcome, min_size=100):
     }
 
 
-def test_places_multi_tier_min_size_on_one_side():
-    worker, api, db = _make_worker()
-    api.get_orderbook.return_value = _ob([(0.30, 300), (0.29, 300)], [(0.31, 1000)])
-    worker.place_orders([_elig("A", "A-y", "Yes")])
-    placed = sorted(
-        (round(c.args[1], 2), c.args[2]) for c in api.place_limit_buy.call_args_list
-    )
-    assert (0.30, 100) in placed and (0.29, 100) in placed
-
-
 def test_skips_market_in_uma_resolution():
     # 有人在 UMA 提交 resolution(umaResolutionStatus 非空)的市场 -> 本轮不挂买单,
     # 避免「撤了又挂」。
@@ -78,19 +71,6 @@ def test_places_normally_when_not_in_resolution():
     api.gamma_resolution_status.return_value = {"A": None}
     worker.place_orders([_elig("A", "A-y", "Yes")])
     api.place_limit_buy.assert_called()
-
-
-def test_exposure_caps_total_usd():
-    # 预算 35:第1档 0.30*100=30 挂满;余 5 只够第2档 int(5/0.29)=17 份 < min_size(100)
-    # -> 第2档放弃(不挂残档)。USD 敞口上限仍然生效:总挂出量被限在第1档。
-    worker, api, db = _make_worker(template={"max_exposure_usd": 35})
-    api.get_orderbook.return_value = _ob([(0.30, 300), (0.29, 300)], [(0.31, 1000)])
-    worker.place_orders([_elig("A", "A-y", "Yes")])
-    placed = {
-        round(c.args[1], 2): c.args[2] for c in api.place_limit_buy.call_args_list
-    }
-    assert placed.get(0.30) == 100
-    assert placed.get(0.29) is None
 
 
 def test_reconcile_replaces_partial_fill_remnant():
@@ -136,14 +116,8 @@ def test_concurrent_market_cap_skips_new_markets():
     api.place_limit_buy.assert_not_called()
 
 
-def test_double_sided_floor_blocks_market_when_one_side_only():
-    worker, api, db = _make_worker()
-    api.get_orderbook.return_value = _ob([(0.08, 300)], [(0.09, 1000)])
-    worker.place_orders([_elig("A", "A-y", "Yes")])
-    api.place_limit_buy.assert_not_called()
-
-
-def test_idempotent_skips_existing_price():
+def test_idempotent_skips_existing_target_order():
+    # 目标单档(0.30 @min_size)已在挂 -> reconcile 判为量价皆符,不撤不重挂。
     worker, api, db = _make_worker()
     api.get_open_orders.return_value = [
         {
@@ -155,55 +129,16 @@ def test_idempotent_skips_existing_price():
             "id": "o1",
         }
     ]
-    api.get_orderbook.return_value = _ob([(0.30, 300), (0.29, 300)], [(0.31, 1000)])
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes")])
-    placed = {round(c.args[1], 2) for c in api.place_limit_buy.call_args_list}
-    assert 0.30 not in placed and 0.29 in placed
+    api.place_limit_buy.assert_not_called()
+    api.cancel_orders.assert_not_called()
 
 
 def test_skips_held_and_cooldown_and_blacklist():
     worker, api, db = _make_worker()
     api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
     db.is_in_cooldown.return_value = True
-    worker.place_orders([_elig("A", "A-y", "Yes")])
-    api.place_limit_buy.assert_not_called()
-
-
-def test_full_budget_and_reconcile_cancels_stale_buy():
-    # 全额预算(不再扣已挂敞口)+ 撤改收敛:旧价档(0.20,不在新目标)被撤,目标 0.30 挂上。
-    worker, api, db = _make_worker(
-        template={
-            "max_exposure_usd": 50,
-            "tier_rules": [
-                [{"upper": None, "action": {"type": "fixed_shares", "shares": 200}}]
-                for _ in range(6)
-            ],
-        }
-    )
-    api.get_open_orders.return_value = [
-        {
-            "side": "BUY",
-            "market": "A",
-            "asset_id": "A-y",
-            "price": "0.20",
-            "original_size": "100",
-            "id": "o-old",
-        }
-    ]
-    api.get_orderbook.return_value = _ob([(0.30, 1000)], [(0.31, 1000)])
-    worker.place_orders([_elig("A", "A-y", "Yes")])
-    placed = {
-        round(c.args[1], 2): c.args[2] for c in api.place_limit_buy.call_args_list
-    }
-    assert placed.get(0.30) == 166  # 全额预算 50:fixed 200 被 50/0.30=166 封顶
-    cancelled = [oid for c in api.cancel_orders.call_args_list for oid in c.args[0]]
-    assert "o-old" in cancelled  # 旧 0.20 档不在目标 -> 撤
-
-
-def test_empty_tier_rules_places_nothing():
-    # 模板未配档位规则表 -> 一单都不挂(并告警,不静默)。
-    worker, api, db = _make_worker(template={"tier_rules": []})
-    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes")])
     api.place_limit_buy.assert_not_called()
 
@@ -253,16 +188,9 @@ def test_paused_side_cancels_resting_and_other_side_runs():
 
 
 def test_held_value_deducts_other_side_budget():
-    # 持有 YES 市值 50U(100×0.50);max_exposure_usd=100 -> NO 侧预算 50U,fixed 200 被封到 100。
-    worker, api, db = _make_worker(
-        template={
-            "max_exposure_usd": 100,
-            "tier_rules": [
-                [{"upper": None, "action": {"type": "fixed_shares", "shares": 200}}]
-                for _ in range(6)
-            ],
-        }
-    )
+    # 持有 YES 市值 50U(100×0.50);max_exposure_usd=100 -> NO 侧预算 50U,
+    # gap_single 挂 min_size=100 @0.50 恰好用满(100×0.50=50U)。
+    worker, api, db = _make_worker(template={"max_exposure_usd": 100})
     api.get_user_positions.return_value = [
         {"conditionId": "A", "asset": "A-y", "size": 100.0, "curPrice": 0.50}
     ]
@@ -273,7 +201,7 @@ def test_held_value_deducts_other_side_budget():
         for c in api.place_limit_buy.call_args_list
         if c.args[0] == "A-n"
     }
-    assert placed.get(0.50) == 100  # 预算 100-50=50U;50/0.50=100 封顶(未扣则 200)
+    assert placed.get(0.50) == 100  # 预算 100-50=50U;挂 min_size=100 @0.50 恰用满
     assert not any(c.args[0] == "A-y" for c in api.place_limit_buy.call_args_list)
 
 
@@ -507,13 +435,3 @@ def test_gap_single_skip_records_reason_and_dedups():
     db.record_action.reset_mock()
     worker.place_orders(elig)
     assert _actions(db, "gap_skip") == []
-
-
-def test_laddering_place_buy_keeps_default_reason():
-    # 回归:laddering 模式 place_buy 文案保持「累计厚度多档」。
-    worker, api, db = _make_worker()
-    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
-    worker.place_orders([_elig("A", "A-y", "Yes")])
-    calls = _actions(db, "place_buy")
-    assert calls
-    assert "累计厚度" in calls[0].kwargs["reason"]

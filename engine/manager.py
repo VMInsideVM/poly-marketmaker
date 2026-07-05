@@ -127,12 +127,10 @@ class WalletWorker:
         limit 设置时,达到该数量的成功下单后停止。
         """
         from engine.laddering import (
-            compute_market_ladders,
             compute_market_single_orders,
             explain_gap_single_order,
             gap_single_reason,
             gap_single_price_basis,
-            apply_double_sided_floor,
             reconcile_buy_orders,
         )
         from engine.strategy import reward_price_range
@@ -154,31 +152,19 @@ class WalletWorker:
         held_assets, held_value, held_shares = held_side_info(positions)
         blacklist = self.db.get_blacklist_ids()
         tmpl = self.db.get_template_for(self.wallet_address)
-        tier_rules = tmpl.get("tier_rules") or []
-        tier_match_var = tmpl.get("tier_match_var", "cumulative_thickness")
         amount_value_table = tmpl.get("amount_value_table") or None
-        placement_mode = tmpl.get("placement_mode", "laddering")
         gap_wide_cents = float(tmpl.get("gap_wide_cents", 10))
         gap_mid_cents = float(tmpl.get("gap_mid_cents", 5))
         gap_high_coeff_sum_min = float(tmpl.get("gap_high_coeff_sum_min", 20))
         rule1_min_coeff = float(tmpl.get("rule1_min_coeff", 0))
         rule2_min_coeff = float(tmpl.get("rule2_min_coeff", 0))
         rule3_min_coeff = float(tmpl.get("rule3_min_coeff", 0))
-        if placement_mode == "laddering" and not tier_rules:
-            # 模板没配档位规则表 -> 一单都不会挂。显式告警,避免"引擎在跑却
-            # 静默不下单"被误认为"没机会",便于排查模板配置问题。
-            logger.warning(
-                "place_orders skipped for %s: empty tier_rules (模板未配档位规则表)",
-                self.wallet_address,
-            )
-            return
         # max_exposure_usd 是「单市场」敞口上限(YES+NO 合计);跨市场不设全局
         # 美元锁(maker 买单不锁仓,一笔余额垫付所有挂单),总量由 max_concurrent
         # _markets × 单市场敞口 约束。
         max_exposure_usd = float(tmpl.get("max_exposure_usd", 250))
         max_exposure_shares = int(tmpl.get("max_exposure_shares", 500))
         max_concurrent = int(tmpl.get("max_concurrent_markets", 10))
-        min_price_double_cents = float(tmpl.get("min_price_double_cents", 10))
 
         buy_orders = [o for o in open_orders if o.get("side") == "BUY"]
         buys_by_token, markets_with_open = {}, set()
@@ -306,46 +292,34 @@ class WalletWorker:
             if budget_ok:
                 ca = None if side_a["token_id"] in held_assets else side_a
                 cb = None if (side_b and side_b["token_id"] in held_assets) else side_b
-                if placement_mode == "gap_single":
-                    ladders = compute_market_single_orders(
-                        ca,
-                        cb,
-                        budget,
-                        shares_budget,
-                        amount_value_table,
-                        gap_wide_cents,
-                        gap_mid_cents,
-                        gap_high_coeff_sum_min,
-                        rule1_min_coeff,
-                        rule2_min_coeff,
-                        rule3_min_coeff,
-                    )
-                    for gkey, gside in (("a", ca), ("b", cb)):
-                        if gside is not None:
-                            gap_explains[gkey] = explain_gap_single_order(
-                                gside["bids"],
-                                gside["reward_range_min"],
-                                gside["reward_range_max"],
-                                gside["min_size"],
-                                amount_value_table,
-                                gap_wide_cents,
-                                gap_mid_cents,
-                                gap_high_coeff_sum_min,
-                                rule1_min_coeff,
-                                rule2_min_coeff,
-                                rule3_min_coeff,
-                            )
-                else:
-                    ladders = compute_market_ladders(
-                        ca,
-                        cb,
-                        tier_rules,
-                        budget,
-                        shares_budget,
-                        tier_match_var,
-                        amount_value_table,
-                    )
-                    ladders = apply_double_sided_floor(ladders, min_price_double_cents)
+                ladders = compute_market_single_orders(
+                    ca,
+                    cb,
+                    budget,
+                    shares_budget,
+                    amount_value_table,
+                    gap_wide_cents,
+                    gap_mid_cents,
+                    gap_high_coeff_sum_min,
+                    rule1_min_coeff,
+                    rule2_min_coeff,
+                    rule3_min_coeff,
+                )
+                for gkey, gside in (("a", ca), ("b", cb)):
+                    if gside is not None:
+                        gap_explains[gkey] = explain_gap_single_order(
+                            gside["bids"],
+                            gside["reward_range_min"],
+                            gside["reward_range_max"],
+                            gside["min_size"],
+                            amount_value_table,
+                            gap_wide_cents,
+                            gap_mid_cents,
+                            gap_high_coeff_sum_min,
+                            rule1_min_coeff,
+                            rule2_min_coeff,
+                            rule3_min_coeff,
+                        )
 
             for key, side in (("a", side_a), ("b", side_b)):
                 if side is None:
@@ -361,7 +335,7 @@ class WalletWorker:
                     cancel_ids, to_place = reconcile_buy_orders(
                         ladders.get(key, []), resting
                     )
-                    cancel_reason = "撤改收敛:撤掉价漂移/量不符的旧买单(目标多档梯已变)"
+                    cancel_reason = "撤改收敛:撤掉价漂移/量不符的旧买单(目标挂价已变)"
                     cancel_action = "buy_reconcile_cancel"
                 else:
                     # 预算不足(扣减后):活跃侧保持不动
@@ -383,9 +357,7 @@ class WalletWorker:
                         logger.warning(
                             "Reconcile/pause cancel %s failed: %s", token_id, ex
                         )
-                gap_d = (
-                    gap_explains.get(key) if placement_mode == "gap_single" else None
-                )
+                gap_d = gap_explains.get(key)
                 for price, shares in to_place:
                     try:
                         self.api.place_limit_buy(
@@ -418,8 +390,7 @@ class WalletWorker:
                     except Exception as ex:
                         logger.error("place_limit_buy failed %s: %s", token_id, ex)
                 # ② 判成不挂:记 gap_skip(按 token 去重,判断变化才记)。
-                if placement_mode == "gap_single":
-                    self._maybe_record_gap_skip(mid, side, gap_explains.get(key))
+                self._maybe_record_gap_skip(mid, side, gap_explains.get(key))
 
     def _record_place_buy_tier(
         self, market_id, side, price, shares, reason=None, price_basis=None
