@@ -8,6 +8,7 @@ py-clob-client-v2 的 HTTP 层是模块级全局 httpx.Client、不支持 per-in
 
 import contextvars
 import threading
+import time
 from contextlib import contextmanager
 from urllib.parse import quote
 
@@ -30,15 +31,45 @@ def use_proxy(url):
         current_proxy.reset(token)
 
 
+# 仅这些「连接建立阶段」失败可安全重试:到代理的连接 / CONNECT 隧道从未建立,请求从未
+# 送达 Polymarket,即使 POST 下单也不会重复提交。读超时 / 连接后错误不在此列(可能已送达)。
+_CONNECT_ERRORS = (
+    requests.exceptions.ConnectionError,  # 含 ProxyError / ConnectTimeout(requests)
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ProxyError,
+)
+
+
+def _retry_on_connect_error(fn, *, attempts=3, backoff=0.3):
+    """调 fn();仅在代理连接建立阶段瞬时失败时退避重试,最多 attempts 次。
+
+    烂 / 轮换代理常有约 30% 连接超时(实测),而一轮下单要连续多个代理调用、任一失败即
+    整轮放弃 -> 几乎挂不出单。重试仍走同一代理(绝不直连,不泄露真实 IP)。只重试
+    _CONNECT_ERRORS —— 请求从未送达,连 POST 下单也安全;读超时等「可能已送达」的错误
+    立即上抛,避免重复下单。
+    """
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except _CONNECT_ERRORS as e:
+            last = e
+            if i < attempts - 1 and backoff:
+                time.sleep(backoff)
+    raise last
+
+
 def http_get(url, **kw):
     """requests.get 包装:current_proxy 非空时注入 proxies=(http/https 同一代理)。
 
-    代理挂掉时 requests 直接抛 ProxyError -> 调用方报错跳过,绝不直连(不泄露真实 IP)。
+    代理连接瞬时失败先退避重试(仍走代理,见 _retry_on_connect_error);重试用尽仍失败
+    才抛给调用方跳过,绝不直连(不泄露真实 IP)。
     """
     proxy = current_proxy.get()
     if proxy:
         kw.setdefault("proxies", {"http": proxy, "https": proxy})
-    return requests.get(url, **kw)
+    return _retry_on_connect_error(lambda: requests.get(url, **kw))
 
 
 class _ProxyDispatchingClient:
@@ -47,8 +78,8 @@ class _ProxyDispatchingClient:
     ``_http_client.request(**kw)``,故替换该名即对所有 CLOB 调用生效。
 
     None(直连)复用传入的原 client 以保持非代理钱包的现行为;每个代理 URL 懒建
-    一个 http2 client 并缓存(多线程共用,建时加锁)。代理挂掉时底层 httpx 抛错
-    -> 调用方报错跳过,绝不直连。
+    一个 http2 client 并缓存(多线程共用,建时加锁)。代理连接瞬时失败先退避重试
+    (仍走代理);重试用尽才抛给调用方跳过,绝不直连。
     """
 
     def __init__(self, default_client):
@@ -66,7 +97,8 @@ class _ProxyDispatchingClient:
         return client
 
     def request(self, **kw):
-        return self._client_for(current_proxy.get()).request(**kw)
+        client = self._client_for(current_proxy.get())
+        return _retry_on_connect_error(lambda: client.request(**kw))
 
 
 class _ProxiedClient:
