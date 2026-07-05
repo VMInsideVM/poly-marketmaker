@@ -26,13 +26,11 @@ def test_get_settings_returns_v4_params(tmp_path, monkeypatch):
         "theta_loss_cents",
         "theta_stop_cents",
         "case_a_mode",
-        "tier_rules",
         "included_categories",
         "include_other",
         "max_exposure_usd",
         "max_exposure_shares",
         "max_concurrent_markets",
-        "min_price_double_cents",
         "discovery_interval_sec",
     ):
         assert k in data, f"GET /api/settings 缺 {k}"
@@ -45,9 +43,6 @@ def test_post_settings_roundtrips_structured(tmp_path, monkeypatch):
         "case_a_mode": "market",
         "included_categories": ["politics"],
         "include_other": False,
-        "tier_rules": [
-            [{"upper": None, "action": {"type": "fixed_shares", "shares": 50}}]
-        ],
         "discovery_interval_sec": 7200,
     }
     resp = client.post("/api/settings", json=payload)
@@ -57,9 +52,6 @@ def test_post_settings_roundtrips_structured(tmp_path, monkeypatch):
     assert tmpl["case_a_mode"] == "market"
     assert tmpl["included_categories"] == ["politics"]
     assert tmpl["include_other"] is False
-    assert tmpl["tier_rules"] == [
-        [{"upper": None, "action": {"type": "fixed_shares", "shares": 50}}]
-    ]
     assert db.get_settings()["discovery_interval_sec"] == 7200
 
 
@@ -75,7 +67,6 @@ def test_post_settings_routes_engine_vs_template(tmp_path, monkeypatch):
 def test_post_settings_roundtrips_gap_single_keys(tmp_path, monkeypatch):
     client, db = _client_with_db(tmp_path, monkeypatch)
     payload = {
-        "placement_mode": "gap_single",
         "gap_wide_cents": 10,
         "gap_mid_cents": 5,
         "gap_high_coeff_sum_min": 20,
@@ -88,7 +79,6 @@ def test_post_settings_roundtrips_gap_single_keys(tmp_path, monkeypatch):
     resp = client.post("/api/settings", json=payload)
     assert resp.status_code == 200
     tmpl = db.get_template(db.get_default_template_id())
-    assert tmpl["placement_mode"] == "gap_single"
     assert tmpl["gap_wide_cents"] == 10
     assert tmpl["gap_mid_cents"] == 5
     assert tmpl["gap_high_coeff_sum_min"] == 20

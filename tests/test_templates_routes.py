@@ -30,14 +30,10 @@ def test_create_get_save_roundtrip(tmp_path, monkeypatch):
     assert "max_exposure_usd" in got  # 返回合并默认值
     client.put(
         f"/api/templates/{tid}",
-        json={
-            "max_exposure_usd": 99,
-            "tier_rules": [[{"upper": None, "action": {"type": "min_size"}}]],
-        },
+        json={"max_exposure_usd": 99},
     )
     saved = db.get_template(tid)
     assert saved["max_exposure_usd"] == 99
-    assert saved["tier_rules"] == [[{"upper": None, "action": {"type": "min_size"}}]]
 
 
 def test_create_duplicate_name_400(tmp_path, monkeypatch):

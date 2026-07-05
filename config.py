@@ -54,8 +54,6 @@ TEMPLATE_DEFAULTS = {
     "stop_loss_percent": 20,  # 按比例时:成本的百分比(最大回撤)
     "theta_stop_cents": 5,  # 按固定金额时:亏损达到这么多美分即强平
     "case_a_mode": "ask",
-    # 挂单模式(v4 用户策略):gap_single=断层分级单档(默认);laddering=多档做市。
-    "placement_mode": "gap_single",
     "gap_wide_cents": 10,
     "gap_mid_cents": 5,
     "gap_high_coeff_sum_min": 20,
@@ -67,17 +65,13 @@ TEMPLATE_DEFAULTS = {
     "take_profit_mode": "maker",
     "included_categories": DEFAULT_INCLUDED_CATEGORIES,
     "include_other": True,
-    # 多档挂单(SP2)
-    "tier_rules": [[{"upper": None, "action": {"type": "min_size"}}] for _ in range(6)],
     "max_exposure_usd": 250,
     "max_exposure_shares": 500,
     "max_concurrent_markets": 10,
-    "min_price_double_cents": 10,
     # 奖励最低份额范围筛选(向上取档硬顶 250)
     "rewards_min_size_min": 1,
     "rewards_min_size_max": 250,
-    # 每档区间匹配变量 + 金额数值表(风险系数模式用)
-    "tier_match_var": "cumulative_thickness",  # "cumulative_thickness" | "risk_coefficient"
+    # 金额数值表:gap_single 算系数用(coeff = 挂量 ÷ (最低份数 × 金额数值))。
     "amount_value_table": [
         {"upper": 0.20, "value": 1},
         {"upper": 0.25, "value": 1.5},

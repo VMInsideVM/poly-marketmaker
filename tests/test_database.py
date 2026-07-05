@@ -50,20 +50,25 @@ def test_config_split_engine_and_template_defaults():
     assert ENGINE_DEFAULTS["discovery_interval_sec"] == 14400
 
 
-def test_template_defaults_has_multitier_keys():
+def test_template_defaults_has_exposure_keys():
     from config import TEMPLATE_DEFAULTS
 
-    assert len(TEMPLATE_DEFAULTS["tier_rules"]) == 6
-    assert TEMPLATE_DEFAULTS["tier_rules"][0] == [
-        {"upper": None, "action": {"type": "min_size"}}
-    ]
     assert TEMPLATE_DEFAULTS["max_exposure_usd"] == 250
     assert TEMPLATE_DEFAULTS["max_exposure_shares"] == 500
     assert TEMPLATE_DEFAULTS["max_concurrent_markets"] == 10
-    assert TEMPLATE_DEFAULTS["min_price_double_cents"] == 10
     assert "order_size_mode" not in TEMPLATE_DEFAULTS
     assert "order_size_custom_usd" not in TEMPLATE_DEFAULTS
     assert "max_buy_orders_per_wallet" not in TEMPLATE_DEFAULTS
+    # laddering / 单份奖励阈值 已删:确保不再回归默认值
+    for k in (
+        "tier_rules",
+        "placement_mode",
+        "min_price_double_cents",
+        "tier_match_var",
+        "per_share_reward_enabled",
+        "per_share_reward_thresholds",
+    ):
+        assert k not in TEMPLATE_DEFAULTS
 
 
 @pytest.fixture
@@ -593,12 +598,11 @@ def test_eligible_markets_roundtrips_spread_cents(tmp_path):
         db.close()
 
 
-def test_template_defaults_has_tier_match_and_size_range():
+def test_template_defaults_has_size_range_and_amount_table():
     from config import TEMPLATE_DEFAULTS
 
     assert TEMPLATE_DEFAULTS["rewards_min_size_min"] == 1
     assert TEMPLATE_DEFAULTS["rewards_min_size_max"] == 250
-    assert TEMPLATE_DEFAULTS["tier_match_var"] == "cumulative_thickness"
     table = TEMPLATE_DEFAULTS["amount_value_table"]
     assert table == [
         {"upper": 0.20, "value": 1},
