@@ -342,6 +342,17 @@ def test_price_basis_skip_no_coeff_shows_evidence():
     assert "get_orderbook" in b
 
 
+def test_price_basis_skip_rule1_passed_no_coeff_shows_evidence():
+    # 规则1 过闸(高位系数和≥门槛)但顺延无档>门槛:逐档 + 过闸 + 选档门槛。
+    d = _explain([_b(0.28, 600), _b(0.27, 600), _b(0.15, 100)], x1=25)
+    assert d["action"] == "skip" and d["rule"] == 1 and d["gate_passed"]
+    b = gap_single_price_basis(d, 0.10, 0.31)
+    assert "0.2800×600→系数" in b
+    assert "过闸" in b
+    assert "各档系数均 ≤ 选档门槛25" in b
+    assert "get_orderbook" in b
+
+
 from engine.laddering import compute_market_single_orders
 
 
