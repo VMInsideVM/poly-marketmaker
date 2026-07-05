@@ -23,7 +23,6 @@ from utils.crypto import derive_key, encrypt, decrypt
 from engine.monitor_status import get_snapshot
 from engine.market_links import enrich_with_market_meta, ensure_market_meta
 from engine.blacklist_ops import buy_order_ids_for_condition
-from engine.scanner import reward_bracket
 from engine.take_profit import effective_theta_stop
 from config import DB_PATH, HOST, PORT
 from web import update as updater
@@ -133,31 +132,16 @@ def _enrich_rows(rows, id_key):
     enrich_with_market_meta(rows, meta, id_key)
 
 
-def _derive_per_share(markets):
-    """给 eligible 行派生展示指标(不落库):单份奖励(含是否达阈值)、奖励范围、盘口价差、方向。
+def _derive_display_metrics(markets):
+    """给 eligible 行派生展示指标(不落库):奖励范围、盘口价差、方向。
 
-    单份奖励 = 每日奖励 ÷ 最低份数,阈值取默认模板(取不到兜 0.30)。奖励范围/盘口价差由候选池
-    内存中的 _orderbooks 现算(扫描/下单轮刷过书才有);无书(闲时或 DB 行)置 None,前端显「—」,
-    避免落库占位值 0/1/-1 被误读。盘口价差对二元市场两侧相等;奖励范围/方向取首个有订单簿的
-    token 作代表(完整两侧见展开预演)。最后剥掉 _orderbooks 以免撑大响应。"""
+    奖励范围/盘口价差由候选池内存中的 _orderbooks 现算(扫描/下单轮刷过书才有);无书
+    (闲时或 DB 行)置 None,前端显「—」,避免落库占位值 0/1/-1 被误读。盘口价差对二元市场
+    两侧相等;奖励范围/方向取首个有订单簿的 token 作代表(完整两侧见展开预演)。最后剥掉
+    _orderbooks 以免撑大响应。"""
     from engine.strategy import reward_price_range
 
-    try:
-        thr = db.get_template(db.get_default_template_id()).get(
-            "per_share_reward_thresholds", {}
-        )
-    except Exception:
-        thr = {}
     for m in markets:
-        ms = float(m.get("rewards_min_size", 0) or 0)
-        ps = (float(m.get("daily_reward", 0) or 0) / ms) if ms > 0 else None
-        bracket = reward_bracket(int(ms)) if ms > 0 else None
-        threshold = float(thr.get(str(bracket), 0.30)) if bracket else None
-        m["per_share"] = ps
-        m["per_share_bracket"] = bracket
-        m["per_share_threshold"] = threshold
-        m["per_share_ok"] = ps is not None and threshold is not None and ps >= threshold
-
         rr_min = rr_max = sp = None
         books = m.get("_orderbooks") or {}
         for tok in m.get("tokens", []) or []:
@@ -963,7 +947,7 @@ def api_eligible_markets():
         # No manager yet, try loading from database
         markets = [dict(m) for m in db.get_eligible_markets()]
         _enrich_rows(markets, "market_id")
-        _derive_per_share(markets)
+        _derive_display_metrics(markets)
         return jsonify({"markets": markets, "last_scan_time": 0, "scan_status": "idle"})
 
     # During scanning, use memory (real-time updates)
@@ -981,7 +965,7 @@ def api_eligible_markets():
     # (mutated by the scanner thread) or the DB rows.
     markets = [dict(m) for m in markets]
     _enrich_rows(markets, "market_id")
-    _derive_per_share(markets)
+    _derive_display_metrics(markets)
 
     return jsonify(
         {

@@ -27,7 +27,6 @@ def test_get_settings_returns_v4_params(tmp_path, monkeypatch):
         "theta_stop_cents",
         "case_a_mode",
         "tier_rules",
-        "per_share_reward_thresholds",
         "included_categories",
         "include_other",
         "max_exposure_usd",
@@ -46,13 +45,6 @@ def test_post_settings_roundtrips_structured(tmp_path, monkeypatch):
         "case_a_mode": "market",
         "included_categories": ["politics"],
         "include_other": False,
-        "per_share_reward_thresholds": {
-            "20": 0.5,
-            "50": 0.4,
-            "100": 0.3,
-            "200": 0.3,
-            "250": 0.3,
-        },
         "tier_rules": [
             [{"upper": None, "action": {"type": "fixed_shares", "shares": 50}}]
         ],
@@ -65,7 +57,6 @@ def test_post_settings_roundtrips_structured(tmp_path, monkeypatch):
     assert tmpl["case_a_mode"] == "market"
     assert tmpl["included_categories"] == ["politics"]
     assert tmpl["include_other"] is False
-    assert tmpl["per_share_reward_thresholds"]["20"] == 0.5
     assert tmpl["tier_rules"] == [
         [{"upper": None, "action": {"type": "fixed_shares", "shares": 50}}]
     ]

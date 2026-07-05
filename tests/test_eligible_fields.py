@@ -44,7 +44,6 @@ def _template():
         "min_settlement_days": 0,
         "included_categories": [],
         "include_other": True,
-        "per_share_reward_thresholds": {"100": 0.30},
     }
 
 

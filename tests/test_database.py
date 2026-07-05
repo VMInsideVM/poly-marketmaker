@@ -48,7 +48,6 @@ def test_config_split_engine_and_template_defaults():
     assert DEFAULTS["min_reward_usd"] == 100.0
     assert set(ENGINE_DEFAULTS) & set(TEMPLATE_DEFAULTS) == set()
     assert ENGINE_DEFAULTS["discovery_interval_sec"] == 14400
-    assert TEMPLATE_DEFAULTS["per_share_reward_enabled"] is True
 
 
 def test_template_defaults_has_multitier_keys():
@@ -467,13 +466,6 @@ def test_template_defaults_has_exit_keys():
     assert TEMPLATE_DEFAULTS["theta_stop_cents"] == 5
     assert TEMPLATE_DEFAULTS["case_a_mode"] == "ask"
     assert "stop_loss_pct" not in TEMPLATE_DEFAULTS
-
-
-def test_template_defaults_has_per_share_thresholds():
-    from config import TEMPLATE_DEFAULTS
-
-    t = TEMPLATE_DEFAULTS["per_share_reward_thresholds"]
-    assert t == {"20": 0.30, "50": 0.30, "100": 0.30, "200": 0.30, "250": 0.30}
 
 
 class TestTemplateCRUD:

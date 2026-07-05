@@ -103,19 +103,6 @@ def _in_settlement_window(end_ts: float, min_days, max_days) -> bool:
     return True
 
 
-def reward_bracket(min_size):
-    """向上取档(更保守):返回 20/50/100/200/250;超 250 或 <=0 返回 None。
-
-    v4 §2:仅服务市场筛选,不参与挂单/离场。
-    """
-    if min_size <= 0:
-        return None
-    for b in (20, 50, 100, 200, 250):
-        if min_size <= b:
-            return b
-    return None
-
-
 class MarketScanner:
     def __init__(self, api, db, wallet_address: str):
         self.api = api
@@ -383,14 +370,6 @@ class MarketScanner:
             size_hi = min(250, int(template.get("rewards_min_size_max", 250) or 250))
             if not (size_lo <= min_size <= size_hi):
                 continue
-            # v4 §3:单份奖励(每日LP奖励÷最低份数) >= 该取档阈值(向上取档) -> 通过。
-            # 可整体关闭(per_share_reward_enabled=False):跳过本门槛,其余筛选照常。
-            if template.get("per_share_reward_enabled", True):
-                bracket = reward_bracket(min_size)
-                per_share = market_reward / min_size
-                thresholds = template.get("per_share_reward_thresholds", {})
-                if per_share < float(thresholds.get(str(bracket), 0.30)):
-                    continue
             neg_risk = market.get("neg_risk", False)
             books = market.get("_orderbooks", {})
             valid_tokens = [

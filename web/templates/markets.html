@@ -19,7 +19,6 @@
             <th>方向</th>
             <th>每日奖励</th>
             <th>最低份数</th>
-            <th>单份奖励</th>
             <th>奖励范围</th>
             <th>盘口价差</th>
             <th>competitiveness</th>
@@ -28,7 +27,7 @@
     </thead>
     <tbody id="markets-body"></tbody>
 </table>
-<p class="metric-note">市场级 4 指标(最低份数 / 单份奖励 / 奖励范围 / 盘口价差)扫描时即有;点「展开」实时拉订单簿、跑 v4 推演看梯队(订单厚度 / 累计厚度 / 有效价格)。</p>
+<p class="metric-note">市场级 3 指标(最低份数 / 奖励范围 / 盘口价差)扫描时即有;点「展开」实时拉订单簿、跑 v4 推演看梯队(订单厚度 / 累计厚度 / 有效价格)。</p>
 {% endblock %}
 
 {% block scripts %}
@@ -59,12 +58,6 @@ function renderScanLine() {
 
 function fmtP(p) { return (+Number(p).toFixed(4)).toString(); }
 
-function perShareCell(m) {
-    if (m.per_share == null) return '—';
-    const mark = m.per_share_ok ? '✓' : '✗';
-    const note = `档${m.per_share_bracket}·≥${Number(m.per_share_threshold).toFixed(2)} ${mark}`;
-    return `<span class="metric">$${m.per_share.toFixed(2)}</span> <span class="metric-note">${note}</span>`;
-}
 function rangeCell(m) {
     if (m.reward_range_min == null || m.reward_range_max == null) return '—';
     return `[${Number(m.reward_range_min).toFixed(2)}, ${Number(m.reward_range_max).toFixed(2)}]`;
@@ -140,7 +133,6 @@ function renderMarkets() {
             <td>${m.outcome || ''}</td>
             <td>$${(m.daily_reward || 0).toFixed(2)}/天</td>
             <td class="metric">${m.rewards_min_size ?? '—'}</td>
-            <td>${perShareCell(m)}</td>
             <td class="metric">${rangeCell(m)}</td>
             <td>${spreadCell(m)}</td>
             <td>${m.market_competitiveness != null ? Number(m.market_competitiveness).toFixed(2) : '—'}</td>
