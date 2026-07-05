@@ -597,3 +597,115 @@ class TestParallelMap:
         from api.proxy import current_proxy
 
         assert _parallel_map(lambda x: current_proxy.get(), [1, 2]) == [None, None]
+
+
+class TestDiscoverNeededSlugsOnly:
+    def _api_db(self, fake_rewards):
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        return api, db
+
+    def test_only_needed_slugs_queried_without_include_other(self):
+        # 不收「其他」时:只查各模板 included 并集,不再固定查全 14。
+        queried = []
+
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [
+                    {"condition_id": "W", "tokens": [], "rewards_config": []},
+                    {"condition_id": "S", "tokens": [], "rewards_config": []},
+                ]
+            queried.append(tag_slug)
+            return {"weather": [{"condition_id": "W"}]}.get(tag_slug, [])
+
+        api, db = self._api_db(fake_rewards)
+        scanner = MarketScanner(api, db, "")
+        templates = [
+            {
+                "included_categories": ["weather"],
+                "include_other": False,
+                "min_reward_usd": 0,
+            }
+        ]
+        pool = scanner.discover_candidates(templates)
+        assert set(queried) == {"weather"}  # 只查 weather,其余 13 个没查
+        assert {m["condition_id"] for m in pool} == {"W"}  # S 无标签、无人收其他 -> 丢
+
+    def test_multi_template_union_queried(self):
+        # 多模板:查各自 included 的并集。
+        queried = []
+
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [
+                    {"condition_id": "W", "tokens": [], "rewards_config": []},
+                    {"condition_id": "G", "tokens": [], "rewards_config": []},
+                ]
+            queried.append(tag_slug)
+            return {
+                "weather": [{"condition_id": "W"}],
+                "games": [{"condition_id": "G"}],
+            }.get(tag_slug, [])
+
+        api, db = self._api_db(fake_rewards)
+        scanner = MarketScanner(api, db, "")
+        templates = [
+            {
+                "included_categories": ["weather"],
+                "include_other": False,
+                "min_reward_usd": 0,
+            },
+            {
+                "included_categories": ["games"],
+                "include_other": False,
+                "min_reward_usd": 0,
+            },
+        ]
+        pool = scanner.discover_candidates(templates)
+        assert set(queried) == {"weather", "games"}
+        assert {m["condition_id"] for m in pool} == {"W", "G"}
+
+    def test_include_other_queries_all_slugs(self):
+        # 收「其他」时:判其他绕不开,必须查全 14(回归护栏)。
+        from config import CATALOG_SLUGS
+
+        queried = set()
+
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [{"condition_id": "A", "tokens": [], "rewards_config": []}]
+            queried.add(tag_slug)
+            return []
+
+        api, db = self._api_db(fake_rewards)
+        scanner = MarketScanner(api, db, "")
+        templates = [
+            {
+                "included_categories": ["weather"],
+                "include_other": True,
+                "min_reward_usd": 0,
+            }
+        ]
+        scanner.discover_candidates(templates)
+        assert queried == set(CATALOG_SLUGS)
+
+    def test_subset_does_not_set_last_catalog(self):
+        # 只查子集算不出全 14 计数 -> 不覆盖 last_catalog(保留旧缓存)。
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [{"condition_id": "W", "tokens": [], "rewards_config": []}]
+            return {"weather": [{"condition_id": "W"}]}.get(tag_slug, [])
+
+        api, db = self._api_db(fake_rewards)
+        scanner = MarketScanner(api, db, "")
+        templates = [
+            {
+                "included_categories": ["weather"],
+                "include_other": False,
+                "min_reward_usd": 0,
+            }
+        ]
+        scanner.discover_candidates(templates)
+        assert getattr(scanner, "last_catalog", None) is None

@@ -116,6 +116,9 @@ class MarketScanner:
         钱包无关、网络密集(rewards 端点)、不抓订单簿、不算价。"""
         union = included_union(templates)
         inc_other = any_include_other(templates)
+        # 只查用得上的品类:收「其他」时判其他绕不开、必须查全 14;否则只需 included 并集
+        # (没被任何模板勾、又没人收其他的市场,market_wanted 本就丢弃,精确 tags 无所谓)。
+        slugs_needed = set(CATALOG_SLUGS) if inc_other else (union & set(CATALOG_SLUGS))
         floors = [t.get("min_reward_usd", 0) for t in templates]
         min_floor = min(floors) if floors else 0
 
@@ -134,14 +137,17 @@ class MarketScanner:
                 )
                 return slug, set()
 
-        # 14 个品类各查一次奖励端点:并发拉(原为串行,是"开始扫描到出结果"慢的一段)。
-        category_ids = dict(_parallel_map(_tag_slug, CATALOG_SLUGS))
+        # 只查 slugs_needed 各一次奖励端点:并发拉。原固定全 14 是历史包袱——只勾少数品类
+        # 且不收「其他」时,其余品类查了也会被 market_wanted 丢掉(2026-07-05 提速)。
+        category_ids = dict(_parallel_map(_tag_slug, slugs_needed))
 
-        # 顺带算一份品类计数快照(配置页勾选用),直接复用刚查到的 tag 数据,
-        # 免得配置页再单独联网一遍。计数口径与 category_counts 一致(在全量集上交集)。
-        self.last_catalog = self._catalog_payload(full, category_ids)
+        # 顺带算一份品类计数快照(配置页勾选用),直接复用刚查到的 tag 数据。仅当查了全 14
+        # 才算得出正确的全量计数/「其他」数;只查子集时不覆盖(保留上一份缓存,配置页走
+        # 缓存/手动刷新)。
+        if slugs_needed == set(CATALOG_SLUGS):
+            self.last_catalog = self._catalog_payload(full, category_ids)
 
-        pool = tag_pool(full, category_ids, CATALOG_SLUGS)
+        pool = tag_pool(full, category_ids, slugs_needed)
         blacklist = self.db.get_blacklist_ids()
 
         # 先无网络地筛出「想要且过粗筛」的市场(黑名单/品类/奖励地板),再**并发**拉每
