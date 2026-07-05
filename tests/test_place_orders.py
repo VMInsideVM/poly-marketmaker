@@ -444,6 +444,11 @@ def test_gap_single_skip_records_reason_and_dedups():
     skips = _actions(db, "gap_skip")
     assert len(skips) == 1
     assert "规则3" in skips[0].kwargs["reason"]
+    basis = skips[0].kwargs["price_basis"]
+    assert "区间内买档" in basis
+    assert "各档系数均 ≤ 选档门槛100" in basis
+    assert "get_orderbook" in basis
+    assert "断层单档判定不挂" not in basis  # 旧通用串已弃用
     api.place_limit_buy.assert_not_called()
     db.record_action.reset_mock()
     worker.place_orders(elig)

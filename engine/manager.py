@@ -423,6 +423,8 @@ class WalletWorker:
     def _maybe_record_gap_skip(self, market_id, side, decision):
         """gap_single 判成不挂时记一条 gap_skip(按 token 去重:同一原因只记一次,
         避免每轮下单往历史刷同一条)。decision=None/非 skip -> 不记。"""
+        from engine.laddering import gap_single_price_basis
+
         token_id = side["token_id"]
         if not decision or decision.get("action") != "skip":
             return
@@ -439,10 +441,10 @@ class WalletWorker:
                 price=-1,
                 size=0,
                 reason=reason,
-                price_basis=(
-                    f"断层单档判定不挂（{side.get('outcome','')}）；"
-                    f"奖励区间[{side['reward_range_min']:.4f},{side['reward_range_max']:.4f}]；"
-                    f"来源：CLOB get_orderbook"
+                price_basis=gap_single_price_basis(
+                    decision,
+                    side["reward_range_min"],
+                    side["reward_range_max"],
                 ),
             )
         except Exception as e:
