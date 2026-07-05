@@ -1,4 +1,4 @@
-"""tests/test_markets_route.py — 预演路由 + eligible per_share 派生契约。"""
+"""tests/test_markets_route.py — 预演路由 + eligible 展示指标派生契约。"""
 
 import pytest
 from web import routes
@@ -28,7 +28,6 @@ class _FakeAPI:
 class _FakeDB:
     def get_template_for(self, addr):
         return {
-            "tier_rules": [[{"upper": None, "action": {"type": "min_size"}}]],
             "max_exposure_usd": 250,
             "max_exposure_shares": 500,
         }
@@ -77,9 +76,11 @@ def test_ladder_preview_route(client):
     assert r.status_code == 200
     data = r.get_json()
     assert data["market_id"] == "c1"
+    assert data["placement_mode"] == "gap_single"
     side = data["sides"][0]
     assert side["outcome"] == "YES"
-    assert "levels" in side and side["levels"][0]["thickness"] == 1.5
+    # gap_single 预演:levels 为奖励区间内买档(价降序),含 price/size/coeff。
+    assert "levels" in side and side["levels"][0]["price"] == 0.54
 
 
 def test_ladder_reads_tokens_from_pool_shape(client, monkeypatch):

@@ -993,7 +993,7 @@ def api_market_ladder(market_id):
 
 
 def _ladder_payload(market_id):
-    from engine.laddering import preview_market_ladders
+    from engine.laddering import preview_gap_single_market
     from engine.strategy import reward_price_range
     from engine.positions import held_side_info
 
@@ -1003,8 +1003,6 @@ def _ladder_payload(market_id):
         return jsonify({"error": "钱包不可用"}), 404
     addr, api = next(iter(apis.items()))
     tmpl = db.get_template_for(addr)
-    tier_rules = tmpl.get("tier_rules") or []
-    tier_match_var = tmpl.get("tier_match_var", "cumulative_thickness")
     amount_value_table = tmpl.get("amount_value_table") or None
     max_exposure_usd = float(tmpl.get("max_exposure_usd", 250))
     max_exposure_shares = int(tmpl.get("max_exposure_shares", 500))
@@ -1064,35 +1062,17 @@ def _ladder_payload(market_id):
         )
     a = sides_in[0] if sides_in else None
     b = sides_in[1] if len(sides_in) > 1 else None
-    placement_mode = tmpl.get("placement_mode", "laddering")
-    if placement_mode == "gap_single":
-        # 网关式单档预演:逐市场按断层单档规则判(选中/跳过 + 原因),而非多档梯队。
-        from engine.laddering import preview_gap_single_market
-
-        preview = preview_gap_single_market(
-            a,
-            b,
-            amount_value_table,
-            float(tmpl.get("gap_wide_cents", 10)),
-            float(tmpl.get("gap_mid_cents", 5)),
-            float(tmpl.get("gap_high_coeff_sum_min", 20)),
-            float(tmpl.get("rule1_min_coeff", 0)),
-            float(tmpl.get("rule2_min_coeff", 0)),
-            float(tmpl.get("rule3_min_coeff", 0)),
-        )
-        sides = [preview[k] for k in ("a", "b") if preview.get(k)]
-        return jsonify(
-            {
-                "market_id": market_id,
-                "market_name": rows[0].get("market_name", ""),
-                "budget_usd": budget,
-                "shares_budget": shares_budget,
-                "sides": sides,
-                "placement_mode": "gap_single",
-            }
-        )
-    preview = preview_market_ladders(
-        a, b, tier_rules, budget, shares_budget, tier_match_var, amount_value_table
+    # 网关式单档预演:逐市场按断层单档规则判(选中/跳过 + 原因)。
+    preview = preview_gap_single_market(
+        a,
+        b,
+        amount_value_table,
+        float(tmpl.get("gap_wide_cents", 10)),
+        float(tmpl.get("gap_mid_cents", 5)),
+        float(tmpl.get("gap_high_coeff_sum_min", 20)),
+        float(tmpl.get("rule1_min_coeff", 0)),
+        float(tmpl.get("rule2_min_coeff", 0)),
+        float(tmpl.get("rule3_min_coeff", 0)),
     )
     sides = [preview[k] for k in ("a", "b") if preview.get(k)]
     return jsonify(
@@ -1102,8 +1082,7 @@ def _ladder_payload(market_id):
             "budget_usd": budget,
             "shares_budget": shares_budget,
             "sides": sides,
-            "tier_match_var": tier_match_var,
-            "placement_mode": "laddering",
+            "placement_mode": "gap_single",
         }
     )
 
