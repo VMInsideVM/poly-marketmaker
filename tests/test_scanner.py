@@ -2,7 +2,7 @@
 
 import time
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from unittest.mock import MagicMock
 from engine.scanner import MarketScanner
 
@@ -357,6 +357,60 @@ class TestFilterForTemplate:
         ids = {e["market_id"] for e in out}
         assert "P" not in ids and "Q" in ids
 
+    # --- 结算窗口 [最短, 最长](按整天:0=今天,1=明天…)---
+    def _on_day(self, cid, n):
+        """构造一个「距今 n 个日历日结算」的候选(其余门槛全过,只变结算日)。"""
+        c = self._candidate(cid, [])
+        c["end_date"] = (date.today() + timedelta(days=n)).strftime("%Y-%m-%d")
+        return c
+
+    def _ids(self, scanner, pool, tmpl):
+        return {e["market_id"] for e in scanner.filter_for_template(pool, tmpl, "0xW")}
+
+    def test_window_only_today(self):
+        scanner = self._scanner()
+        pool = [self._on_day("D0", 0), self._on_day("D1", 1), self._on_day("D2", 2)]
+        tmpl = self._template(min_settlement_days=0, max_settlement_days=0)
+        assert self._ids(scanner, pool, tmpl) == {"D0"}
+
+    def test_window_today_and_tomorrow(self):
+        scanner = self._scanner()
+        pool = [self._on_day("D0", 0), self._on_day("D1", 1), self._on_day("D2", 2)]
+        tmpl = self._template(min_settlement_days=0, max_settlement_days=1)
+        assert self._ids(scanner, pool, tmpl) == {"D0", "D1"}
+
+    def test_window_only_tomorrow(self):
+        scanner = self._scanner()
+        pool = [self._on_day("D0", 0), self._on_day("D1", 1), self._on_day("D2", 2)]
+        tmpl = self._template(min_settlement_days=1, max_settlement_days=1)
+        assert self._ids(scanner, pool, tmpl) == {"D1"}
+
+    def test_window_two_days_or_more_no_cap(self):
+        scanner = self._scanner()
+        pool = [
+            self._on_day("D0", 0),
+            self._on_day("D1", 1),
+            self._on_day("D2", 2),
+            self._on_day("D10", 10),
+        ]
+        tmpl = self._template(min_settlement_days=2, max_settlement_days=None)
+        assert self._ids(scanner, pool, tmpl) == {"D2", "D10"}
+
+    def test_window_max_absent_means_no_cap(self):
+        # 不设 max(键缺失)-> 沿用旧口径:只有下限,无上限
+        scanner = self._scanner()
+        pool = [self._on_day("D2", 2), self._on_day("D10", 10)]
+        tmpl = self._template(min_settlement_days=0)  # 无 max_settlement_days 键
+        assert self._ids(scanner, pool, tmpl) == {"D2", "D10"}
+
+    def test_window_unparseable_end_date_kept(self):
+        # 结算日缺失/解析不了 -> fail-open 保留(与旧口径一致)
+        scanner = self._scanner()
+        c = self._candidate("NODATE", [])
+        c["end_date"] = ""
+        tmpl = self._template(min_settlement_days=2, max_settlement_days=3)
+        assert self._ids(scanner, pool=[c], tmpl=tmpl) == {"NODATE"}
+
     def test_rewards_min_size_exact_match_only(self):
         scanner = self._scanner()
         pool = [
@@ -536,6 +590,43 @@ class TestCategoryCounts:
         counts = {c["slug"]: c["count"] for c in cat["categories"]}
         assert counts[s0] == 1  # A 命中 s0
         assert cat["other_count"] == 1  # B 落「其他」
+
+    def test_discover_reports_progress_incrementally(self):
+        # 精确奖励并发拉时应「边完成边报」进度 + on_found(前端进度条/候选列表逐渐增长),
+        # 而不是并发跑完才一次性 emit(2026-07-05 用户反馈「卡 0 然后突然 100+」)。
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [
+                    {
+                        "condition_id": "A",
+                        "tokens": [{"token_id": "A-y"}],
+                        "rewards_config": [{"rate_per_day": 50}],
+                    },
+                    {
+                        "condition_id": "B",
+                        "tokens": [{"token_id": "B-y"}],
+                        "rewards_config": [{"rate_per_day": 50}],
+                    },
+                ]
+            return []
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        api.get_rewards_for_market.return_value = []  # 退回批量 total_rate
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        found, progress = [], []
+        scanner.discover_candidates(
+            [{"included_categories": [], "include_other": True, "min_reward_usd": 0}],
+            on_progress=lambda c, t, m: progress.append((c, t)),
+            on_found=lambda mk: found.append(mk.get("condition_id")),
+        )
+        assert set(found) == {"A", "B"}  # 每个候选都 on_found
+        assert 2 in {t for _, t in progress}  # 进度总数=候选数(前端据此渲染进度条)
+        checks = [c for c, t in progress if t == 2]
+        assert checks == sorted(checks)  # 单调不减
+        assert checks[-1] == 2 and 1 in checks  # 逐步到 2、中间有 1(非一次性跳到 2)
 
 
 class TestParallelMap:

@@ -54,6 +54,12 @@
             <div class="form-group">
                 <label>最短结算天数</label>
                 <input type="number" name="min_settlement_days" step="1">
+                <span class="hint">距结算不足这么多天的市场不做（0=含当天，1=含明天…）</span>
+            </div>
+            <div class="form-group">
+                <label>最长结算天数（留空=不限）</label>
+                <input type="number" name="max_settlement_days" step="1">
+                <span class="hint">与上项合成结算窗口：只做今天填 0/0，今天+明天填 0/1，只做明天填 1/1，两天以后填 2/空</span>
             </div>
             <div class="form-group">
                 <label>奖励最低份额下限</label>
@@ -591,6 +597,12 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     this.querySelectorAll('input[type=number][name]').forEach(inp => {
         data[inp.name] = parseFloat(inp.value);
     });
+    // 最长结算天数留空 -> parseFloat('')=NaN -> JSON null(不限);填了就必须 >= 最短,
+    // 否则结算窗口为空、什么都挂不上。
+    if (!isNaN(data.max_settlement_days) && data.max_settlement_days < data.min_settlement_days) {
+        alert('最长结算天数不能小于最短结算天数（留空表示不限）');
+        return;
+    }
     // select 不在 input[type=number] 里,单独收。
     data.stop_loss_mode = (document.getElementById('stop-loss-mode') || {}).value || 'percent';
     data.tier_match_var = (document.getElementById('tier-match-var') || {}).value || 'cumulative_thickness';

@@ -20,7 +20,7 @@ candidate during fetch_candidates.
 import re
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from engine.categories import (
     included_union,
@@ -82,6 +82,25 @@ def _parse_end_date(end_date_str: str) -> float:
         except ValueError:
             continue
     return 0
+
+
+def _settlement_days_until(end_ts: float) -> int:
+    """结算日距今整天数(本地日历日):0=今天,1=明天,2=后天…;已过为负。
+
+    end_ts 来自 _parse_end_date(去 Z 按 naive 解析、.timestamp() 按本地还原,一去一
+    回时区抵消,date.fromtimestamp(end_ts) 即 end_date 字符串里写的那个日期)。按整天
+    日历日比较,避免小数天数在临近午夜分不清「今天」和「明天」。"""
+    return (date.fromtimestamp(end_ts) - date.fromtimestamp(time.time())).days
+
+
+def _in_settlement_window(end_ts: float, min_days, max_days) -> bool:
+    """结算日是否落在窗口 [min_days, max_days] 内(整天)。max_days=None 表示不限上限。"""
+    d = _settlement_days_until(end_ts)
+    if min_days is not None and d < min_days:
+        return False
+    if max_days is not None and d > max_days:
+        return False
+    return True
 
 
 def reward_bracket(min_size):
@@ -174,34 +193,52 @@ class MarketScanner:
                 logger.warning("Precise reward fetch failed for %s: %s", cid, e)
             return total_rate
 
-        rewards = _parallel_map(_precise_reward, wanted)
+        # 精确奖励并发拉,用 as_completed **增量**出结果:每完成一个就报进度 + on_found,
+        # 让进度条/候选列表随扫描逐渐增长,而不是并发跑完后在收尾循环里一次性蹦出(2026-
+        # 07-05 用户反馈「一直卡在已找到 0 个、然后突然显示 100 多个」)。返回序=完成序
+        # (池后续按 market_competitiveness 重排,不依赖此序);代理隔离同 _parallel_map。
+        total = len(wanted)
+        if on_progress:
+            on_progress(0, total, "核对各市场精确奖励…")
+        proxy = current_proxy.get()
+
+        def _reward_task(market):
+            token = current_proxy.set(proxy)
+            try:
+                return market, _precise_reward(market)
+            finally:
+                current_proxy.reset(token)
 
         out = []
-        for i, market in enumerate(wanted):
-            if cancel and cancel():
-                raise ScanSuperseded()
-            cid = market.get("condition_id", "")
-            self.db.upsert_market_meta(
-                cid,
-                market.get("question", ""),
-                market.get("market_slug", ""),
-                market.get("event_slug", ""),
-            )
-            market_reward = rewards[i]
-            # 候选池展示就绪键(供 /api/eligible 与持久化显示市场名/奖励)。
-            # 不含 order_price/outcome:候选池是按市场的,单价改为每钱包下单时
-            # 实时计算(见 filter_for_template),前端对缺失价格以「—」兜底。
-            market["market_reward"] = market_reward
-            market["market_id"] = cid
-            market["market_name"] = market.get("question", "")
-            market["daily_reward"] = market_reward
-            if on_progress:
-                on_progress(
-                    i + 1, len(wanted), f"Checking: {market.get('question','')}"
+        with ThreadPoolExecutor(
+            max_workers=min(_DISCOVERY_MAX_WORKERS, total or 1)
+        ) as ex:
+            futures = [ex.submit(_reward_task, m) for m in wanted]
+            for fut in as_completed(futures):
+                if cancel and cancel():
+                    raise ScanSuperseded()
+                market, market_reward = fut.result()
+                cid = market.get("condition_id", "")
+                self.db.upsert_market_meta(
+                    cid,
+                    market.get("question", ""),
+                    market.get("market_slug", ""),
+                    market.get("event_slug", ""),
                 )
-            if on_found:
-                on_found(market)
-            out.append(market)
+                # 候选池展示就绪键(供 /api/eligible 与持久化显示市场名/奖励)。
+                # 不含 order_price/outcome:候选池是按市场的,单价改为每钱包下单时
+                # 实时计算(见 filter_for_template),前端对缺失价格以「—」兜底。
+                market["market_reward"] = market_reward
+                market["market_id"] = cid
+                market["market_name"] = market.get("question", "")
+                market["daily_reward"] = market_reward
+                out.append(market)
+                if on_progress:
+                    on_progress(
+                        len(out), total, f"Checking: {market.get('question','')}"
+                    )
+                if on_found:
+                    on_found(market)
         logger.info(
             "discover_candidates: %d candidates (included union %d categories)",
             len(out),
@@ -316,6 +353,7 @@ class MarketScanner:
         max_price_cents = template["max_price_cents"]
         max_spread_cents = template["max_spread_cents"]
         min_days = template["min_settlement_days"]
+        max_days = template.get("max_settlement_days")  # None=不限上限
         included = set(template.get("included_categories", []) or [])
         include_other = bool(template.get("include_other", False))
 
@@ -331,8 +369,8 @@ class MarketScanner:
                 continue
             end_date_str = market.get("end_date", "")
             end_ts = _parse_end_date(end_date_str)
-            days_left = (end_ts - time.time()) / 86400 if end_ts else -1
-            if 0 <= days_left < min_days:
+            # 结算窗口 [min_days, max_days](整天)。无法解析结算日 -> 保留(fail-open)。
+            if end_ts and not _in_settlement_window(end_ts, min_days, max_days):
                 continue
 
             condition_id = market.get("condition_id", "")

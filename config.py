@@ -45,14 +45,17 @@ TEMPLATE_DEFAULTS = {
     "min_price_cents": 10.0,
     "max_price_cents": 50.0,
     "min_settlement_days": 4,
+    # 结算窗口上限(整天,0=今天/1=明天…):None=不限。与 min_settlement_days 合成
+    # 窗口 [min, max];留空即沿用旧的「只有下限、无上限」行为。
+    "max_settlement_days": None,
     "theta_loss_cents": 2,
     # 强平止损阈值:可按比例(占成本%)或按固定金额(美分)。默认按比例 20%。
     "stop_loss_mode": "percent",  # "percent" | "fixed"
     "stop_loss_percent": 20,  # 按比例时:成本的百分比(最大回撤)
     "theta_stop_cents": 5,  # 按固定金额时:亏损达到这么多美分即强平
     "case_a_mode": "ask",
-    # 挂单模式(v4 用户策略):laddering=多档做市(默认);gap_single=断层分级单档。
-    "placement_mode": "laddering",
+    # 挂单模式(v4 用户策略):gap_single=断层分级单档(默认);laddering=多档做市。
+    "placement_mode": "gap_single",
     "gap_wide_cents": 10,
     "gap_mid_cents": 5,
     "gap_high_coeff_sum_min": 20,
