@@ -108,6 +108,7 @@
                 <div class="form-group"><label>规则1 选档系数门槛（宽断层，&gt;此值才挂）</label><input type="number" name="rule1_min_coeff" step="0.1"></div>
                 <div class="form-group"><label>规则2 选档系数门槛（中断层，&gt;此值才挂）</label><input type="number" name="rule2_min_coeff" step="0.1"></div>
                 <div class="form-group"><label>规则3 选档系数门槛（密盘，&gt;此值才挂）</label><input type="number" name="rule3_min_coeff" step="0.1"></div>
+                <div class="form-group"><label>悬崖探测 (美分，区间下沿往下此距离内无买档则该侧不挂；0=关)</label><input type="number" name="cliff_probe_cents" step="0.1"></div>
             </div>
             <p class="hint" style="color:#888;font-size:12px">按买单簿「奖励区间内相邻档最大价差」把整个市场归到三级之一：&gt;宽断层→规则1（再查断层上方各档风险系数之和≥门槛，不过则整市场不挂）；中~宽→规则2；&lt;中→规则3。归到哪级就用哪级的「选档系数门槛」，从买一往下取第一个「风险系数&gt;该门槛」的档，挂最低份数一单。风险系数＝盘口量÷(最低份数×金额数值)，金额数值用下方表。</p>
         </div>
