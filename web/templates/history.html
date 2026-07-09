@@ -5,18 +5,18 @@
 
 <div class="filter-bar">
     <label>钱包：</label>
-    <select id="wallet-filter" onchange="refreshActions()">
+    <select id="wallet-filter" onchange="reload()">
         <option value="">全部</option>
     </select>
     <label>动作：</label>
-    <select id="act-type" onchange="refreshActions()">
+    <select id="act-type" onchange="reload()">
         <option value="">全部</option>
     </select>
     <label>开始日期：</label>
-    <input type="date" id="start-date" onchange="refreshActions()">
+    <input type="date" id="start-date" onchange="reload()">
     <label>结束日期：</label>
-    <input type="date" id="end-date" onchange="refreshActions()">
-    <button class="btn btn-sm" onclick="refreshActions()">刷新</button>
+    <input type="date" id="end-date" onchange="reload()">
+    <button class="btn btn-sm" onclick="reload()">刷新</button>
 </div>
 
 <div class="table-scroll">
@@ -35,6 +35,12 @@
     </thead>
     <tbody id="actions-body"></tbody>
 </table>
+</div>
+
+<div class="pager" id="pager" style="margin-top:10px;display:none">
+    <button class="btn btn-sm" id="prev-page" onclick="prevPage()">上一页</button>
+    <span id="page-info" style="margin:0 10px"></span>
+    <button class="btn btn-sm" id="next-page" onclick="nextPage()">下一页</button>
 </div>
 {% endblock %}
 
@@ -68,6 +74,14 @@ const ACTION_LABELS = {
     uma_resolution_cancel: 'UMA结算撤买单',
 };
 
+const PAGE_SIZE = 100;
+let currentPage = 1;
+let totalPages = 1;
+
+function reload() { currentPage = 1; refreshActions(); }
+function prevPage() { if (currentPage > 1) { currentPage--; refreshActions(); } }
+function nextPage() { if (currentPage < totalPages) { currentPage++; refreshActions(); } }
+
 function refreshActions() {
     const wallet = document.getElementById('wallet-filter').value;
     const type = document.getElementById('act-type').value;
@@ -78,11 +92,18 @@ function refreshActions() {
     if (type) params.set('types', type);
     if (s) params.set('start', new Date(s).getTime() / 1000);
     if (e) params.set('end', new Date(e + 'T23:59:59').getTime() / 1000);
+    params.set('page', currentPage);
+    params.set('page_size', PAGE_SIZE);
 
-    fetch(`/api/actions?${params}`).then(r => r.json()).then(rows => {
+    fetch(`/api/actions?${params}`).then(r => r.json()).then(data => {
+        const rows = data.rows || [];
+        const total = data.total || 0;
+        totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
         const body = document.getElementById('actions-body');
-        if (!rows.length) {
+        const pager = document.getElementById('pager');
+        if (!total) {
             body.innerHTML = '<tr><td colspan="9">暂无动作记录</td></tr>';
+            pager.style.display = 'none';
             return;
         }
         body.innerHTML = rows.map(a => `
@@ -98,6 +119,11 @@ function refreshActions() {
                 <td>${escapeHtml(a.price_basis)}</td>
             </tr>
         `).join('');
+        pager.style.display = '';
+        document.getElementById('page-info').textContent =
+            `第 ${currentPage} / ${totalPages} 页（共 ${total} 条）`;
+        document.getElementById('prev-page').disabled = currentPage <= 1;
+        document.getElementById('next-page').disabled = currentPage >= totalPages;
     });
 }
 
