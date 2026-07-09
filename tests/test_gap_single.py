@@ -25,6 +25,7 @@ def _plan(
     x1=0,
     x2=0,
     x3=0,
+    cliff=0,
 ):
     return plan_gap_single_order(
         bids,
@@ -38,6 +39,7 @@ def _plan(
         x1,
         x2,
         x3,
+        cliff_probe_cents=cliff,
     )
 
 
@@ -443,3 +445,122 @@ def test_preview_both_sides():
     assert out["a"]["outcome"] == "Yes"
     assert out["b"]["outcome"] == "No"
     assert out["b"]["action"] == "place"
+
+
+from engine.laddering import (
+    explain_gap_single_order,
+    compute_market_single_orders,
+    preview_gap_single_market,
+    gap_single_price_basis,
+)
+
+
+def test_cliff_below_zone_skips():
+    # in_range 有 0.18/0.17(≥rmin 0.10);[0.08,0.10) 内无档(下一档直接 0.02)→ 悬崖
+    out = _plan([_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)], cliff=2)
+    assert out is None
+
+
+def test_cliff_support_within_band_places():
+    # 同上但 0.09 落在 [0.08,0.10) 内 → 有支撑 → 照常挂 0.18
+    out = _plan([_b(0.18, 50), _b(0.17, 40), _b(0.09, 30), _b(0.02, 9999)], cliff=2)
+    assert out == (0.18, 20)
+
+
+def test_cliff_disabled_places_despite_void():
+    # 下方真空但 cliff=0 → 照常挂(零回归)
+    out = _plan([_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)], cliff=0)
+    assert out == (0.18, 20)
+
+
+def test_explain_cliff_sets_flag_and_reason():
+    d = explain_gap_single_order(
+        [_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)],
+        0.10,
+        0.31,
+        20,
+        AV,
+        10,
+        5,
+        20,
+        0,
+        0,
+        0,
+        cliff_probe_cents=2,
+    )
+    assert d["action"] == "skip"
+    assert d["cliff"] is True
+    assert "悬崖" in d["skip_reason"]
+    assert d["rule"] is None
+
+
+def test_price_basis_renders_cliff_not_empty_book():
+    d = explain_gap_single_order(
+        [_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)],
+        0.10,
+        0.31,
+        20,
+        AV,
+        10,
+        5,
+        20,
+        0,
+        0,
+        0,
+        cliff_probe_cents=2,
+    )
+    pb = gap_single_price_basis(d, 0.10, 0.31)
+    assert "悬崖" in pb
+    assert "无可评估买档" not in pb  # 不能误报成空区间
+
+
+def test_compute_threads_cliff_probe():
+    side = {
+        "bids": [_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)],
+        "reward_range_min": 0.10,
+        "reward_range_max": 0.31,
+        "min_size": 20,
+    }
+    out = compute_market_single_orders(
+        side,
+        None,
+        1000.0,
+        500,
+        AV,
+        10,
+        5,
+        20,
+        0,
+        0,
+        0,
+        cliff_probe_cents=2,
+    )
+    assert out["a"] == []
+
+
+def test_preview_threads_cliff_probe():
+    side = {
+        "outcome": "Yes",
+        "token_id": "t",
+        "min_size": 20,
+        "reward_range_min": 0.10,
+        "reward_range_max": 0.31,
+        "best_bid": 0.18,
+        "best_ask": 0.19,
+        "spread_cents": 1,
+        "bids": [_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)],
+    }
+    out = preview_gap_single_market(
+        side,
+        None,
+        AV,
+        10,
+        5,
+        20,
+        0,
+        0,
+        0,
+        cliff_probe_cents=2,
+    )
+    assert out["a"]["action"] == "skip"
+    assert out["a"]["cliff"] is True
