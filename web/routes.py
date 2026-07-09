@@ -887,9 +887,20 @@ def api_get_actions():
     end = request.args.get("end", type=float)
     types = request.args.get("types")
     action_types = types.split(",") if types else None
-    rows = db.get_actions(wallet, start, end, action_types)
+    page = max(1, request.args.get("page", default=1, type=int) or 1)
+    page_size = request.args.get("page_size", default=100, type=int) or 100
+    page_size = min(500, max(1, page_size))
+    total = db.count_actions(wallet, start, end, action_types)
+    rows = db.get_actions(
+        wallet,
+        start,
+        end,
+        action_types,
+        limit=page_size,
+        offset=(page - 1) * page_size,
+    )
     _enrich_rows(rows, "market_id")
-    return jsonify(rows)
+    return jsonify({"rows": rows, "total": total, "page": page, "page_size": page_size})
 
 
 # --- API: Blacklist ---
