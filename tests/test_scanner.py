@@ -558,6 +558,18 @@ class TestCategoryCounts:
 
         assert seen == ["http://p:1"] * 3
 
+    def test_category_counts_threads_max_pages(self):
+        def fake_rewards(tag_slug=None, max_pages=5, **kw):
+            return [{"condition_id": "A"}]
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        scanner = MarketScanner(api, MagicMock(), "")
+        scanner.category_counts([{"slug": "weather", "label": "天气"}], max_pages=13)
+        assert api.get_rewards_markets.call_args_list
+        for c in api.get_rewards_markets.call_args_list:
+            assert c.kwargs.get("max_pages") == 13
+
     def test_refresh_orderbooks_cancel_raises(self):
         from engine.scanner import ScanSuperseded
 

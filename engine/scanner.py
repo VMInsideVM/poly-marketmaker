@@ -309,10 +309,12 @@ class MarketScanner:
         ]
         return {"categories": cats, "other_count": other, "ready": True}
 
-    def category_counts(self, catalog) -> dict:
+    def category_counts(
+        self, catalog, max_pages=ENGINE_DEFAULTS["reward_scan_max_pages"]
+    ) -> dict:
         """catalog: [{'slug','label'}]. 返回各 curated 品类在当前奖励市场的市场数 +
         「其他」数。钱包无关;各 slug 并发查 CLOB 奖励端点,与全量取交集计数。"""
-        full = self.api.get_rewards_markets()
+        full = self.api.get_rewards_markets(max_pages=max_pages)
         full_ids = {m.get("condition_id", "") for m in full if m.get("condition_id")}
 
         # get_rewards_markets 是静态方法,靠环境 current_proxy 走代理,而 contextvar
@@ -321,7 +323,7 @@ class MarketScanner:
 
         def _slug_ids(slug):
             with use_proxy(proxy):
-                rows = self.api.get_rewards_markets(tag_slug=slug)
+                rows = self.api.get_rewards_markets(tag_slug=slug, max_pages=max_pages)
             return {m.get("condition_id", "") for m in rows} & full_ids
 
         slugs = [c["slug"] for c in catalog]
