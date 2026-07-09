@@ -25,6 +25,7 @@ def _make_worker(balance=10000.0, template=None):
         "rule1_min_coeff": 0,
         "rule2_min_coeff": 0,
         "rule3_min_coeff": 0,
+        "cliff_probe_cents": 0,
     }
     if template:
         tmpl.update(template)
@@ -453,3 +454,13 @@ def test_gap_single_skip_records_reason_and_dedups():
     db.record_action.reset_mock()
     worker.place_orders(elig)
     assert _actions(db, "gap_skip") == []
+
+
+def test_cliff_below_zone_skips_side():
+    worker, api, db = _make_worker(template={"cliff_probe_cents": 2})
+    # 买一0.28/买二0.27(区间内),下方直接砸到0.05(区间下沿2¢内无支撑)→ 悬崖 → 不挂
+    api.get_orderbook.return_value = _ob(
+        [(0.28, 50), (0.27, 40), (0.05, 9999)], [(0.31, 1000)]
+    )
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    assert api.place_limit_buy.call_count == 0

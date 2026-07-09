@@ -30,6 +30,7 @@ class _FakeDB:
         return {
             "max_exposure_usd": 250,
             "max_exposure_shares": 500,
+            "cliff_probe_cents": 0,
         }
 
     def get_eligible_markets(self):

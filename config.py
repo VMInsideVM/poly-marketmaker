@@ -64,6 +64,8 @@ TEMPLATE_DEFAULTS = {
     "rule1_min_coeff": 0,
     "rule2_min_coeff": 0,
     "rule3_min_coeff": 0,
+    # 悬崖否决:奖励区间下沿往下这么多美分内无买档 → 该侧不挂。0=关闭。
+    "cliff_probe_cents": 2,
     # 止盈方式:maker=挂卖一吃价差(默认);market=浮盈(成本<买一)立即市价清仓。
     "take_profit_mode": "maker",
     "included_categories": DEFAULT_INCLUDED_CATEGORIES,

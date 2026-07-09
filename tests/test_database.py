@@ -57,6 +57,7 @@ def test_template_defaults_has_exposure_keys():
     assert TEMPLATE_DEFAULTS["max_exposure_usd"] == 250
     assert TEMPLATE_DEFAULTS["max_exposure_shares"] == 500
     assert TEMPLATE_DEFAULTS["max_concurrent_markets"] == 10
+    assert TEMPLATE_DEFAULTS["cliff_probe_cents"] == 2
     assert "order_size_mode" not in TEMPLATE_DEFAULTS
     assert "order_size_custom_usd" not in TEMPLATE_DEFAULTS
     assert "max_buy_orders_per_wallet" not in TEMPLATE_DEFAULTS

@@ -159,6 +159,7 @@ class WalletWorker:
         rule1_min_coeff = float(tmpl.get("rule1_min_coeff", 0))
         rule2_min_coeff = float(tmpl.get("rule2_min_coeff", 0))
         rule3_min_coeff = float(tmpl.get("rule3_min_coeff", 0))
+        cliff_probe_cents = float(tmpl.get("cliff_probe_cents", 2))
         # max_exposure_usd 是「单市场」敞口上限(YES+NO 合计);跨市场不设全局
         # 美元锁(maker 买单不锁仓,一笔余额垫付所有挂单),总量由 max_concurrent
         # _markets × 单市场敞口 约束。
@@ -304,6 +305,7 @@ class WalletWorker:
                     rule1_min_coeff,
                     rule2_min_coeff,
                     rule3_min_coeff,
+                    cliff_probe_cents,
                 )
                 for gkey, gside in (("a", ca), ("b", cb)):
                     if gside is not None:
@@ -319,6 +321,7 @@ class WalletWorker:
                             rule1_min_coeff,
                             rule2_min_coeff,
                             rule3_min_coeff,
+                            cliff_probe_cents,
                         )
 
             for key, side in (("a", side_a), ("b", side_b)):
