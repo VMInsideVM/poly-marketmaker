@@ -647,7 +647,10 @@ class EngineManager:
             return self._static_catalog()
         scanner = MarketScanner(self._scanner_api, self.db, "")
         with use_proxy(getattr(self._scanner_api, "proxy_url", None)):
-            payload = scanner.category_counts(CATEGORY_CATALOG)
+            payload = scanner.category_counts(
+                CATEGORY_CATALOG,
+                max_pages=self.db.get_settings()["reward_scan_max_pages"],
+            )
         return self._persist_catalog(payload)
 
     def category_catalog(self, refresh: bool = False) -> dict:
@@ -867,6 +870,7 @@ class EngineManager:
                     on_found=on_found,
                     skip_orderbook=skip_orderbook,
                     cancel=cancel,
+                    max_pages=self.db.get_settings()["reward_scan_max_pages"],
                 )
         except ScanSuperseded:
             raise  # 被接管:不碰共享状态,交给 _run_scan 静默处理

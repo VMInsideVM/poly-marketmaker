@@ -32,6 +32,7 @@ def _make_manager():
         "fill_check_interval_sec": 5,
         "cooldown_minutes": 20,
         "discovery_interval_sec": 14400,
+        "reward_scan_max_pages": 20,
         "min_reward_usd": 100.0,
         "max_spread_cents": 3.0,
         "min_price_cents": 10.0,
@@ -656,3 +657,30 @@ class TestScanGuard:
         with patch("engine.manager.MarketScanner", FakeScanner):
             manager.scan_markets(gen=1)  # gen 1 != 当前代 2
         db.save_eligible_markets.assert_not_called()  # 被接管:不落库(否则覆盖成废结果)
+
+    def test_scan_threads_reward_scan_max_pages_from_settings(self):
+        from config import ENGINE_DEFAULTS
+
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        settings = dict(ENGINE_DEFAULTS)
+        settings["reward_scan_max_pages"] = 42
+        db.get_settings.return_value = settings
+        seen = {}
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def fetch_candidates(
+                self, templates, on_progress=None, on_found=None, **kw
+            ):
+                seen["max_pages"] = kw.get("max_pages")
+                return []
+
+            def filter_for_template(self, pool, tmpl, addr):
+                return pool
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager.scan_markets()
+        assert seen["max_pages"] == 42
