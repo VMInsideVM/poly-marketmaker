@@ -467,10 +467,39 @@ def test_cliff_support_within_band_places():
     assert out == (0.18, 20)
 
 
+def test_cliff_boundary_9c_support_not_dusted():
+    # floor 0.10, N=1: 9¢ 支撑恰在 [0.09,0.10) 带内,不能被浮点尘误排 → 照常挂
+    out = _plan(
+        [_b(0.18, 50), _b(0.17, 40), _b(0.09, 30), _b(0.02, 9999)], rmin=0.10, cliff=1
+    )
+    assert out == (0.18, 20)
+
+
 def test_cliff_disabled_places_despite_void():
     # 下方真空但 cliff=0 → 照常挂(零回归)
     out = _plan([_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)], cliff=0)
     assert out == (0.18, 20)
+
+
+def test_empty_zone_reason_wins_over_cliff():
+    # 区间内无买档 → 保留旧原因"奖励区间内无买档",不被悬崖判断抢先/覆盖
+    d = explain_gap_single_order(
+        [_b(0.02, 9999)],
+        0.10,
+        0.31,
+        20,
+        AV,
+        10,
+        5,
+        20,
+        0,
+        0,
+        0,
+        cliff_probe_cents=2,
+    )
+    assert d["action"] == "skip"
+    assert d["skip_reason"] == "奖励区间内无买档"
+    assert d["cliff"] is False
 
 
 def test_explain_cliff_sets_flag_and_reason():

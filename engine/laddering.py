@@ -55,6 +55,7 @@ def explain_gap_single_order(
       chosen_index: 选中档在 levels 的下标;跳过为 None
       price/shares: 选中档价 / int(min_size);跳过为 None
       skip_reason: 跳过原因(中文);挂单为 None
+      cliff: 是否因奖励区间下方悬崖(无买档支撑)否决;默认 False
     归级口径:价差 10/5 归中一级(规则1 严格 >宽、规则3 严格 <中);高位系数和 ==
     门槛放行;选档严格 > 门槛。价差按分四舍五入去浮点尘。
     """
@@ -90,7 +91,13 @@ def explain_gap_single_order(
         return d
     if cliff_probe_cents and cliff_probe_cents > 0:
         lo = reward_range_min - cliff_probe_cents * 0.01
-        if not any(lo <= float(b["price"]) < reward_range_min for b in bids):
+        # 下界去浮点尘(同 max_gap 的按分四舍五入手法):否则 lo 算成 0.09000000000000001,
+        # 把恰好落在 9¢ 的支撑档误判成不在 [lo, reward_range_min) 内,悬崖假阳性。
+        if not any(
+            round((float(b["price"]) - lo) * 100.0, 6) >= 0
+            and float(b["price"]) < reward_range_min
+            for b in bids
+        ):
             d["cliff"] = True
             d["skip_reason"] = (
                 f"奖励区间下方 {cliff_probe_cents:g}¢ 内无买档支撑(悬崖)→ 不挂"
