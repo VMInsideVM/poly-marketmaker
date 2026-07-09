@@ -36,6 +36,9 @@ ENGINE_DEFAULTS = {
     "cooldown_minutes": 20,
     "rewards_cache_ttl_sec": 600,
     "discovery_interval_sec": 14400,
+    # 每品类奖励抓取页数上限(每页 100)。默认 20=2000/品类,覆盖天气等大品类;
+    # 扫描级全局,由 manager 透传给 scanner。
+    "reward_scan_max_pages": 20,
 }
 
 # 策略级参数:每钱包/每模板取值,存 template_settings 表。

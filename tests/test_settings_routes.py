@@ -87,3 +87,15 @@ def test_post_settings_roundtrips_gap_single_keys(tmp_path, monkeypatch):
     assert tmpl["rule3_min_coeff"] == 2
     assert tmpl["take_profit_mode"] == "market"
     assert tmpl["stop_loss_mode"] == "off"
+
+
+def test_reward_scan_max_pages_default_and_roundtrip(tmp_path, monkeypatch):
+    client, db = _client_with_db(tmp_path, monkeypatch)
+    # 默认值出现在 GET
+    assert client.get("/api/settings").get_json()["reward_scan_max_pages"] == 20
+    # POST 存 + 回读
+    resp = client.post("/api/settings", json={"reward_scan_max_pages": 12})
+    assert resp.status_code == 200
+    assert db.get_settings()["reward_scan_max_pages"] == 12
+    # 属引擎键,不落默认模板
+    assert "reward_scan_max_pages" not in db.get_template(db.get_default_template_id())
