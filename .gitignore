@@ -1,7 +1,11 @@
 __pycache__/
 *.pyc
 market_maker.db
+market_maker.db-wal
+market_maker.db-shm
 market_maker.log
+trades_dump.json
+release_*.log
 .pytest_cache/
 dist/
 build/
