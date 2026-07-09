@@ -68,7 +68,7 @@ pool = tag_pool(list(by_cid.values()), category_ids, slugs_needed)
 
 - `include_other=False`(天气号):**完全跳过 untagged `full` 抓取**,候选池 = 天气品类全部市场。铲掉 Cap B。
 - `include_other=True`:并集 = 各品类 rows ∪ `full`,行为等价今天,但不再漏低奖励品类。
-- catalog 快照 `if slugs_needed == set(CATALOG_SLUGS)` 仅在 `inc_other` 成立(见 `scanner.py:121`),此时 `full` 有值,`_catalog_payload(full, category_ids)` 照常;`category_ids` 仍是 {slug: set(cid)},契约不变。
+- catalog 快照守卫是 `if inc_other and slugs_needed == set(CATALOG_SLUGS)`(**显式**要求 inc_other:`slugs_needed==全14` 也可能出现在「勾满 14 品类但不勾其他」时,此时 `full=[]`,若不加 `inc_other` 会算出零计数却标 `ready:True` 污染快照——评审阶段修正);`inc_other` 时 `full` 有值,`_catalog_payload(full, category_ids)` 照常;`category_ids` 仍是 {slug: set(cid)},契约不变。
 
 ### 改动三:每品类页数上限可调(默认 20)
 

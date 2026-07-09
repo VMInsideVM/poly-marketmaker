@@ -1,0 +1,13 @@
+iteration	type	hypothesis	result	severity	location	description
+0	baseline	pytest 全套	pass	-	tests/	215 passed；纯逻辑单测不覆盖下单/监控的副作用路径
+1	hypothesis	全额下单+跨市场不递减余额	confirmed	HIGH	engine/manager.py:197-200	买单会预占抵押金(Polymarket maxOrderSize=balance−∑open)，全额砸单导致首单吃光余额，资金集中单一市场
+2	hypothesis	max_buy_orders_per_wallet 实际不可达	confirmed	HIGH	engine/manager.py:100-139,197-200	因首单占满抵押金，后续市场拒单/跳过，上限 5 永远到不了
+3	hypothesis	止损市价单 amount 语义错误(份额vs美元)	disproven	-	api/polymarket_api.py:189-207	SDK 文档+源码确认 SELL 的 amount=份额；代码传 size=份额，正确(本地 docstring 误导)
+4	hypothesis	监控管理整个钱包所有持仓(无bot过滤)	confirmed	HIGH	engine/monitor.py:169,278	take-profit/stop-loss 遍历 funder 全部 Data API 持仓，会对用户无关持仓挂成本价卖单+15%止损强平
+5	hypothesis	止损先记账后确认成交(FOK可能未成交)	confirmed	MEDIUM	engine/monitor.py:328-337	未校验 place_market_sell 返回；FOK 在薄盘可能未成交却记一笔 stop_loss；pnl 按 curPrice 而非真实成交价
+6	hypothesis	多线程共用单个 sqlite3 连接	confirmed	MEDIUM	models/database.py:15	所有 worker+scanner+Flask 线程共用一个 conn 且无锁，写竞争可能 database is locked / 事务交叉
+7	hypothesis	多线程共用同一 ClobClient	disproven(downgraded)	LOW	engine/manager.py:28,555	HTTP 每次新建请求、签名无状态，并发风险低
+8	hypothesis	get_balance 不刷新(update_balance_allowance)	confirmed	LOW	api/polymarket_api.py:129-137	只读不刷新；若 CLOB 缓存口径为净额/陈旧值会放大 finding#1 行为
+9	hypothesis	_seen_fill_keys 无界增长	confirmed	LOW	engine/monitor.py:24	长时运行内存只增不减
+10	hypothesis	end_date 解析失败市场漏过结算过滤	confirmed	LOW	engine/scanner.py:92-96	解析失败→days_left=-1→不被 min_settlement_days 过滤
+11	hypothesis	每 tick 冗余 API 调用	confirmed	LOW	engine/monitor.py:178,287,369	get_open_orders 3次/get_user_positions 2次 每 tick，性能非正确性

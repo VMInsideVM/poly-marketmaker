@@ -1,0 +1,13 @@
+iteration	type	hypothesis	result	severity	location	description
+1	hypothesis	卖单路径没贯穿 neg_risk,负风险市场卖单签错交易所被拒	confirmed	CRITICAL	api/polymarket_api.py:243,267	本会话已修:封装默认 False→None,交底层 get_neg_risk 自查
+2	hypothesis	MarketOrderArgsV2.amount 对 SELL 是 pUSD 金额(monitor 传了份额)	disproven	-	py_clob_client_v2 MarketOrderArgsV2	amount 文档明确 "SELL orders: Shares to sell",monitor 传份额正确
+3	hypothesis	下单封装不查响应 success/status,被拒/FOK未成交被当成功	confirmed	HIGH	api/polymarket_api.py:241,265,283	止损记幻影成交+仓位未卖出;止盈记假"已挂单";request() 仅在非200抛错
+4	hypothesis	止损用 FOK 市价单,深度不足整笔则全杀	confirmed	MEDIUM	api/polymarket_api.py:283; engine/monitor.py:416	大仓 > 买一深度时止损永不成交,叠加#3 还会被记成已平仓
+5	hypothesis	_tick 循环无顶层兜底,单次异常静默杀死该钱包监控线程	confirmed	MEDIUM	engine/manager.py:65	线程死=该钱包无成交检测/无止损/不重启,唯一症状是状态表停更
+6	hypothesis	止损只信 Data API curPrice,无盘口交叉校验/去抖	confirmed	MEDIUM	engine/monitor.py:372,395	curPrice 瞬时glitch→立即市价砸盘亏损(同一API的avgPrice已因glitch被禁)
+7	hypothesis	balance/custom 下单量模式每单都按全额,不分摊到槽位	confirmed	MEDIUM	engine/order_sizing.py:30; engine/manager.py:217	最多 max_buy 笔全额买单,余额垫不住,并发成交被拒;non-decrement 设计仅对 min 成立
+8	hypothesis	take_profit_price 可能算出 best_bid+tick > 1.0 上限	confirmed	LOW	engine/take_profit.py:138	买一0.99→卖价1.00被拒(再经#3记成已挂)
+9	hypothesis	get_open_orders 失败时 check_stop_loss 用空表继续	confirmed	LOW	engine/monitor.py:357	跳过撤止盈卖单直接市价卖,可能瞬间双挂卖单
+10	hypothesis	成本重建会把已卖旧买当成本/卖价低于成本	disproven	-	engine/take_profit.py:74	FIFO对冲+穿价护栏 max(cost,bid+tick),已有充分单测,卖价恒≥成本
+11	hypothesis	黑名单只在部分下单路径拦截	disproven	-	manager.py:160 scanner.py:98 monitor.py:528	三处新买路径全拦;止盈/止损卖单刻意不拦(平仓不应受黑名单影响)
+12	hypothesis	watermark int 截断导致漏成交	disproven	-	engine/monitor.py:146	after 为下界+(trade_id,order_id)去重补偿,不漏

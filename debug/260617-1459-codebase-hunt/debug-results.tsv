@@ -1,0 +1,15 @@
+iteration	type	hypothesis	result	severity	location	description
+1	hypothesis	scanner int(None) on null rewards_min_size	confirmed	HIGH	engine/scanner.py:210	崩溃中断精筛;manager.py 有 or 0 兜底,此处无
+2	hypothesis	monitor 离场 place 失败静默裸奔	confirmed	HIGH	engine/monitor.py:325,369,403	rest/market/sweep 未包 try/except,失败无 ⚠️ 状态行
+3	hypothesis	spreadCell 恒显 ≤N¢ ✓	confirmed	MEDIUM	web/templates/markets.html:68	候选池未过滤价差,未比 spread<=maxSpread
+4	hypothesis	CLAUDE.md/README 误述离场为不亏本卖	confirmed	HIGH	README.md/CLAUDE.md	SP3 已改 θ 限损,文档过期(本会话传播)
+5	hypothesis	cancel_orders 无 success 检查	confirmed	MEDIUM	api/polymarket_api.py:381	报告(改动多处 catch 语义有风险)
+6	hypothesis	reconcile 同价重复单都保留	confirmed	LOW	engine/laddering.py:140	keep 是价集合非按单
+7	hypothesis	get_user_positions 无分页	confirmed	MEDIUM	api/polymarket_api.py:418	实际受 max_concurrent 约束,报告
+8	hypothesis	update/apply 无 login_required	confirmed	LOW	web/routes.py	SHA 校验真 Release,危害低,刻意登录前
+9	hypothesis	fixed_amount min_size 地板	disproven	-	engine/laddering.py:57	刻意:低于min_size不赚奖励,有测试固化
+10	hypothesis	crypto/自动更新SHA/SQL注入	disproven	-	utils/crypto.py,web/update.py,models/database.py	读码确认安全
+11	fix	scanner null guard	fixed	HIGH	engine/scanner.py:210	c2097d3 + test
+12	fix	monitor 离场静默裸奔	fixed	HIGH	engine/monitor.py	1623c55 + test
+13	fix	spreadCell ✓/✗	fixed	MEDIUM	web/templates/markets.html	f931379
+14	fix	README 离场描述	fixed	HIGH	README.md	f931379

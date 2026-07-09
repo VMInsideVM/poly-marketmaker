@@ -254,8 +254,10 @@ from config import CATALOG_SLUGS, CATEGORY_CATALOG, ENGINE_DEFAULTS
             self.api.get_rewards_markets(max_pages=max_pages) if inc_other else []
         )
 
-        # 品类计数快照(配置页勾选用):仅当查了全 14(即 inc_other,full 有值)才算得准。
-        if slugs_needed == set(CATALOG_SLUGS):
+        # 品类计数快照(配置页勾选用):仅当 inc_other(查了全14、full 有值)才算得准。
+        # 显式要求 inc_other——slugs_needed==全14 也可能是「勾满14品类不勾其他」,此时 full=[],
+        # 不加 inc_other 会算出零计数却标 ready:True 污染快照(评审阶段修正)。
+        if inc_other and slugs_needed == set(CATALOG_SLUGS):
             self.last_catalog = self._catalog_payload(full, category_ids)
 
         # 候选池 = 各需要品类 tag 记录按 cid 去重的并集;inc_other 再并入 full(补「其他」)。

@@ -14,7 +14,9 @@
       "Bash(python -m pytest tests/test_manager.py -v)",
       "Bash(pip show:*)",
       "Bash(python -c \"import py_clob_client\")",
-      "Bash(pip list:*)"
+      "Bash(pip list:*)",
+      "Skill(superpowers:systematic-debugging)",
+      "Skill(superpowers:systematic-debugging:*)"
     ]
   }
 }
