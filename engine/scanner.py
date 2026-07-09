@@ -29,7 +29,7 @@ from engine.categories import (
     market_wanted,
     count_by_category,
 )
-from config import CATALOG_SLUGS, CATEGORY_CATALOG
+from config import CATALOG_SLUGS, CATEGORY_CATALOG, ENGINE_DEFAULTS
 from engine.strategy import reward_price_range
 from api.proxy import use_proxy, current_proxy
 
@@ -110,44 +110,64 @@ class MarketScanner:
         self.wallet_address = wallet_address
 
     def discover_candidates(
-        self, templates, on_progress=None, on_found=None, cancel=None
+        self,
+        templates,
+        on_progress=None,
+        on_found=None,
+        cancel=None,
+        max_pages=ENGINE_DEFAULTS["reward_scan_max_pages"],
     ) -> list[dict]:
-        """共享发现:抓全量奖励市场,按品类交集采集阶段排除,打 tags,补精确奖励。
-        钱包无关、网络密集(rewards 端点)、不抓订单簿、不算价。"""
+        """共享发现:抓各需要品类的奖励市场并集(不勾「其他」不抓全品类),打 tags,
+        补精确奖励。钱包无关、网络密集(rewards 端点)、不抓订单簿、不算价。"""
         union = included_union(templates)
         inc_other = any_include_other(templates)
-        # 只查用得上的品类:收「其他」时判其他绕不开、必须查全 14;否则只需 included 并集
-        # (没被任何模板勾、又没人收其他的市场,market_wanted 本就丢弃,精确 tags 无所谓)。
+        # 只查用得上的品类:收「其他」时判其他绕不开、必须查全 14;否则只需 included 并集。
         slugs_needed = set(CATALOG_SLUGS) if inc_other else (union & set(CATALOG_SLUGS))
         floors = [t.get("min_reward_usd", 0) for t in templates]
         min_floor = min(floors) if floors else 0
 
-        full = self.api.get_rewards_markets()
-
-        def _tag_slug(slug):  # 对整份 catalog 打标签(否则"其他"判定不准)
+        def _tag_slug(slug):  # 返回整条记录(用于并入候选池 + 建 cid 集打标签)
             try:
-                rows = self.api.get_rewards_markets(tag_slug=slug)
-                return slug, {m.get("condition_id", "") for m in rows}
+                rows = self.api.get_rewards_markets(tag_slug=slug, max_pages=max_pages)
+                return slug, rows
             except Exception as e:
-                # 单个品类查询失败不拖垮整轮发现(奖励端点偶发 500):该 slug 记空集,
-                # 其命中市场退化为"其他"(include_other 时仍会被采集)。尤其冷启动无缓存池
-                # 时,避免一次抖动导致整池空、全不下单。与 category_counts 的容错口径一致。
+                # 单个品类查询失败不拖垮整轮发现(奖励端点偶发 500):该 slug 记空,
+                # 其命中市场退化为「其他」(include_other 时仍会被 full 收)。
                 logger.warning(
                     "Discovery tag_slug %s failed (treated as empty): %s", slug, e
                 )
-                return slug, set()
+                return slug, []
 
-        # 只查 slugs_needed 各一次奖励端点:并发拉。原固定全 14 是历史包袱——只勾少数品类
-        # 且不收「其他」时,其余品类查了也会被 market_wanted 丢掉(2026-07-05 提速)。
-        category_ids = dict(_parallel_map(_tag_slug, slugs_needed))
+        # 只查 slugs_needed 各一次奖励端点,并发拉;每 slug 保留整条记录。
+        slug_rows = dict(_parallel_map(_tag_slug, slugs_needed))
+        category_ids = {
+            slug: {m.get("condition_id", "") for m in rows}
+            for slug, rows in slug_rows.items()
+        }
 
-        # 顺带算一份品类计数快照(配置页勾选用),直接复用刚查到的 tag 数据。仅当查了全 14
-        # 才算得出正确的全量计数/「其他」数;只查子集时不覆盖(保留上一份缓存,配置页走
-        # 缓存/手动刷新)。
+        # full(不带品类=全品类)仅在有号收「其他」时需要:用来捞无 curated 标签的市场。
+        # 不勾「其他」的号(如天气号)彻底跳过这次全品类抓取——正是它当初把低奖励品类
+        # 挤出前 500、造成候选偏少的根因。
+        full = self.api.get_rewards_markets(max_pages=max_pages) if inc_other else []
+
+        # 品类计数快照(配置页勾选用):仅当查了全 14(即 inc_other,full 有值)才算得准。
         if slugs_needed == set(CATALOG_SLUGS):
             self.last_catalog = self._catalog_payload(full, category_ids)
 
-        pool = tag_pool(full, category_ids, slugs_needed)
+        # 候选池 = 各需要品类 tag 记录按 cid 去重的并集;inc_other 再并入 full(补「其他」)。
+        by_cid = {}
+        for slug in slugs_needed:
+            for market in slug_rows.get(slug, []):
+                cid = market.get("condition_id", "")
+                if cid and cid not in by_cid:
+                    by_cid[cid] = market
+        if inc_other:
+            for market in full:
+                cid = market.get("condition_id", "")
+                if cid and cid not in by_cid:
+                    by_cid[cid] = market
+
+        pool = tag_pool(list(by_cid.values()), category_ids, slugs_needed)
         blacklist = self.db.get_blacklist_ids()
 
         # 先无网络地筛出「想要且过粗筛」的市场(黑名单/品类/奖励地板),再**并发**拉每
@@ -260,11 +280,16 @@ class MarketScanner:
         on_found=None,
         skip_orderbook=False,
         cancel=None,
+        max_pages=ENGINE_DEFAULTS["reward_scan_max_pages"],
     ) -> list[dict]:
         """共享采集 = 发现 + (除非 skip_orderbook)刷新订单簿。手动扫描/单测用。
         cancel(): 返回 True 时在最近的检查点抛 ScanSuperseded 让位(手动重扫接管)。"""
         pool = self.discover_candidates(
-            templates, on_progress=on_progress, on_found=on_found, cancel=cancel
+            templates,
+            on_progress=on_progress,
+            on_found=on_found,
+            cancel=cancel,
+            max_pages=max_pages,
         )
         if not skip_orderbook:
             self.refresh_orderbooks(pool, cancel=cancel)

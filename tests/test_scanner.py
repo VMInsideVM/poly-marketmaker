@@ -153,6 +153,112 @@ class TestFetchCandidatesCategoryWiring:
         )
         assert all("order_price" not in m for m in pool)
 
+    def test_tag_market_not_in_full_still_included(self):
+        # W 只在 weather tag 查询里,不在(不带品类的)full —— 修前被 tag_pool 丢掉。
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [{"condition_id": "HI", "tokens": [], "rewards_config": []}]
+            if tag_slug == "weather":
+                return [{"condition_id": "W", "tokens": [], "rewards_config": []}]
+            return []
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        pool = scanner.fetch_candidates(
+            [
+                {
+                    "included_categories": ["weather"],
+                    "include_other": False,
+                    "min_reward_usd": 0,
+                }
+            ],
+            skip_orderbook=True,
+        )
+        assert {m["condition_id"] for m in pool} == {"W"}
+
+    def test_no_untagged_full_fetch_when_not_include_other(self):
+        # include_other=False 不应触发不带品类的 full 抓取。
+        def fake_rewards(tag_slug=None, **kw):
+            return (
+                [{"condition_id": "W", "tokens": [], "rewards_config": []}]
+                if tag_slug == "weather"
+                else []
+            )
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        scanner.fetch_candidates(
+            [
+                {
+                    "included_categories": ["weather"],
+                    "include_other": False,
+                    "min_reward_usd": 0,
+                }
+            ],
+            skip_orderbook=True,
+        )
+        assert all(
+            c.kwargs.get("tag_slug") is not None
+            for c in api.get_rewards_markets.call_args_list
+        ), "include_other=False 不应调用不带品类的 get_rewards_markets"
+
+    def test_same_market_in_two_slugs_deduped(self):
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug in ("weather", "politics"):
+                return [{"condition_id": "X", "tokens": [], "rewards_config": []}]
+            return []
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        pool = scanner.fetch_candidates(
+            [
+                {
+                    "included_categories": ["weather", "politics"],
+                    "include_other": False,
+                    "min_reward_usd": 0,
+                }
+            ],
+            skip_orderbook=True,
+        )
+        assert [m["condition_id"] for m in pool] == ["X"]
+
+    def test_max_pages_threaded_to_every_rewards_call(self):
+        def fake_rewards(tag_slug=None, max_pages=5, **kw):
+            return (
+                [{"condition_id": "W", "tokens": [], "rewards_config": []}]
+                if tag_slug == "weather"
+                else []
+            )
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        scanner = MarketScanner(api, db, "")
+        scanner.fetch_candidates(
+            [
+                {
+                    "included_categories": ["weather"],
+                    "include_other": False,
+                    "min_reward_usd": 0,
+                }
+            ],
+            skip_orderbook=True,
+            max_pages=17,
+        )
+        assert api.get_rewards_markets.call_args_list  # 至少调用过一次
+        for c in api.get_rewards_markets.call_args_list:
+            assert c.kwargs.get("max_pages") == 17
+
 
 class TestDiscoverAndRefreshSplit:
     def test_discover_candidates_has_no_orderbooks(self):
