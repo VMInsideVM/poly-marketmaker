@@ -590,32 +590,54 @@ class Database:
         )
         self.conn.commit()
 
+    def _actions_filter(self, wallet, start, end, action_types):
+        """构造 actions 查询的 WHERE 子句 + 参数(get_actions / count_actions 共用)。"""
+        clause = "WHERE 1=1"
+        params = []
+        if wallet:
+            clause += " AND wallet = ?"
+            params.append(wallet)
+        if start:
+            clause += " AND created_at >= ?"
+            params.append(start)
+        if end:
+            clause += " AND created_at <= ?"
+            params.append(end)
+        if action_types:
+            placeholders = ",".join("?" * len(action_types))
+            clause += f" AND action_type IN ({placeholders})"
+            params.extend(action_types)
+        return clause, params
+
     def get_actions(
         self,
         wallet: str = None,
         start: float = None,
         end: float = None,
         action_types: list[str] = None,
+        limit: int = None,
+        offset: int = 0,
     ) -> list[dict]:
+        clause, params = self._actions_filter(wallet, start, end, action_types)
+        query = f"SELECT * FROM actions {clause} ORDER BY created_at DESC, id DESC"
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params = params + [int(limit), int(offset)]
         c = self.conn.cursor()
-        query = "SELECT * FROM actions WHERE 1=1"
-        params = []
-        if wallet:
-            query += " AND wallet = ?"
-            params.append(wallet)
-        if start:
-            query += " AND created_at >= ?"
-            params.append(start)
-        if end:
-            query += " AND created_at <= ?"
-            params.append(end)
-        if action_types:
-            placeholders = ",".join("?" * len(action_types))
-            query += f" AND action_type IN ({placeholders})"
-            params.extend(action_types)
-        query += " ORDER BY created_at DESC, id DESC"
         c.execute(query, params)
         return [dict(row) for row in c.fetchall()]
+
+    def count_actions(
+        self,
+        wallet: str = None,
+        start: float = None,
+        end: float = None,
+        action_types: list[str] = None,
+    ) -> int:
+        clause, params = self._actions_filter(wallet, start, end, action_types)
+        c = self.conn.cursor()
+        c.execute(f"SELECT COUNT(*) FROM actions {clause}", params)
+        return c.fetchone()[0]
 
     # --- Cooldowns ---
 

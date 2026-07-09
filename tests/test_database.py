@@ -347,6 +347,38 @@ class TestActions:
         assert rows[0]["reason"] == "second"
         assert rows[1]["reason"] == "first"
 
+    def test_get_actions_limit_returns_most_recent(self, db):
+        for i in range(5):
+            db.record_action(
+                "0xA", "m", "take_profit_sell", "卖出", 0.1, 1, f"a{i}", "b"
+            )
+        rows = db.get_actions(limit=2)
+        assert [r["reason"] for r in rows] == ["a4", "a3"]
+
+    def test_get_actions_limit_offset_slices(self, db):
+        for i in range(5):
+            db.record_action(
+                "0xA", "m", "take_profit_sell", "卖出", 0.1, 1, f"a{i}", "b"
+            )
+        rows = db.get_actions(limit=2, offset=2)
+        assert [r["reason"] for r in rows] == ["a2", "a1"]
+
+    def test_get_actions_no_limit_returns_all(self, db):
+        for i in range(5):
+            db.record_action(
+                "0xA", "m", "take_profit_sell", "卖出", 0.1, 1, f"a{i}", "b"
+            )
+        assert len(db.get_actions()) == 5
+
+    def test_count_actions_total_and_filters(self, db):
+        db.record_action("0xA", "m", "take_profit_sell", "卖出", 0.3, 1, "r", "b")
+        db.record_action("0xA", "m", "cancel_remainder", "-", -1, 0, "r", "b")
+        db.record_action("0xB", "m", "cancel_remainder", "-", -1, 0, "r", "b")
+        assert db.count_actions() == 3
+        assert db.count_actions(wallet="0xA") == 2
+        assert db.count_actions(action_types=["cancel_remainder"]) == 2
+        assert db.count_actions(wallet="0xA", action_types=["cancel_remainder"]) == 1
+
 
 class TestEligibleMarkets:
     def test_min_cost_round_trips(self, db):
