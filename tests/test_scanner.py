@@ -815,3 +815,28 @@ class TestDiscoverNeededSlugsOnly:
         ]
         scanner.discover_candidates(templates)
         assert getattr(scanner, "last_catalog", None) is None
+
+    def test_all_categories_checked_without_include_other_does_not_set_last_catalog(
+        self,
+    ):
+        # 勾满全 14 个 curated 品类、但不勾「其他」:slugs_needed 覆盖全 14,可 inc_other=False
+        # 时 full 从未抓取——算出的计数会是假的全零,不能只看 slugs_needed 是否覆盖全 14,必须连同
+        # inc_other 一起判(2026-07-09 review 发现的回归:曾经零计数还挂 ready=True 骗过配置页)。
+        from config import CATALOG_SLUGS
+
+        def fake_rewards(tag_slug=None, **kw):
+            if tag_slug is None:
+                return [{"condition_id": "W", "tokens": [], "rewards_config": []}]
+            return []
+
+        api, db = self._api_db(fake_rewards)
+        scanner = MarketScanner(api, db, "")
+        templates = [
+            {
+                "included_categories": list(CATALOG_SLUGS),
+                "include_other": False,
+                "min_reward_usd": 0,
+            }
+        ]
+        scanner.discover_candidates(templates)
+        assert getattr(scanner, "last_catalog", None) is None

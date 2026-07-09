@@ -151,7 +151,9 @@ class MarketScanner:
         full = self.api.get_rewards_markets(max_pages=max_pages) if inc_other else []
 
         # 品类计数快照(配置页勾选用):仅当查了全 14(即 inc_other,full 有值)才算得准。
-        if slugs_needed == set(CATALOG_SLUGS):
+        # 光 slugs_needed 覆盖全 14 不够——勾满 14 个 curated 品类但不勾「其他」时同样会覆盖全 14,
+        # 但 full 从未抓取,算出的计数会是假的全零(2026-07-09 review 发现的回归)。
+        if inc_other and slugs_needed == set(CATALOG_SLUGS):
             self.last_catalog = self._catalog_payload(full, category_ids)
 
         # 候选池 = 各需要品类 tag 记录按 cid 去重的并集;inc_other 再并入 full(补「其他」)。
