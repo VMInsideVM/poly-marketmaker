@@ -7,6 +7,21 @@ from unittest.mock import MagicMock
 from engine.scanner import MarketScanner
 
 
+def _tier(size, shares=None, **over):
+    t = {
+        "size": size,
+        "enabled": True,
+        "shares": shares or size,
+        "rule1_min_coeff": 0,
+        "rule2_min_coeff": 0,
+        "rule3_min_coeff": 0,
+        "gap_high_coeff_sum_min": 20,
+        "amount_value_table": [{"upper": 1.0, "value": 1}],
+    }
+    t.update(over)
+    return t
+
+
 def _future_date(days=10):
     """Return a date string N days in the future."""
     dt = datetime.now() + timedelta(days=days)
@@ -370,6 +385,7 @@ class TestFilterForTemplate:
             "min_settlement_days": 0,
             "included_categories": ["esports", "politics"],
             "include_other": True,
+            "size_tiers": [_tier(100)],
         }
         t.update(over)
         return t
@@ -433,9 +449,9 @@ class TestFilterForTemplate:
         e = out[0]
         assert e["token_id"] and "rewards_min_size" in e and "rewards_max_spread" in e
 
-    def test_min_size_over_250_excluded(self):
+    def test_no_matching_tier_excluded(self):
         scanner = self._scanner()
-        # 单份奖励够高且总额够,但 min_size 300 > 250 -> 剔除
+        # 奖励够高,但 min_size 300 没有任何已启用档位模块能精确对上 -> 剔除。
         pool = [self._candidate("C", [], daily_reward=200, min_size=300)]
         assert scanner.filter_for_template(pool, self._template(), "0xW") == []
 
@@ -493,24 +509,43 @@ class TestFilterForTemplate:
         tmpl = self._template(min_settlement_days=2, max_settlement_days=3)
         assert self._ids(scanner, pool=[c], tmpl=tmpl) == {"NODATE"}
 
-    def test_rewards_min_size_exact_match_only(self):
+    def test_tier_exact_match_only(self):
         scanner = self._scanner()
         pool = [
             self._candidate("A", [], daily_reward=20, min_size=20),
             self._candidate("B", [], daily_reward=50, min_size=50),
         ]
-        tmpl = self._template(rewards_min_size_min=20, rewards_min_size_max=20)
+        tmpl = self._template(size_tiers=[_tier(20)])
         out = scanner.filter_for_template(pool, tmpl, "0xW")
         assert {e["rewards_min_size"] for e in out} == {20}
 
-    def test_rewards_min_size_default_range_passes_all(self):
+    def test_multiple_enabled_tiers_pass_their_sizes(self):
         scanner = self._scanner()
         pool = [
             self._candidate("A", [], daily_reward=20, min_size=20),
             self._candidate("B", [], daily_reward=50, min_size=50),
         ]
-        out = scanner.filter_for_template(pool, self._template(), "0xW")
+        tmpl = self._template(size_tiers=[_tier(20), _tier(50)])
+        out = scanner.filter_for_template(pool, tmpl, "0xW")
         assert {e["rewards_min_size"] for e in out} == {20, 50}
+
+    def test_disabled_tier_excluded(self):
+        scanner = self._scanner()
+        pool = [
+            self._candidate("A", [], daily_reward=20, min_size=20),
+            self._candidate("B", [], daily_reward=50, min_size=50),
+        ]
+        tmpl = self._template(size_tiers=[_tier(20), _tier(50, enabled=False)])
+        out = scanner.filter_for_template(pool, tmpl, "0xW")
+        assert {e["rewards_min_size"] for e in out} == {20}
+
+    def test_no_tiers_yields_empty(self):
+        scanner = self._scanner()
+        pool = [self._candidate("A", [], daily_reward=20, min_size=20)]
+        assert (
+            scanner.filter_for_template(pool, self._template(size_tiers=[]), "0xW")
+            == []
+        )
 
 
 class TestCategoryCounts:

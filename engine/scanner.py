@@ -31,6 +31,7 @@ from engine.categories import (
 )
 from config import CATALOG_SLUGS, CATEGORY_CATALOG, ENGINE_DEFAULTS
 from engine.strategy import reward_price_range
+from engine.tiers import enabled_sizes
 from api.proxy import use_proxy, current_proxy
 
 logger = logging.getLogger(__name__)
@@ -378,6 +379,7 @@ class MarketScanner:
         max_days = template.get("max_settlement_days")  # None=不限上限
         included = set(template.get("included_categories", []) or [])
         include_other = bool(template.get("include_other", False))
+        tier_sizes = enabled_sizes(template.get("size_tiers") or [])
 
         eligible = []
         for market in candidate_pool:
@@ -400,10 +402,8 @@ class MarketScanner:
                 continue  # 该钱包对此市场仍在冷却(与旧 scan 口径一致)
             max_spread_reward = float(market.get("rewards_max_spread", 2))
             min_size = int(market.get("rewards_min_size", 0) or 0)
-            # 最低份额范围筛选(可配);硬顶 250(超档无取档)。默认 1/250 = 放行全部合法档。
-            size_lo = max(1, int(template.get("rewards_min_size_min", 1) or 1))
-            size_hi = min(250, int(template.get("rewards_min_size_max", 250) or 250))
-            if not (size_lo <= min_size <= size_hi):
+            # 档位模块精确匹配:最低份额必须等于某个已启用模块的档位值,否则不做。
+            if min_size not in tier_sizes:
                 continue
             neg_risk = market.get("neg_risk", False)
             books = market.get("_orderbooks", {})

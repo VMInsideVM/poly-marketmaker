@@ -44,6 +44,18 @@ def _template():
         "min_settlement_days": 0,
         "included_categories": [],
         "include_other": True,
+        "size_tiers": [
+            {
+                "size": 100,
+                "enabled": True,
+                "shares": 100,
+                "rule1_min_coeff": 0,
+                "rule2_min_coeff": 0,
+                "rule3_min_coeff": 0,
+                "gap_high_coeff_sum_min": 20,
+                "amount_value_table": [{"upper": 1.0, "value": 1}],
+            }
+        ],
     }
 
 
