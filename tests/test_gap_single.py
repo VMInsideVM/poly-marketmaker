@@ -656,3 +656,37 @@ def test_preview_skip_has_none_chosen_shares():
     )
     out = preview_gap_single_market(side, None, AV, 10, 5, 20, 0, 0, 0, 0, shares=40)
     assert out["a"]["action"] == "skip" and out["a"]["chosen_shares"] is None
+
+
+def test_compute_default_shares_uses_each_sides_min_size():
+    # 参数完整性:shares=None 时 b 侧须用自己的 min_size(30),
+    # 不得被 a 侧的循环局部量(20)污染——污染时 b 侧会被误判 <min_size 整边丢弃。
+    side_a = dict(_side([_b(0.28, 200)]), min_size=20)
+    side_b = dict(_side([_b(0.28, 200)]), min_size=30)
+    out = compute_market_single_orders(
+        side_a, side_b, 100.0, 500, AV, 10, 5, 20, 0, 0, 0
+    )
+    assert out["a"] == [(0.28, 20)]
+    assert out["b"] == [(0.28, 30)]
+
+
+def test_compute_shares_param_survives_side_a_budget_cap():
+    # a 侧被预算封顶成 31 份后,b 侧仍须用配置的 40 份(而非被污染的 31)。
+    # b 侧用低价+放宽的奖励区间,使 a 封顶后剩余预算仍够 b 挂满 40。
+    side_a = {
+        "bids": [_b(0.30, 500)],
+        "reward_range_min": 0.10,
+        "reward_range_max": 0.31,
+        "min_size": 20,
+    }
+    side_b = {
+        "bids": [_b(0.005, 500)],
+        "reward_range_min": 0.001,
+        "reward_range_max": 0.31,
+        "min_size": 20,
+    }
+    out = compute_market_single_orders(
+        side_a, side_b, 9.59, 500, AV, 10, 5, 20, 0, 0, 0, shares=40
+    )
+    assert out["a"] == [(0.30, 31)]
+    assert out["b"] == [(0.005, 40)]

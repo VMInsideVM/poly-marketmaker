@@ -310,16 +310,16 @@ def compute_market_single_orders(
         )
         if plan is None:
             continue
-        price, shares = plan
+        price, placed = plan
         remaining_usd = market_budget_usd - spent_usd
         cap_usd = int(remaining_usd / price) if price > 0 else 0
         cap_shares = max_exposure_shares - spent_shares
-        shares = min(shares, cap_usd, cap_shares)
-        if shares < side["min_size"]:
+        placed = min(placed, cap_usd, cap_shares)
+        if placed < side["min_size"]:
             continue
-        out[key].append((price, shares))
-        spent_usd += price * shares
-        spent_shares += shares
+        out[key].append((price, placed))
+        spent_usd += price * placed
+        spent_shares += placed
     return out
 
 
