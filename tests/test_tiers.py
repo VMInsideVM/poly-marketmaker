@@ -73,6 +73,14 @@ class TestValidateSizeTiers:
         tiers, err = validate_size_tiers([_tier(20, rule1_min_coeff=-1)])
         assert tiers is None and err
 
+    def test_float_size_rejected_not_truncated(self):
+        tiers, err = validate_size_tiers([_tier(20.5, shares=40)])
+        assert tiers is None and "整数" in err
+
+    def test_float_shares_rejected_not_truncated(self):
+        tiers, err = validate_size_tiers([_tier(20, shares=30.5)])
+        assert tiers is None and "整数" in err
+
 
 def test_template_defaults_has_size_tiers():
     from config import TEMPLATE_DEFAULTS

@@ -48,8 +48,12 @@ def validate_size_tiers(raw):
         if not isinstance(t, dict):
             return None, f"第 {i + 1} 个档位不是对象"
         try:
-            size = int(t.get("size"))
-            shares = int(t.get("shares"))
+            size_raw = t.get("size")
+            shares_raw = t.get("shares")
+            size = int(size_raw)
+            shares = int(shares_raw)
+            if float(size_raw) != size or float(shares_raw) != shares:
+                return None, f"第 {i + 1} 个档位的档位值/挂单份数必须是整数"
         except (TypeError, ValueError):
             return None, f"第 {i + 1} 个档位的档位值/挂单份数必须是整数"
         if size <= 0:
