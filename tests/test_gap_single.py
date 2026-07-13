@@ -26,6 +26,7 @@ def _plan(
     x2=0,
     x3=0,
     cliff=0,
+    shares=None,
 ):
     return plan_gap_single_order(
         bids,
@@ -40,6 +41,7 @@ def _plan(
         x2,
         x3,
         cliff_probe_cents=cliff,
+        shares=shares,
     )
 
 
@@ -593,3 +595,64 @@ def test_preview_threads_cliff_probe():
     )
     assert out["a"]["action"] == "skip"
     assert out["a"]["cliff"] is True
+
+
+def test_shares_param_overrides_min_size():
+    # 档位模块配 40 份 -> 挂 40 份(不再等于 min_size 20)。
+    out = _plan([_b(0.28, 50), _b(0.27, 40)], shares=40)
+    assert out == (0.28, 40)
+
+
+def test_shares_default_none_keeps_min_size():
+    out = _plan([_b(0.28, 50), _b(0.27, 40)])
+    assert out == (0.28, 20)
+
+
+def test_coeff_still_uses_min_size_not_shares():
+    # 系数按市场最低份额算:50/(20×2)=1.25 > 门槛 1.2 -> 挂。
+    # 若误用 shares=40 会算成 0.625 < 1.2 被拒,本测试即失败。
+    out = _plan([_b(0.28, 50), _b(0.27, 40)], x3=1.2, shares=40)
+    assert out == (0.28, 40)
+
+
+def test_compute_budget_caps_shares_but_keeps_above_min_size():
+    # 配置 40 份、预算只够 30 份(30 ≥ min_size 20)-> 照挂 30(资格线以上不放弃)。
+    # 7.6/0.25 = 30.4 -> 封顶 30。
+    out = compute_market_single_orders(
+        _side([_b(0.25, 50)]), None, 7.6, 500, AV, 10, 5, 20, 0, 0, 0, shares=40
+    )
+    assert out["a"] == [(0.25, 30)]
+
+
+def test_compute_budget_below_min_size_drops_side():
+    # 2.6/0.25 = 10.4 -> 封顶 10 < min_size 20 -> 放弃该侧。
+    out = compute_market_single_orders(
+        _side([_b(0.25, 50)]), None, 2.6, 500, AV, 10, 5, 20, 0, 0, 0, shares=40
+    )
+    assert out["a"] == []
+
+
+def test_preview_reports_chosen_shares():
+    side = dict(
+        _side([_b(0.28, 50)]),
+        outcome="YES",
+        token_id="t",
+        best_bid=0.28,
+        best_ask=0.31,
+        spread_cents=3.0,
+    )
+    out = preview_gap_single_market(side, None, AV, 10, 5, 20, 0, 0, 0, 0, shares=40)
+    assert out["a"]["action"] == "place" and out["a"]["chosen_shares"] == 40
+
+
+def test_preview_skip_has_none_chosen_shares():
+    side = dict(
+        _side([]),  # 无买档 -> skip
+        outcome="YES",
+        token_id="t",
+        best_bid=None,
+        best_ask=None,
+        spread_cents=None,
+    )
+    out = preview_gap_single_market(side, None, AV, 10, 5, 20, 0, 0, 0, 0, shares=40)
+    assert out["a"]["action"] == "skip" and out["a"]["chosen_shares"] is None

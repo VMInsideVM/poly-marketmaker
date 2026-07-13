@@ -39,6 +39,7 @@ def explain_gap_single_order(
     rule2_min_coeff,
     rule3_min_coeff,
     cliff_probe_cents=0,
+    shares=None,
 ):
     """网关式单档挂单的完整判断(纯函数,不下单)。
 
@@ -53,7 +54,7 @@ def explain_gap_single_order(
       gate_passed: 规则1 闸门是否通过;规则2/3 恒 True;rule=None 为 False
       levels: 区间内买档(价降序),每项 {price,size,coeff,high_side,chosen}
       chosen_index: 选中档在 levels 的下标;跳过为 None
-      price/shares: 选中档价 / int(min_size);跳过为 None
+      price/shares: 选中档价 / int(shares)(缺省=min_size,即档位模块的挂单份数);跳过为 None
       skip_reason: 跳过原因(中文);挂单为 None
       cliff: 是否因奖励区间下方悬崖(无买档支撑)否决;默认 False
     归级口径:价差 10/5 归中一级(规则1 严格 >宽、规则3 严格 <中);高位系数和 ==
@@ -149,7 +150,7 @@ def explain_gap_single_order(
             d["action"] = "place"
             d["chosen_index"] = idx
             d["price"] = lv["price"]
-            d["shares"] = int(min_size)
+            d["shares"] = int(shares) if shares is not None else int(min_size)
             return d
     d["skip_reason"] = (
         f"规则{rule}(最大断层{max_gap:g}¢):无档系数 > 门槛 {min_coeff:g} → 不挂"
@@ -170,6 +171,7 @@ def plan_gap_single_order(
     rule2_min_coeff,
     rule3_min_coeff,
     cliff_probe_cents=0,
+    shares=None,
 ):
     """网关式单档挂单(v4 用户策略)。explain_gap_single_order 的薄壳:
     返回 (price, shares) 或 None(不挂)。完整判断依据见 explain_gap_single_order。"""
@@ -185,7 +187,8 @@ def plan_gap_single_order(
         rule1_min_coeff,
         rule2_min_coeff,
         rule3_min_coeff,
-        cliff_probe_cents,
+        cliff_probe_cents=cliff_probe_cents,
+        shares=shares,
     )
     return (d["price"], d["shares"]) if d["action"] == "place" else None
 
@@ -275,11 +278,13 @@ def compute_market_single_orders(
     rule2_min_coeff,
     rule3_min_coeff,
     cliff_probe_cents=0,
+    shares=None,
 ):
     """两边共享敞口的网关式单档计划(每边至多一单)。
 
     对每边调 plan_gap_single_order,再按剩余预算/敞口封顶;封顶后不足 min_size 则放弃
     该边(不挂残档)。a 先于 b 扣预算。
+    shares=档位模块配置的挂单份数(None=挂 min_size);封顶后不足 min_size(奖励资格线)才放弃该边。
     返回 {"a":[(price,shares)]|[], "b":[...]}。
     """
     out = {"a": [], "b": []}
@@ -300,7 +305,8 @@ def compute_market_single_orders(
             rule1_min_coeff,
             rule2_min_coeff,
             rule3_min_coeff,
-            cliff_probe_cents,
+            cliff_probe_cents=cliff_probe_cents,
+            shares=shares,
         )
         if plan is None:
             continue
@@ -365,6 +371,7 @@ def preview_gap_single_market(
     rule2_min_coeff,
     rule3_min_coeff,
     cliff_probe_cents=0,
+    shares=None,
 ):
     """两边的网关式单档只读预演:对每边调 explain_gap_single_order,组装展示用 side。
 
@@ -392,7 +399,8 @@ def preview_gap_single_market(
             rule1_min_coeff,
             rule2_min_coeff,
             rule3_min_coeff,
-            cliff_probe_cents,
+            cliff_probe_cents=cliff_probe_cents,
+            shares=shares,
         )
         out[key] = {
             "outcome": side.get("outcome", ""),
@@ -410,6 +418,7 @@ def preview_gap_single_market(
             "action": d["action"],
             "chosen_index": d["chosen_index"],
             "chosen_price": d["price"],
+            "chosen_shares": d["shares"],
             "skip_reason": d["skip_reason"],
             "cliff": d["cliff"],
             "levels": d["levels"],
