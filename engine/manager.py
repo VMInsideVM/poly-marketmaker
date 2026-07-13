@@ -50,6 +50,9 @@ class WalletWorker:
         # gap_single 「判成不挂」的去重:token -> 上次记录的原因(None=上次是挂单),
         # 只在判断变化时记 gap_skip,避免每轮下单都往历史刷同一条跳过。
         self._last_gap_skip: dict = {}
+        # 净值快照:上次快照的本地日期(YYYY-MM-DD)。None=本进程还没记过 ->
+        # 首个 tick 必记(覆盖引擎启动/单钱包启动/手动启动监控),之后跨天才再记。
+        self._last_networth_date = None
 
     def start(self):
         self._stop_event.clear()
@@ -107,12 +110,34 @@ class WalletWorker:
         exit, strategy compliance. check_resolution runs right after fill
         detection to cancel buys in any market whose UMA resolution was just
         proposed; check_exit then reflects the latest fills."""
+        self._maybe_snapshot_networth()
         self.monitor.begin_status_tick()
         self.monitor.check_buy_orders()
         self.monitor.check_resolution()
         self.monitor.check_exit()
         self.monitor.check_sell_orders()
         self.monitor.publish_status()
+
+    def _maybe_snapshot_networth(self):
+        """净值快照(现金+持仓市值):首个 tick 必记,之后每天补记一次。
+
+        失败只打 WARNING、不置日期 -> 下个 tick 自然重试;绝不阻断监控步骤。
+        持仓估值仅供展示(currentValue/curPrice),不进任何交易决策。
+        """
+        from engine.networth import positions_value, should_snapshot
+
+        today = time.strftime("%Y-%m-%d")
+        if not should_snapshot(self._last_networth_date, today):
+            return
+        try:
+            cash = self.api.get_balance()
+            positions = self.api.get_user_positions(self.api.get_funder())
+            self.db.record_net_worth(
+                self.wallet_address, cash, positions_value(positions)
+            )
+            self._last_networth_date = today
+        except Exception as e:
+            logger.warning("净值快照失败 %s: %s", self.wallet_address, e)
 
     @_worker_proxied
     def place_orders(
