@@ -82,6 +82,10 @@ TEMPLATE_DEFAULTS = {
         {"upper": 0.25, "value": 1.5},
         {"upper": 0.31, "value": 2},
     ],
+    # 档位模块:按市场最低奖励份额(rewards_min_size)精确匹配的挂单参数组。
+    # 每项 {size, enabled, shares, rule1/2/3_min_coeff, gap_high_coeff_sum_min,
+    # amount_value_table}。空列表 = 无档可匹配 = 不挂单。
+    "size_tiers": [],
 }
 
 # 向后兼容:仍暴露合并后的 DEFAULTS。get_settings() 在最后一个任务前仍以此为基准。
