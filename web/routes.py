@@ -292,6 +292,12 @@ def help_page():
     return render_template("help.html")
 
 
+@app.route("/networth")
+@login_required
+def networth_page():
+    return render_template("networth.html")
+
+
 @app.route("/api/monitor-status", methods=["GET"])
 @login_required
 def api_monitor_status():

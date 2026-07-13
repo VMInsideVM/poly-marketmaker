@@ -41,3 +41,10 @@ def test_networth_bad_days_falls_back_default(tmp_path, monkeypatch):
     db.record_net_worth("0xW", 1.0, 0.0)
     data = client.get("/api/networth?wallet=0xW&days=abc").get_json()
     assert len(data["series"]) == 1  # days 非法回落 90,不 500
+
+
+def test_networth_page_renders(tmp_path, monkeypatch):
+    client, db = _client_with_db(tmp_path, monkeypatch)
+    r = client.get("/networth")
+    assert r.status_code == 200
+    assert "资产曲线".encode() in r.data

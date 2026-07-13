@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>资产曲线</h1>
+<section class="config-section">
+    <div class="form-inline">
+        <label>钱包 <select id="nw-wallet"></select></label>
+        <label>查询某日 <input type="date" id="nw-date" onchange="queryDay()"></label>
+        <span id="nw-day-result" class="hint" style="color:#888"></span>
+    </div>
+    <div id="nw-chart-wrap" style="position:relative;margin-top:12px">
+        <svg id="nw-chart" viewBox="0 0 900 320" style="width:100%;height:320px;display:block"></svg>
+        <div id="nw-tip" style="display:none;position:absolute;pointer-events:none;background:rgba(0,0,0,.78);color:#fff;padding:6px 8px;border-radius:4px;font-size:12px;white-space:nowrap"></div>
+    </div>
+    <div id="nw-empty" class="hint" style="display:none;color:#888">暂无净值记录：启动引擎后每天自动记录一次。</div>
+    <p class="hint" style="color:#888;font-size:12px">净值 = 现金(pUSD) + 持仓市值（Data API 估值，仅供展示，不参与交易决策）。引擎启动时与运行中每天各记一次，同一天取最后一条。近一年数据。<span style="color:#4a90d9">━ 净值</span>　<span style="color:#999">━ 现金</span></p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let nwSeries = [];
+
+function loadWalletList() {
+    fetch('/api/wallets').then(r => r.json()).then(ws => {
+        const sel = document.getElementById('nw-wallet');
+        sel.innerHTML = ws.map(w =>
+            `<option value="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</option>`
+        ).join('');
+        sel.onchange = loadSeries;
+        if (ws.length) loadSeries(); else showEmpty(true);
+    });
+}
+
+function showEmpty(empty) {
+    document.getElementById('nw-empty').style.display = empty ? '' : 'none';
+    document.getElementById('nw-chart-wrap').style.display = empty ? 'none' : '';
+}
+
+function loadSeries() {
+    const w = document.getElementById('nw-wallet').value;
+    if (!w) { showEmpty(true); return; }
+    fetch(`/api/networth?wallet=${encodeURIComponent(w)}&days=365`)
+        .then(r => r.json())
+        .then(d => { nwSeries = d.series || []; drawChart(nwSeries); queryDay(); });
+}
+
+const PAD = {l: 60, r: 16, t: 12, b: 26}, W = 900, H = 320;
+
+function drawChart(series) {
+    const svg = document.getElementById('nw-chart');
+    svg.innerHTML = '';
+    if (!series.length) { showEmpty(true); return; }
+    showEmpty(false);
+    const maxV = Math.max(...series.map(p => p.total), 1);
+    const minV = Math.min(...series.map(p => Math.min(p.cash, p.total)), 0);
+    const x = i => series.length === 1 ? (PAD.l + (W - PAD.l - PAD.r) / 2)
+        : PAD.l + (W - PAD.l - PAD.r) * i / (series.length - 1);
+    const y = v => H - PAD.b - (H - PAD.t - PAD.b) * (v - minV) / (maxV - minV || 1);
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag, attrs) {
+        const e = document.createElementNS(NS, tag);
+        Object.keys(attrs).forEach(k => e.setAttribute(k, attrs[k]));
+        return e;
+    }
+    // 网格线 + 纵轴刻度(5 条)
+    for (let g = 0; g <= 4; g++) {
+        const v = minV + (maxV - minV) * g / 4;
+        const gy = y(v);
+        svg.appendChild(el('line', {x1: PAD.l, y1: gy, x2: W - PAD.r, y2: gy,
+            stroke: '#8884', 'stroke-width': 1}));
+        const t = el('text', {x: PAD.l - 6, y: gy + 4, 'text-anchor': 'end',
+            'font-size': 11, fill: '#888'});
+        t.textContent = v.toFixed(v >= 100 ? 0 : 2);
+        svg.appendChild(t);
+    }
+    // 首尾日期
+    [[0, 'start'], [series.length - 1, 'end']].forEach(pair => {
+        const t = el('text', {x: x(pair[0]), y: H - 8, 'text-anchor': pair[1],
+            'font-size': 11, fill: '#888'});
+        t.textContent = series[pair[0]].date;
+        svg.appendChild(t);
+    });
+    // 折线:净值主线 + 现金辅线
+    [['total', '#4a90d9', 2], ['cash', '#999', 1.2]].forEach(cfg => {
+        const pts = series.map((p, i) => `${x(i)},${y(p[cfg[0]])}`).join(' ');
+        svg.appendChild(el('polyline', {points: pts, fill: 'none',
+            stroke: cfg[1], 'stroke-width': cfg[2]}));
+    });
+    // 数据点(净值线):悬停显示当天明细
+    const tip = document.getElementById('nw-tip');
+    series.forEach((p, i) => {
+        const c = el('circle', {cx: x(i), cy: y(p.total), r: 4, fill: '#4a90d9', opacity: 0});
+        c.addEventListener('mouseenter', ev => {
+            c.setAttribute('opacity', 1);
+            tip.innerHTML = `${p.date}<br>净值 ${p.total.toFixed(2)}<br>现金 ${p.cash.toFixed(2)} · 持仓 ${p.positions_value.toFixed(2)}`;
+            tip.style.display = '';
+            const box = document.getElementById('nw-chart-wrap').getBoundingClientRect();
+            tip.style.left = Math.min(ev.clientX - box.left + 12, box.width - 170) + 'px';
+            tip.style.top = (ev.clientY - box.top - 10) + 'px';
+        });
+        c.addEventListener('mouseleave', () => { c.setAttribute('opacity', 0); tip.style.display = 'none'; });
+        svg.appendChild(c);
+    });
+}
+
+function queryDay() {
+    const d = document.getElementById('nw-date').value;
+    const out = document.getElementById('nw-day-result');
+    if (!d) { out.textContent = ''; return; }
+    const hit = nwSeries.find(p => p.date === d);
+    out.textContent = hit
+        ? `${d}：净值 ${hit.total.toFixed(2)}（现金 ${hit.cash.toFixed(2)} + 持仓 ${hit.positions_value.toFixed(2)}）`
+        : `${d}：无记录`;
+}
+
+loadWalletList();
+</script>
+{% endblock %}
