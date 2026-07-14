@@ -62,14 +62,6 @@
                 <span class="hint">与上项合成结算窗口：只做今天填 0/0，今天+明天填 0/1，只做明天填 1/1，两天以后填 2/空</span>
             </div>
             <div class="form-group">
-                <label>奖励最低份额下限</label>
-                <input type="number" name="rewards_min_size_min" step="1">
-            </div>
-            <div class="form-group">
-                <label>奖励最低份额上限</label>
-                <input type="number" name="rewards_min_size_max" step="1">
-            </div>
-            <div class="form-group">
                 <label>止损方式</label>
                 <select name="stop_loss_mode" id="stop-loss-mode" onchange="updateStopMode()">
                     <option value="percent">按比例（占成本 %）</option>
@@ -104,13 +96,9 @@
             <div class="form-grid">
                 <div class="form-group"><label>宽断层阈值 (美分，&gt;此值走规则1)</label><input type="number" name="gap_wide_cents" step="0.1"></div>
                 <div class="form-group"><label>中断层阈值 (美分，≥此值走规则2)</label><input type="number" name="gap_mid_cents" step="0.1"></div>
-                <div class="form-group"><label>规则1 高位风险系数和门槛</label><input type="number" name="gap_high_coeff_sum_min" step="0.1"></div>
-                <div class="form-group"><label>规则1 选档系数门槛（宽断层，&gt;此值才挂）</label><input type="number" name="rule1_min_coeff" step="0.1"></div>
-                <div class="form-group"><label>规则2 选档系数门槛（中断层，&gt;此值才挂）</label><input type="number" name="rule2_min_coeff" step="0.1"></div>
-                <div class="form-group"><label>规则3 选档系数门槛（密盘，&gt;此值才挂）</label><input type="number" name="rule3_min_coeff" step="0.1"></div>
                 <div class="form-group"><label>悬崖探测 (美分，区间下沿往下此距离内无买档则该侧不挂；0=关)</label><input type="number" name="cliff_probe_cents" step="0.1"></div>
             </div>
-            <p class="hint" style="color:#888;font-size:12px">按买单簿「奖励区间内相邻档最大价差」把整个市场归到三级之一：&gt;宽断层→规则1（再查断层上方各档风险系数之和≥门槛，不过则整市场不挂）；中~宽→规则2；&lt;中→规则3。归到哪级就用哪级的「选档系数门槛」，从买一往下取第一个「风险系数&gt;该门槛」的档，挂最低份数一单。风险系数＝盘口量÷(最低份数×金额数值)，金额数值用下方表。</p>
+            <p class="hint" style="color:#888;font-size:12px">按买单簿「奖励区间内相邻档最大价差」把整个市场归到三级之一：&gt;宽断层→规则1（再查断层上方各档风险系数之和≥门槛，不过则整市场不挂）；中~宽→规则2；&lt;中→规则3。各级的「选档系数门槛」「高位系数和门槛」「金额数值表」按下方档位模块逐档配置。风险系数＝盘口量÷(最低份数×金额数值)。</p>
         </div>
         <div class="form-group">
             <label>止盈方式</label>
@@ -128,13 +116,10 @@
         <label class="cat-other"><input type="checkbox" id="include-other"> 其他/未分类<span id="other-count"></span></label>
         <p class="hint" style="color:#888;font-size:12px">括号内是当前该品类的市场数：每次「扫描市场」后自动更新，也可点上方「刷新计数」手动拉取；没有计数不影响勾选。勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。</p>
 
-        <h3>金额数值表</h3>
-        <div class="form-group" id="amount-value-group">
-            <label>金额数值表（价格档[美分] → 数值；价超此表则该档不挂）</label>
-            <div id="amount-value-rows"></div>
-            <button type="button" class="btn" onclick="addAmountRow()">+ 价格档</button>
-        </div>
-        <p class="hint" style="color:#888;font-size:12px">金额数值供算风险系数用：风险系数＝盘口量 ÷ (最低份数 × 金额数值)，价越高系数越低；价超此表则该档不挂。</p>
+        <h3>档位模块（按市场最低奖励份额精确匹配）</h3>
+        <div id="size-tiers"></div>
+        <button type="button" class="btn" onclick="addTierCard()">+ 添加档位</button>
+        <p class="hint" style="color:#888;font-size:12px">每个模块只对「最低奖励份额 = 档位值」的市场生效：勾选启用、设挂单份数（≥档位值）和该档的选档参数。没有任何已启用模块能对上的市场<b>不会挂单</b>。金额数值表按档配置：价格档[美分]→数值，价超表的档不挂。</p>
 
         <button type="submit" class="btn btn-primary">保存策略参数</button>
     </form>
@@ -286,7 +271,7 @@ function loadStrategy(tid) {
             const input = form.querySelector(`[name="${key}"]`);
             if (input) input.value = data[key];
         });
-        renderAmountTable(data.amount_value_table || []);
+        renderTiers(data.size_tiers || []);
         updateStopMode();
     });
 
@@ -316,26 +301,86 @@ function makeAmountRow(cents, value) {
     return row;
 }
 
-function addAmountRow() {
-    document.getElementById('amount-value-rows').appendChild(makeAmountRow(30, 1));
+function addTierAmountRow(btn) {
+    btn.closest('.form-group').querySelector('.st-amount-rows').appendChild(makeAmountRow(30, 1));
 }
 
-function renderAmountTable(table) {
-    const box = document.getElementById('amount-value-rows');
+function makeTierCard(t) {
+    const card = document.createElement('div');
+    card.className = 'tier-card';
+    card.style.cssText = 'border:1px solid #8884;border-radius:6px;padding:10px;margin:8px 0';
+    card.innerHTML = `
+      <div class="form-inline" style="gap:12px;align-items:center">
+        <label><input type="checkbox" class="st-enabled" ${t.enabled !== false ? 'checked' : ''}> 启用</label>
+        <label>档位值（最低奖励份额） <input type="number" class="st-size" step="1" style="width:80px" value="${t.size ?? ''}"></label>
+        <label>挂单份数（≥档位值） <input type="number" class="st-shares" step="1" style="width:80px" value="${t.shares ?? ''}"></label>
+        <button type="button" class="btn btn-sm btn-danger" onclick="this.closest('.tier-card').remove()">删除档位</button>
+      </div>
+      <div class="form-grid" style="margin-top:6px">
+        <div class="form-group"><label>规则1 选档系数门槛（宽断层）</label><input type="number" class="st-r1" step="0.1" value="${t.rule1_min_coeff ?? 0}"></div>
+        <div class="form-group"><label>规则2 选档系数门槛（中断层）</label><input type="number" class="st-r2" step="0.1" value="${t.rule2_min_coeff ?? 0}"></div>
+        <div class="form-group"><label>规则3 选档系数门槛（密盘）</label><input type="number" class="st-r3" step="0.1" value="${t.rule3_min_coeff ?? 0}"></div>
+        <div class="form-group"><label>规则1 高位风险系数和门槛</label><input type="number" class="st-gate" step="0.1" value="${t.gap_high_coeff_sum_min ?? 20}"></div>
+      </div>
+      <div class="form-group"><label>金额数值表（价格档[美分] → 数值）</label>
+        <div class="st-amount-rows"></div>
+        <button type="button" class="btn btn-sm" onclick="addTierAmountRow(this)">+ 价格档</button>
+      </div>`;
+    const box = card.querySelector('.st-amount-rows');
+    (t.amount_value_table || []).forEach(r => box.appendChild(makeAmountRow(Math.round(r.upper * 100), r.value)));
+    return card;
+}
+
+function addTierCard() {
+    document.getElementById('size-tiers').appendChild(makeTierCard({
+        size: '', shares: '', gap_high_coeff_sum_min: 20,
+        amount_value_table: [
+            {upper: 0.20, value: 1},
+            {upper: 0.25, value: 1.5},
+            {upper: 0.31, value: 2},
+        ],
+    }));
+}
+
+function renderTiers(list) {
+    const box = document.getElementById('size-tiers');
     box.innerHTML = '';
-    (table && table.length ? table : []).forEach(r => {
-        box.appendChild(makeAmountRow(Math.round(r.upper * 100), r.value));
-    });
+    if (!list || !list.length) {
+        box.innerHTML = '<p class="hint" style="color:#c60">⚠️ 该模板尚未配置档位模块，不会挂单——点「+ 添加档位」创建。</p>';
+        return;
+    }
+    list.forEach(t => box.appendChild(makeTierCard(t)));
 }
 
-function serializeAmountTable() {
-    const rows = [];
-    document.querySelectorAll('#amount-value-rows .amount-row').forEach(row => {
-        const cents = parseFloat(row.querySelector('.av-cents').value);
-        const value = parseFloat(row.querySelector('.av-value').value);
-        if (!isNaN(cents) && !isNaN(value)) rows.push({upper: cents / 100, value: value});
+function serializeTiers() {
+    const tiers = [], seen = new Set();
+    let error = null;
+    document.querySelectorAll('#size-tiers .tier-card').forEach(card => {
+        if (error) return;
+        const size = parseInt(card.querySelector('.st-size').value, 10);
+        const shares = parseInt(card.querySelector('.st-shares').value, 10);
+        if (isNaN(size) || size <= 0) { error = '档位值必须是正整数'; return; }
+        if (seen.has(size)) { error = '档位值 ' + size + ' 重复'; return; }
+        seen.add(size);
+        if (isNaN(shares) || shares < size) { error = '档位 ' + size + ' 的挂单份数必须 ≥ 档位值'; return; }
+        const rows = [];
+        card.querySelectorAll('.st-amount-rows .amount-row').forEach(row => {
+            const c = parseFloat(row.querySelector('.av-cents').value);
+            const v = parseFloat(row.querySelector('.av-value').value);
+            if (!isNaN(c) && !isNaN(v)) rows.push({upper: c / 100, value: v});
+        });
+        tiers.push({
+            size: size,
+            enabled: card.querySelector('.st-enabled').checked,
+            shares: shares,
+            rule1_min_coeff: parseFloat(card.querySelector('.st-r1').value) || 0,
+            rule2_min_coeff: parseFloat(card.querySelector('.st-r2').value) || 0,
+            rule3_min_coeff: parseFloat(card.querySelector('.st-r3').value) || 0,
+            gap_high_coeff_sum_min: parseFloat(card.querySelector('.st-gate').value) || 0,
+            amount_value_table: rows,
+        });
     });
-    return rows;
+    return {tiers: tiers, error: error};
 }
 
 function loadEngine() {
@@ -405,7 +450,9 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     // select 不在 input[type=number] 里,单独收。
     data.stop_loss_mode = (document.getElementById('stop-loss-mode') || {}).value || 'percent';
     data.take_profit_mode = (document.getElementById('take-profit-mode') || {}).value || 'maker';
-    data.amount_value_table = serializeAmountTable();
+    const st = serializeTiers();
+    if (st.error) { alert(st.error); return; }
+    data.size_tiers = st.tiers;
     data.included_categories = Array.from(
         document.querySelectorAll('#included-categories input[type=checkbox]:checked')
     ).map(cb => cb.value);
@@ -413,7 +460,10 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     fetch(`/api/templates/${currentTemplateId}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data),
-    }).then(r => r.json()).then(() => alert('策略参数已保存（下次引擎启动生效）'));
+    }).then(r => r.json()).then(resp => {
+        if (resp && resp.error) { alert(resp.error); return; }
+        alert('策略参数已保存（下次引擎启动生效）');
+    });
 });
 
 document.getElementById('engine-form').addEventListener('submit', function(e) {

@@ -9,6 +9,8 @@
     </div>
 </div>
 
+<div id="tier-warning" class="flash" style="display:none"></div>
+
 <div class="config-section">
     <h2>手动调试</h2>
     <div class="controls">
@@ -49,6 +51,14 @@
 <script>
 function refreshDashboard() {
     fetch('/api/dashboard').then(r => r.json()).then(data => {
+        const tw = data.templates_without_tiers || [];
+        const warn = document.getElementById('tier-warning');
+        if (tw.length) {
+            warn.style.display = '';
+            warn.textContent = '⚠️ 模板「' + tw.join('」「') + '」未配置档位模块，绑定这些模板的钱包不会挂单（去 配置 → 档位模块 添加）';
+        } else {
+            warn.style.display = 'none';
+        }
         document.getElementById('total-orders').textContent = data.total_orders;
         document.getElementById('total-positions').textContent = data.total_positions;
         document.getElementById('total-pnl').textContent = (data.total_pnl || 0).toFixed(2) + ' pUSD';
