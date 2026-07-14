@@ -17,6 +17,7 @@ from engine.scanner import MarketScanner, ScanSuperseded
 from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
 from engine.resolution import in_resolution
+from engine.tiers import tier_for
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
@@ -177,13 +178,9 @@ class WalletWorker:
         held_assets, held_value, held_shares = held_side_info(positions)
         blacklist = self.db.get_blacklist_ids()
         tmpl = self.db.get_template_for(self.wallet_address)
-        amount_value_table = tmpl.get("amount_value_table") or None
+        size_tiers = tmpl.get("size_tiers") or []
         gap_wide_cents = float(tmpl.get("gap_wide_cents", 10))
         gap_mid_cents = float(tmpl.get("gap_mid_cents", 5))
-        gap_high_coeff_sum_min = float(tmpl.get("gap_high_coeff_sum_min", 20))
-        rule1_min_coeff = float(tmpl.get("rule1_min_coeff", 0))
-        rule2_min_coeff = float(tmpl.get("rule2_min_coeff", 0))
-        rule3_min_coeff = float(tmpl.get("rule3_min_coeff", 0))
         cliff_probe_cents = float(tmpl.get("cliff_probe_cents", 2))
         # max_exposure_usd 是「单市场」敞口上限(YES+NO 合计);跨市场不设全局
         # 美元锁(maker 买单不锁仓,一笔余额垫付所有挂单),总量由 max_concurrent
@@ -264,6 +261,16 @@ class WalletWorker:
                 continue
             if self.db.is_in_cooldown(self.wallet_address, mid):
                 continue
+            # 档位模块精确匹配(筛选层已挡;这里双点防御,防配置变更/共享列表时差)。
+            tier = tier_for(size_tiers, grouped[mid][0].get("rewards_min_size"))
+            if tier is None:
+                continue
+            amount_value_table = tier.get("amount_value_table") or None
+            gap_high_coeff_sum_min = float(tier.get("gap_high_coeff_sum_min", 20))
+            rule1_min_coeff = float(tier.get("rule1_min_coeff", 0))
+            rule2_min_coeff = float(tier.get("rule2_min_coeff", 0))
+            rule3_min_coeff = float(tier.get("rule3_min_coeff", 0))
+            tier_shares = int(tier.get("shares", 0) or 0)
             if (
                 mid not in markets_with_open
                 and len(markets_with_open) >= max_concurrent
@@ -331,6 +338,7 @@ class WalletWorker:
                     rule2_min_coeff,
                     rule3_min_coeff,
                     cliff_probe_cents,
+                    shares=tier_shares,
                 )
                 for gkey, gside in (("a", ca), ("b", cb)):
                     if gside is not None:
@@ -347,6 +355,7 @@ class WalletWorker:
                             rule2_min_coeff,
                             rule3_min_coeff,
                             cliff_probe_cents,
+                            shares=tier_shares,
                         )
 
             for key, side in (("a", side_a), ("b", side_b)):

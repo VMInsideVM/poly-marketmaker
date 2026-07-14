@@ -4,6 +4,19 @@ from unittest.mock import MagicMock
 from engine.manager import WalletWorker
 
 
+def _tier(size, shares=None, av=None):
+    return {
+        "size": size,
+        "enabled": True,
+        "shares": shares or size,
+        "rule1_min_coeff": 0,
+        "rule2_min_coeff": 0,
+        "rule3_min_coeff": 0,
+        "gap_high_coeff_sum_min": 20,
+        "amount_value_table": av or [{"upper": 1.0, "value": 1}],
+    }
+
+
 def _make_worker(balance=10000.0, template=None):
     api = MagicMock()
     db = MagicMock()
@@ -18,13 +31,9 @@ def _make_worker(balance=10000.0, template=None):
         "max_exposure_usd": 250,
         "max_exposure_shares": 500,
         "max_concurrent_markets": 10,
-        "amount_value_table": [{"upper": 1.0, "value": 1}],
+        "size_tiers": [_tier(100)],
         "gap_wide_cents": 10,
         "gap_mid_cents": 5,
-        "gap_high_coeff_sum_min": 20,
-        "rule1_min_coeff": 0,
-        "rule2_min_coeff": 0,
-        "rule3_min_coeff": 0,
         "cliff_probe_cents": 0,
     }
     if template:
@@ -370,23 +379,7 @@ def test_dropout_cancels_only_buys_not_sells():
 
 
 def test_gap_single_places_one_order_highest_qualifying():
-    worker, api, db = _make_worker(
-        template={
-            "placement_mode": "gap_single",
-            "tier_rules": [],  # gap_single 不需要 tier_rules,不应被空 tier_rules 闸拦
-            "amount_value_table": [
-                {"upper": 0.20, "value": 1},
-                {"upper": 0.25, "value": 1.5},
-                {"upper": 0.31, "value": 2},
-            ],
-            "gap_wide_cents": 10,
-            "gap_mid_cents": 5,
-            "gap_high_coeff_sum_min": 20,
-            "rule1_min_coeff": 0,
-            "rule2_min_coeff": 0,
-            "rule3_min_coeff": 0,
-        }
-    )
+    worker, api, db = _make_worker(template=_gap_template())
     # 相邻价差 1¢(规则3);买一 0.28 系数 50/(20*2)=1.25 >0 -> 挂一单 20 股 @0.28。
     api.get_orderbook.return_value = _ob([(0.28, 50), (0.27, 40)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
@@ -397,19 +390,18 @@ def test_gap_single_places_one_order_highest_qualifying():
 
 def _gap_template():
     return {
-        "placement_mode": "gap_single",
-        "tier_rules": [],
-        "amount_value_table": [
-            {"upper": 0.20, "value": 1},
-            {"upper": 0.25, "value": 1.5},
-            {"upper": 0.31, "value": 2},
+        "size_tiers": [
+            _tier(
+                20,
+                av=[
+                    {"upper": 0.20, "value": 1},
+                    {"upper": 0.25, "value": 1.5},
+                    {"upper": 0.31, "value": 2},
+                ],
+            )
         ],
         "gap_wide_cents": 10,
         "gap_mid_cents": 5,
-        "gap_high_coeff_sum_min": 20,
-        "rule1_min_coeff": 0,
-        "rule2_min_coeff": 0,
-        "rule3_min_coeff": 0,
     }
 
 
@@ -437,7 +429,7 @@ def test_gap_single_place_buy_records_rule_reason():
 def test_gap_single_skip_records_reason_and_dedups():
     # ② 判成不挂的市场记 gap_skip;同一判断第二轮去重不再记。
     tmpl = _gap_template()
-    tmpl["rule3_min_coeff"] = 100  # 无档系数 >100 -> 规则3 但不挂
+    tmpl["size_tiers"][0]["rule3_min_coeff"] = 100  # 无档系数 >100 -> 规则3 但不挂
     worker, api, db = _make_worker(template=tmpl)
     api.get_orderbook.return_value = _ob([(0.28, 50), (0.27, 40)], [(0.31, 1000)])
     elig = [_elig("A", "A-y", "Yes", min_size=20)]
@@ -459,8 +451,27 @@ def test_gap_single_skip_records_reason_and_dedups():
 def test_cliff_below_zone_skips_side():
     worker, api, db = _make_worker(template={"cliff_probe_cents": 2})
     # 买一0.28/买二0.27(区间内),下方直接砸到0.05(区间下沿2¢内无支撑)→ 悬崖 → 不挂
+    # (min_size 用默认 100,匹配 _make_worker 默认档位 100,悬崖判断先于系数计算、
+    # 与 min_size 取值无关)。
     api.get_orderbook.return_value = _ob(
         [(0.28, 50), (0.27, 40), (0.05, 9999)], [(0.31, 1000)]
     )
-    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    worker.place_orders([_elig("A", "A-y", "Yes")])
     assert api.place_limit_buy.call_count == 0
+
+
+def test_no_matching_tier_market_skipped():
+    # 双点防御:eligible 里混进无档市场(配置变更时差)-> 下单层也要跳过。
+    worker, api, db = _make_worker()  # 模板只有 100 档
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=50)])
+    api.place_limit_buy.assert_not_called()
+
+
+def test_tier_shares_used_for_order_size():
+    # 档位 100 配 150 份 -> 挂 150(预算/敞口都够)。
+    worker, api, db = _make_worker(template={"size_tiers": [_tier(100, shares=150)]})
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    assert api.place_limit_buy.call_count == 1
+    assert api.place_limit_buy.call_args_list[0].args[2] == 150
