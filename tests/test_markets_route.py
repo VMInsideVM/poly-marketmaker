@@ -31,6 +31,18 @@ class _FakeDB:
             "max_exposure_usd": 250,
             "max_exposure_shares": 500,
             "cliff_probe_cents": 0,
+            "size_tiers": [
+                {
+                    "size": 100,
+                    "enabled": True,
+                    "shares": 120,
+                    "rule1_min_coeff": 0,
+                    "rule2_min_coeff": 0,
+                    "rule3_min_coeff": 0,
+                    "gap_high_coeff_sum_min": 20,
+                    "amount_value_table": [{"upper": 1.0, "value": 1}],
+                }
+            ],
         }
 
     def get_eligible_markets(self):
@@ -118,6 +130,27 @@ def test_ladder_returns_json_error_on_exception(client, monkeypatch):
     assert r.status_code == 500
     data = r.get_json()  # 若返回的是 HTML,这里会是 None
     assert data is not None and "boom balance" in data["error"]
+
+
+def test_ladder_uses_tier_shares(client):
+    r = client.get("/api/markets/c1/ladder?wallet=0xw")
+    side = r.get_json()["sides"][0]
+    assert side["action"] == "place" and side["chosen_shares"] == 120
+
+
+def test_ladder_no_matching_tier_shows_skip(client, monkeypatch):
+    class NoTierDB(_FakeDB):
+        def get_template_for(self, addr):
+            t = dict(_FakeDB.get_template_for(self, addr))
+            t["size_tiers"] = []
+            return t
+
+    monkeypatch.setattr(routes, "db", NoTierDB())
+    r = client.get("/api/markets/c1/ladder?wallet=0xw")
+    assert r.status_code == 200
+    side = r.get_json()["sides"][0]
+    assert side["action"] == "skip"
+    assert "无匹配档位模块" in side["skip_reason"]
 
 
 def test_scan_status_no_manager(client):

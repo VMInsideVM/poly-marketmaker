@@ -1013,6 +1013,7 @@ def _ladder_payload(market_id):
     from engine.laddering import preview_gap_single_market
     from engine.strategy import reward_price_range
     from engine.positions import held_side_info
+    from engine.tiers import tier_for
 
     wallet = request.args.get("wallet")
     apis = _wallet_apis(wallet)
@@ -1020,7 +1021,7 @@ def _ladder_payload(market_id):
         return jsonify({"error": "钱包不可用"}), 404
     addr, api = next(iter(apis.items()))
     tmpl = db.get_template_for(addr)
-    amount_value_table = tmpl.get("amount_value_table") or None
+    size_tiers = tmpl.get("size_tiers") or []
     max_exposure_usd = float(tmpl.get("max_exposure_usd", 250))
     max_exposure_shares = int(tmpl.get("max_exposure_shares", 500))
 
@@ -1045,6 +1046,7 @@ def _ladder_payload(market_id):
     # 每侧 token 来自市场的 tokens 列表(内存候选池形态);DB 落库形态只有单个 token_id
     # 列、无 tokens 列表 —— 退化为单侧。奖励区间/最低份数是市场级,取自 market。
     market = rows[0]
+    min_size = int(market.get("rewards_min_size", 0) or 0)
     token_sides = market.get("tokens") or []
     if not token_sides and market.get("token_id"):
         token_sides = [
@@ -1068,7 +1070,7 @@ def _ladder_payload(market_id):
             {
                 "outcome": tok.get("outcome", ""),
                 "token_id": tid,
-                "min_size": int(market.get("rewards_min_size", 0) or 0),
+                "min_size": min_size,
                 "reward_range_min": rmin,
                 "reward_range_max": rmax,
                 "best_bid": bb,
@@ -1080,19 +1082,48 @@ def _ladder_payload(market_id):
     a = sides_in[0] if sides_in else None
     b = sides_in[1] if len(sides_in) > 1 else None
     # 网关式单档预演:逐市场按断层单档规则判(选中/跳过 + 原因)。
-    preview = preview_gap_single_market(
-        a,
-        b,
-        amount_value_table,
-        float(tmpl.get("gap_wide_cents", 10)),
-        float(tmpl.get("gap_mid_cents", 5)),
-        float(tmpl.get("gap_high_coeff_sum_min", 20)),
-        float(tmpl.get("rule1_min_coeff", 0)),
-        float(tmpl.get("rule2_min_coeff", 0)),
-        float(tmpl.get("rule3_min_coeff", 0)),
-        float(tmpl.get("cliff_probe_cents", 2)),
-    )
-    sides = [preview[k] for k in ("a", "b") if preview.get(k)]
+    tier = tier_for(size_tiers, min_size)
+    if tier is None:
+        # 无匹配档位模块:该市场不挂,预演每侧给出跳过原因(与下单层口径一致)。
+        sides = [
+            {
+                "outcome": s.get("outcome", ""),
+                "token_id": s.get("token_id", ""),
+                "best_bid": s.get("best_bid"),
+                "best_ask": s.get("best_ask"),
+                "spread_cents": s.get("spread_cents"),
+                "reward_range": [s["reward_range_min"], s["reward_range_max"]],
+                "rule": None,
+                "rule_label": "无匹配档位",
+                "max_gap": 0.0,
+                "min_coeff": None,
+                "high_sum": None,
+                "gate_passed": False,
+                "action": "skip",
+                "chosen_index": None,
+                "chosen_price": None,
+                "chosen_shares": None,
+                "skip_reason": f"无匹配档位模块（最低份额 {min_size}）",
+                "cliff": False,
+                "levels": [],
+            }
+            for s in sides_in
+        ]
+    else:
+        preview = preview_gap_single_market(
+            a,
+            b,
+            tier.get("amount_value_table") or None,
+            float(tmpl.get("gap_wide_cents", 10)),
+            float(tmpl.get("gap_mid_cents", 5)),
+            float(tier.get("gap_high_coeff_sum_min", 20)),
+            float(tier.get("rule1_min_coeff", 0)),
+            float(tier.get("rule2_min_coeff", 0)),
+            float(tier.get("rule3_min_coeff", 0)),
+            float(tmpl.get("cliff_probe_cents", 2)),
+            shares=int(tier.get("shares", 0) or 0) or None,
+        )
+        sides = [preview[k] for k in ("a", "b") if preview.get(k)]
     return jsonify(
         {
             "market_id": market_id,

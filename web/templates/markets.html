@@ -177,7 +177,7 @@ function renderGapSingle(data) {
             : '';
         const minCoeff = s.min_coeff != null ? s.min_coeff : '—';
         const result = s.action === 'place'
-            ? `<span class="profit">✓ 挂一单 @ ${fmtP(s.chosen_price)}（第 ${s.chosen_index + 1} 档，系数 > 门槛 ${minCoeff}）</span>`
+            ? `<span class="profit">✓ 挂一单 @ ${fmtP(s.chosen_price)} × ${s.chosen_shares != null ? s.chosen_shares : '?'} 份（第 ${s.chosen_index + 1} 档，系数 > 门槛 ${minCoeff}）</span>`
             : `<span class="loss">✗ 不挂：${escapeHtml(s.skip_reason || '')}</span>`;
         return `<div class="metric-note" style="margin-bottom:6px">${escapeHtml(s.outcome)} 方向 · 奖励范围 [${s.reward_range[0].toFixed(2)}, ${s.reward_range[1].toFixed(2)}] · 盘口价差 ${s.spread_cents != null ? s.spread_cents.toFixed(0) : '—'}¢</div>
         <div style="margin-bottom:6px"><b>${escapeHtml(s.rule_label)}</b> · 最大断层 ${s.max_gap.toFixed(1)}¢${gateTxt} · 选档门槛 ${minCoeff}</div>
