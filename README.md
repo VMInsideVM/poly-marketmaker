@@ -3,7 +3,7 @@
 > 本地单用户的 Polymarket 自动做市工具，通过挂单赚取流动性奖励（liquidity rewards）。
 > A local, single-user app that automates reward-farming market making on Polymarket.
 
-![version](https://img.shields.io/badge/version-1.0.15-blue)
+![version](https://img.shields.io/badge/version-6.0.0-blue)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![flask](https://img.shields.io/badge/flask-3.1-black)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey)
@@ -40,35 +40,38 @@ Built for **non-technical users**: install, double-click, a browser opens, you s
 ## 功能特性 / Features
 
 - **自动 / 手动两种模式**
-  - *自动*：发现（慢节奏，默认 4 小时一轮）→ 下单（快节奏，刷新订单簿后多档挂单）→ 监控的全流程循环。
+  - *自动*：发现（慢节奏，默认 4 小时一轮）→ 下单（快节奏，刷新订单簿后挂单）→ 监控的全流程循环。
   - *手动*：分步执行「扫描 / 分发挂单 / 启动监控」，由你掌控每一步。
-- **多档做市（v4 策略）**：一侧最多取 K 档，从买一往下挑「落在奖励区间内、且厚度 ≥ 1」的有效价位；每档份额由「累计厚度 → 份额规则表（`tier_rules`）」决定，整个市场两边共享敞口。
-- **奖励做市选品**：按最低奖励、结算天数、价格区间、买卖价差、冷却时间过滤；再校验「单份奖励 = 每日奖励 ÷ 最低份数」达到对应档位阈值；并按竞争度（competitiveness）从低到高优先下单（竞争越少奖励份额越大）。
-- **每钱包独立策略模板**：多模板增删改，每个钱包绑定自己的参数模板（阈值 / 敞口 / 离场 / 多档规则各自可调）。
-- **持仓驱动的三段式离场（v4 §7）**：成本价由真实 CLOB 成交逐笔重建（FIFO 净额，绝不用 Data API avgPrice），每个持仓**始终只挂一张**卖单。**盈利时**（成本 ≤ 买一）挂卖一做 maker 离场；**亏损时主动限损**——亏损 ≥ θ_stop 市价止损，否则在「成本 − θ_loss」以上 FAK 扫单（限定亏损），都不满足则在卖一 park 等回升（park 价可能低于成本，认亏等待，刻意为之）。成本无法可靠重建时**跳过并显著告警**（⚠️裸奔，绝不按不确定成本卖出，自愈式重试）。
+- **断层单档挂单**：按买单簿「奖励区间内相邻档最大价差」把市场归为宽断层 / 中断层 / 密盘三级之一，再从买一往下取第一个「风险系数 > 该级门槛」的价位，**只挂这一档一单**。宽断层另有一道闸门：断层上方各档风险系数之和不够就整个市场不挂。
+- **档位模块（按最低奖励份额精确匹配）**：挂单参数按「市场最低奖励份额」逐档配置，每个模块自带挂单份数（可大于该市场最低份数）、三级选档门槛、高位系数和门槛、金额数值表。市场的最低份额必须**恰好等于**某个已启用模块的档位值才会做，没有模块对得上就不挂。
+- **奖励做市选品**：按最低奖励、结算天数、价格区间、买卖价差、品类白名单、冷却时间过滤；并按竞争度（competitiveness）从低到高优先下单（竞争越少奖励份额越大）。
+- **每钱包独立策略模板**：多模板增删改，每个钱包绑定自己的参数模板（阈值 / 敞口 / 离场 / 档位模块各自可调）。
+- **持仓驱动的两段式离场**：成本价由真实 CLOB 成交逐笔重建（FIFO 净额，绝不用 Data API avgPrice），每个持仓**始终只挂一张**卖单，且**永不低于成本卖出**。成本 ≤ 买一（浮盈）挂卖一做 maker 吃价差；成本 > 买一（保本 / 套牢）挂成本价等回本。唯一认亏出口是强平兜底：亏损达到止损线（按比例，默认成本的 20%；或按固定美分）时市价清仓。成本无法可靠重建时**跳过并显著告警**（⚠️裸奔，绝不按不确定成本卖出，自愈式重试）。
+- **账户净值曲线**：引擎运行期间每个钱包每天记一次净值（现金 + 持仓市值），「资产曲线」页看历史走势，也可查任意某天的净值。
 - **全局黑名单**：在下单 / 扫描 / 监控三处统一拦截不想参与的市场。
 - **私钥本地加密**：钱包私钥用 AES-256-GCM 加密，密钥由你的密码经 PBKDF2（60 万次迭代）派生，仅存在于内存。
 - **GitHub 自动更新**：启动时与最新 Release 比对，弹窗 → 下载校验（SHA-256）→ 静默安装重启。
 
-> v4 multi-tier (laddering) market making with per-wallet strategy templates, reward-aware selection (including per-share-reward bracket thresholds), position-driven take-profit with cost reconstructed from real fills, θ-based exit/stop-loss, a global blacklist enforced at three choke points, AES-256-GCM encrypted keys held only in memory, and GitHub Release auto-update.
+> Gap-tier single-rung placement with per-tier modules keyed by the market's minimum reward size (each module carries its own share count and gating thresholds — a market whose minimum size matches no enabled module is never placed), per-wallet strategy templates, position-driven exit that never sells below a cost reconstructed from real fills, a daily net-worth history per wallet, a global blacklist enforced at three choke points, AES-256-GCM encrypted keys held only in memory, and GitHub Release auto-update.
 
 ---
 
 ## 界面 / UI
 
-7 个页面、左侧边栏导航，支持**深 / 浅主题切换**（侧边栏底部按钮，选择记在浏览器本地，刷新保持）。
+8 个页面、左侧边栏导航，支持**深 / 浅主题切换**（侧边栏底部按钮，选择记在浏览器本地，刷新保持）。
 
 | 页面 | 内容 |
 | --- | --- |
-| 仪表盘 | 引擎开关 / 手动步骤 + 健康汇总（总挂单 / 总持仓 / 总盈亏 / 合格市场数）+ 各钱包状态 |
-| 市场发现 | 扫描出的合格市场；每行常显**最低份数**、**单份奖励**（是否达档位阈值 ✓/✗）；点「展开」实时拉订单簿做**梯队预演**，显示每档的**有效价格 / 订单厚度 / 累计厚度 / 命中规则→份额**，以及该侧的**奖励范围 / 盘口价差**，并把「为什么这档不挂」的跳过行一并列出 |
+| 仪表盘 | 引擎开关 / 手动步骤 + 健康汇总（总挂单 / 总持仓 / 总盈亏 / 合格市场数）+ 各钱包状态；模板没配档位模块时在顶部醒目提示 |
+| 市场发现 | 扫描出的合格市场；点「展开」实时拉订单簿做**断层预演**，显示市场归到哪一级、最大断层、逐档的**价格 / 盘口量 / 风险系数 / 是否高位**、选中哪一档、**挂几份**，以及该侧的**奖励范围 / 盘口价差**；不挂的市场直接给出原因 |
 | 挂单与持仓 | 在挂买单（价 / 量 / 已成交 / 是否在赚奖励）+ 当前持仓（成本 / 现价 / 止损价 / 浮动盈亏） |
 | 历史 | 引擎动作记录（挂买 / 止盈止损卖 / 撤改 / 复查撤单等），含每笔卖单的逐笔成本构成依据 |
+| 资产曲线 | 每个钱包的净值日线（净值 = 现金 + 持仓市值，含现金辅线），可查任意某天的净值明细 |
 | 监控 | 每 4 秒刷新的实时监控快照（瞬时状态） |
-| 配置 | 钱包导入与模板绑定、多模板管理、策略参数、多档规则（`tier_rules`）可视化编辑、引擎参数 |
+| 配置 | 钱包导入与模板绑定、多模板管理、策略参数、**档位模块卡片编辑器**、引擎参数 |
 | 黑名单 | 加入 / 移除不参与的市场 |
 
-> Seven sidebar screens with a light/dark theme toggle. The Market Discovery page surfaces the v4 metrics: minimum shares and per-share reward in the list, plus an on-demand per-side ladder preview (effective price, order thickness, cumulative thickness, resolved shares per tier, the side's reward range and order-book spread, and the skipped rungs with the reason each was skipped).
+> Eight sidebar screens with a light/dark theme toggle. Market Discovery expands into a live gap-tier preview (which rule the market fell into, per-rung price / book size / risk coefficient, the chosen rung and its share count, plus the reason when nothing is placed). The Config page edits size-tier modules as cards; the Net Worth page charts each wallet's daily balance history.
 
 ---
 
@@ -144,12 +147,12 @@ pytest tests/test_strategy.py     # 单个文件
 
 | 阶段 | 模块 | 职责 |
 | --- | --- | --- |
-| 扫描 Scan | `engine/scanner.py` | 发现奖励市场、产出共享**候选池**（奖励阈值、结算天数、价格带、价差、单份奖励取档、冷却）；各钱包下单时按自己的模板从候选池精筛。 |
-| 策略 Strategy | `engine/laddering.py` · `engine/strategy.py` | 多档挂单（纯函数、完整单测、核心 IP）：在奖励区间内从买一往下取有效价位，按「累计厚度 → 份额规则表」定档与份额，整市场两边共享敞口。 |
-| 下单 Place | `engine/manager.py` | 下单前**每次重读余额**防并发超支；按竞争度从低到高；按各钱包模板做多档撤改收敛（reconcile），成交后单侧暂停。 |
-| 监控 Monitor | `engine/monitor.py` | 检测成交、维护每仓**唯一**卖单（止盈，成本逐笔重建）、止损、重核价差与价格区间。 |
+| 扫描 Scan | `engine/scanner.py` · `engine/tiers.py` | 发现奖励市场、产出共享**候选池**（奖励阈值、结算天数、价格带、价差、品类白名单、冷却）；再按**档位模块精确匹配**（市场最低奖励份额须等于某个已启用档位）。各钱包下单时按自己的模板从候选池精筛。 |
+| 策略 Strategy | `engine/laddering.py` · `engine/strategy.py` | 断层单档选价（纯函数、完整单测、核心 IP）：按奖励区间内的最大断层给市场分级，逐档算风险系数，取第一个过门槛的档，挂该档位模块配置的份数。 |
+| 下单 Place | `engine/manager.py` | 下单前**每次重读余额**防并发超支；按竞争度从低到高；按市场最低份额取对应档位模块的参数与份数（无匹配档位直接跳过）；撤改收敛（reconcile），成交后单侧暂停。 |
+| 监控 Monitor | `engine/monitor.py` · `engine/networth.py` | 检测成交、维护每仓**唯一**卖单（成本逐笔重建、永不低于成本）、强平止损、重核价差与价格区间；每天记一次账户净值。 |
 
-> Auth gates everything (engines can't auto-start). One shared scanner thread feeds per-wallet workers; SQLite is shared across threads. The pipeline is scan → strategy → place → monitor, with the multi-tier laddering in `engine/laddering.py` (plus `engine/strategy.py`), pure and fully unit-tested, as the core IP.
+> Auth gates everything (engines can't auto-start). One shared scanner thread feeds per-wallet workers; SQLite is shared across threads. The pipeline is scan → strategy → place → monitor. The gap-tier placement logic in `engine/laddering.py` (plus `engine/strategy.py` and the tier matching in `engine/tiers.py`) is pure, fully unit-tested, and the core IP.
 
 更详细的设计文档（简体中文）见 `docs/superpowers/specs/2026-05-17-polymarket-market-maker-design.md`。
 开发约定与关键不变量见 [`CLAUDE.md`](CLAUDE.md)。
@@ -169,6 +172,7 @@ pytest tests/test_strategy.py     # 单个文件
 | `cooldown_minutes` | 20 | 同市场成交后冷却（分钟） |
 | `rewards_cache_ttl_sec` | 600 | 奖励参数缓存 TTL（秒） |
 | `discovery_interval_sec` | 14400 | 市场发现间隔（秒，默认 4 小时） |
+| `reward_scan_max_pages` | 20 | 每品类奖励市场抓取页数上限（每页 100） |
 
 **策略级 / 每模板 Strategy（`template_settings`）**
 
@@ -177,25 +181,24 @@ pytest tests/test_strategy.py     # 单个文件
 | `min_reward_usd` | 100.0 | 市场最低奖励门槛（美元） |
 | `max_spread_cents` | 3.0 | 最大买卖价差（美分） |
 | `min_price_cents` / `max_price_cents` | 10.0 / 50.0 | 单价区间（美分，含端点） |
-| `min_settlement_days` | 4 | 距结算的最少天数 |
-| `theta_loss_cents` / `theta_stop_cents` | 2 / 5 | 浮亏离场 / 强平止损阈值（美分） |
-| `case_a_mode` | `ask` | 成本 ≤ 买一时离场方式（`ask` 挂卖一 / `market` 市价 / `cost` 按成本价保本挂单，立即吃买盘、剩余停在成本） |
+| `min_settlement_days` / `max_settlement_days` | 4 / 不限 | 结算窗口（整天；上限留空 = 只卡下限） |
 | `included_categories` | 除 sports/esports/weather 外全部 | 做市品类白名单（勾中的才做，tag slug） |
 | `include_other` | `true` | 是否做市「其他/未分类」（不属于任何 curated 品类的市场） |
-| `tier_rules` | 6 档 × 最小份数 | 多档挂单规则表（累计厚度 → 份额） |
+| `size_tiers` | （空） | **档位模块**：按市场最低奖励份额**精确匹配**。每档配 启用 / 挂单份数（≥档位值）/ 规则 1-3 选档门槛 / 高位系数和门槛 / 金额数值表。**没有任何已启用模块对得上的市场不挂单** |
+| `gap_wide_cents` / `gap_mid_cents` | 10 / 5 | 断层分级阈值（美分）：> 宽 → 规则 1，≥ 中 → 规则 2，更小 → 规则 3 |
+| `cliff_probe_cents` | 2 | 悬崖否决：奖励区间下沿往下这么多美分内没有买档，该侧不挂（0 = 关） |
+| `stop_loss_mode` | `percent` | 强平止损方式：`percent`（占成本百分比）/ `fixed`（固定美分）/ `off`（关闭） |
+| `stop_loss_percent` | 20 | 按比例止损时：亏到成本的百分之多少市价清仓 |
+| `theta_stop_cents` | 5 | 按固定金额止损时：亏损达到这么多美分市价清仓 |
+| `take_profit_mode` | `maker` | 浮盈卖法：`maker` 挂卖一吃价差 / `market` 成本 < 买一时立即市价清仓 |
 | `max_exposure_usd` / `max_exposure_shares` | 250 / 500 | 单市场最大敞口（美元 / 份数） |
 | `max_concurrent_markets` | 10 | 最大并发做市市场数 |
-| `min_price_double_cents` | 10 | 双边挂单价格下限（美分） |
-| `per_share_reward_thresholds` | 各档 0.30 | 单份奖励按最低份数取档的阈值 |
-| `per_share_reward_enabled` | `true` | 单份奖励阈值筛选总开关；`false`=不按单份奖励卡这一关 |
-| `size_tiers` | （空） | 档位模块：按市场最低奖励份额**精确匹配**；每档配 启用 / 挂单份数(≥档位值) / 规则1-3选档门槛 / 高位系数和门槛 / 金额数值表。没有任何已启用模块能对上的市场不挂单 |
-| `tier_match_var` | `cumulative_thickness` | 多档规则阈值按哪个量匹配：`cumulative_thickness`（累计厚度）/ `risk_coefficient`（风险系数） |
 
 **几个概念怎么算 / Key metrics**
 
-- **单份奖励** = 市场每日 LP 奖励 ÷ 该市场最低下单份数(`rewards_min_size`)，即"每一手最低单每天能拿多少奖励"。例：日奖励池 $60、最低份数 20 → 单份奖励 = 60 / 20 = 3.0；若该档阈值 0.30，则 3.0 ≥ 0.30 通过。可用 `per_share_reward_enabled=false` 整体关闭这道筛选。
-- **累计厚度** = 从买一往下累加到该档的厚度之和；单档厚度 = 盘口该价位挂单量 ÷ 最低份数。例：最低份数 20，买一 0.30 挂 60 张(厚度 3)、0.29 挂 40 张(厚度 2) → 0.29 档累计厚度 = 3 + 2 = 5。多档规则「累计厚度 > X → 动作」按此分档。
-- **风险系数** = 本档厚度 ÷ 金额数值(该档价)（逐档、非累计）。金额数值表按价格档配数值(价越高数值越大)。例：金额表 20¢→1 / 25¢→1.5 / 30¢→2，某档价 0.25、厚度 3 → 风险系数 = 3 / 1.5 = 2.0；价超金额表最大档 → 该档不挂。价越高分母越大，同样厚度算出的系数越低。金额数值表与各门槛按档位模块逐档配置。
+- **档位模块** = 一组「只对最低奖励份额等于某个值的市场生效」的挂单参数。例：启用 20 档（挂单份数填 40）和 50 档（份数填 50）——最低份额 20 的市场挂 40 份，最低份额 50 的市场挂 50 份，最低份额 30 的市场因为没有模块对得上而**完全不做**。匹配是精确相等，不做区间也不做就近取档。
+- **风险系数** = 该档盘口挂单量 ÷（市场最低份数 × 金额数值）（逐档、非累计）。金额数值按价格档配（价越高数值越大），价超该档位模块的金额表 → 这一档不挂。例：最低份数 20，某档价 0.25、盘口 60 张、金额数值 1.5 → 风险系数 = 60 ÷ (20 × 1.5) = 2.0。价越高分母越大，同样盘口算出的系数越低。**注意**：系数分母用的是市场的最低份数，不是你配的挂单份数——份数只决定挂多少，不影响选档。
+- **断层分级** = 奖励区间内相邻买档之间的最大价差。> 宽断层阈值归规则 1（还要额外过「断层上方各档系数之和 ≥ 高位系数和门槛」这道闸，否则整个市场不挂），≥ 中断层阈值归规则 2，更小归规则 3。归到哪级就用哪级的选档门槛，从买一往下取第一个「风险系数 > 门槛」的档。
 
 运行时数据位置 / Runtime data：
 - 打包运行：`%LOCALAPPDATA%\PolymarketMarketMaker\`（`market_maker.db`、`market_maker.log`）
