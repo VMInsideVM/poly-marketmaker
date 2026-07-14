@@ -327,6 +327,13 @@ def api_save_settings():
     data = request.get_json() or {}
     engine = {k: v for k, v in data.items() if k in ENGINE_DEFAULTS}
     strategy = {k: v for k, v in data.items() if k in TEMPLATE_DEFAULTS}
+    if "size_tiers" in strategy:
+        from engine.tiers import validate_size_tiers
+
+        tiers, err = validate_size_tiers(strategy["size_tiers"])
+        if err:
+            return jsonify({"error": err}), 400
+        strategy["size_tiers"] = tiers
     if engine:
         db.save_settings(engine)
     if strategy:
@@ -394,6 +401,13 @@ def api_save_template(tid):
 
     data = request.get_json() or {}
     strategy = {k: v for k, v in data.items() if k in TEMPLATE_DEFAULTS}
+    if "size_tiers" in strategy:
+        from engine.tiers import validate_size_tiers
+
+        tiers, err = validate_size_tiers(strategy["size_tiers"])
+        if err:
+            return jsonify({"error": err}), 400
+        strategy["size_tiers"] = tiers
     db.save_template(tid, strategy)
     return jsonify({"ok": True})
 
@@ -1212,12 +1226,24 @@ def api_dashboard():
             }
         )
 
+    # 无启用档位模块的模板:绑定它的钱包一张单都不会挂,仪表盘要醒目提示。
+    templates_without_tiers = []
+    try:
+        from engine.tiers import enabled_sizes
+
+        for t in db.list_templates():
+            if not enabled_sizes(db.get_template(t["id"]).get("size_tiers") or []):
+                templates_without_tiers.append(t["name"])
+    except Exception:
+        templates_without_tiers = []
+
     return jsonify(
         {
             "total_orders": total_orders,
             "total_positions": total_positions,
             "total_pnl": total_pnl,
             "wallets": wallet_summaries,
+            "templates_without_tiers": templates_without_tiers,
         }
     )
 

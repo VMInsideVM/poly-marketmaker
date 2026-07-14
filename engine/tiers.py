@@ -54,7 +54,7 @@ def validate_size_tiers(raw):
             shares = int(shares_raw)
             if float(size_raw) != size or float(shares_raw) != shares:
                 return None, f"第 {i + 1} 个档位的档位值/挂单份数必须是整数"
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None, f"第 {i + 1} 个档位的档位值/挂单份数必须是整数"
         if size <= 0:
             return None, f"第 {i + 1} 个档位的档位值必须为正整数"

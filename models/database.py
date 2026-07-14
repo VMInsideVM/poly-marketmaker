@@ -243,6 +243,20 @@ class Database:
                     )
                     c.execute("DELETE FROM settings WHERE key = ?", (row["key"],))
             self.conn.commit()
+        # 档位模块(size_tiers)取代 7 个模板级全局键:清掉存量死键行(幂等,SP6d 手法)。
+        superseded = (
+            "rule1_min_coeff",
+            "rule2_min_coeff",
+            "rule3_min_coeff",
+            "gap_high_coeff_sum_min",
+            "amount_value_table",
+            "rewards_min_size_min",
+            "rewards_min_size_max",
+        )
+        ph = ",".join("?" * len(superseded))
+        c.execute(f"DELETE FROM template_settings WHERE key IN ({ph})", superseded)
+        c.execute(f"DELETE FROM settings WHERE key IN ({ph})", superseded)
+        self.conn.commit()
 
     # --- Settings ---
 

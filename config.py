@@ -59,11 +59,6 @@ TEMPLATE_DEFAULTS = {
     "case_a_mode": "ask",
     "gap_wide_cents": 10,
     "gap_mid_cents": 5,
-    "gap_high_coeff_sum_min": 20,
-    # 三级各自的选档系数门槛(>门槛才挂):规则1=宽断层、规则2=中断层、规则3=密盘。
-    "rule1_min_coeff": 0,
-    "rule2_min_coeff": 0,
-    "rule3_min_coeff": 0,
     # 悬崖否决:奖励区间下沿往下这么多美分内无买档 → 该侧不挂。0=关闭。
     "cliff_probe_cents": 2,
     # 止盈方式:maker=挂卖一吃价差(默认);market=浮盈(成本<买一)立即市价清仓。
@@ -73,16 +68,8 @@ TEMPLATE_DEFAULTS = {
     "max_exposure_usd": 250,
     "max_exposure_shares": 500,
     "max_concurrent_markets": 10,
-    # 奖励最低份额范围筛选(向上取档硬顶 250)
-    "rewards_min_size_min": 1,
-    "rewards_min_size_max": 250,
-    # 金额数值表:gap_single 算系数用(coeff = 挂量 ÷ (最低份数 × 金额数值))。
-    "amount_value_table": [
-        {"upper": 0.20, "value": 1},
-        {"upper": 0.25, "value": 1.5},
-        {"upper": 0.31, "value": 2},
-    ],
-    # 档位模块:按市场最低奖励份额(rewards_min_size)精确匹配的挂单参数组。
+    # 档位模块:按市场最低奖励份额(rewards_min_size)精确匹配的挂单参数组,取代了
+    # 原先的奖励最低份额范围筛选、选档系数门槛与金额数值表(均已下沉到每个档位内)。
     # 每项 {size, enabled, shares, rule1/2/3_min_coeff, gap_high_coeff_sum_min,
     # amount_value_table}。空列表 = 无档可匹配 = 不挂单。
     "size_tiers": [],

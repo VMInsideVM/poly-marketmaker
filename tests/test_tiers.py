@@ -86,3 +86,10 @@ def test_template_defaults_has_size_tiers():
     from config import TEMPLATE_DEFAULTS
 
     assert TEMPLATE_DEFAULTS["size_tiers"] == []
+
+
+def test_validate_rejects_infinity_size():
+    tiers, err = validate_size_tiers(
+        [{"size": float("inf"), "enabled": True, "shares": float("inf")}]
+    )
+    assert tiers is None and "整数" in err

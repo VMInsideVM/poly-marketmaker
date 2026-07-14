@@ -69,10 +69,6 @@ def test_post_settings_roundtrips_gap_single_keys(tmp_path, monkeypatch):
     payload = {
         "gap_wide_cents": 10,
         "gap_mid_cents": 5,
-        "gap_high_coeff_sum_min": 20,
-        "rule1_min_coeff": 1,
-        "rule2_min_coeff": 1.5,
-        "rule3_min_coeff": 2,
         "take_profit_mode": "market",
         "stop_loss_mode": "off",
     }
@@ -81,10 +77,6 @@ def test_post_settings_roundtrips_gap_single_keys(tmp_path, monkeypatch):
     tmpl = db.get_template(db.get_default_template_id())
     assert tmpl["gap_wide_cents"] == 10
     assert tmpl["gap_mid_cents"] == 5
-    assert tmpl["gap_high_coeff_sum_min"] == 20
-    assert tmpl["rule1_min_coeff"] == 1
-    assert tmpl["rule2_min_coeff"] == 1.5
-    assert tmpl["rule3_min_coeff"] == 2
     assert tmpl["take_profit_mode"] == "market"
     assert tmpl["stop_loss_mode"] == "off"
 
@@ -99,3 +91,53 @@ def test_reward_scan_max_pages_default_and_roundtrip(tmp_path, monkeypatch):
     assert db.get_settings()["reward_scan_max_pages"] == 12
     # 属引擎键,不落默认模板
     assert "reward_scan_max_pages" not in db.get_template(db.get_default_template_id())
+
+
+def _tier_payload(**over):
+    t = {
+        "size": 20,
+        "enabled": True,
+        "shares": 40,
+        "rule1_min_coeff": 0,
+        "rule2_min_coeff": 0,
+        "rule3_min_coeff": 0,
+        "gap_high_coeff_sum_min": 20,
+        "amount_value_table": [{"upper": 0.2, "value": 1}],
+    }
+    t.update(over)
+    return t
+
+
+def test_size_tiers_roundtrip_via_template_put(tmp_path, monkeypatch):
+    client, db = _client_with_db(tmp_path, monkeypatch)
+    tid = db.get_default_template_id()
+    r = client.put(f"/api/templates/{tid}", json={"size_tiers": [_tier_payload()]})
+    assert r.status_code == 200
+    saved = db.get_template(tid)["size_tiers"]
+    assert saved[0]["size"] == 20 and saved[0]["shares"] == 40
+
+
+def test_size_tiers_invalid_rejected_400(tmp_path, monkeypatch):
+    client, db = _client_with_db(tmp_path, monkeypatch)
+    tid = db.get_default_template_id()
+    # shares < size
+    r = client.put(
+        f"/api/templates/{tid}", json={"size_tiers": [_tier_payload(shares=10)]}
+    )
+    assert r.status_code == 400 and "挂单份数" in r.get_json()["error"]
+    # size 重复
+    r = client.put(
+        f"/api/templates/{tid}",
+        json={"size_tiers": [_tier_payload(), _tier_payload()]},
+    )
+    assert r.status_code == 400 and "重复" in r.get_json()["error"]
+    # /api/settings 同样拦
+    r = client.post("/api/settings", json={"size_tiers": [_tier_payload(shares=1)]})
+    assert r.status_code == 400
+
+
+def test_dead_template_keys_no_longer_stored(tmp_path, monkeypatch):
+    client, db = _client_with_db(tmp_path, monkeypatch)
+    client.post("/api/settings", json={"rule1_min_coeff": 9, "amount_value_table": []})
+    tmpl = db.get_template(db.get_default_template_id())
+    assert "rule1_min_coeff" not in tmpl and "amount_value_table" not in tmpl

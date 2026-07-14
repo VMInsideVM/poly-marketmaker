@@ -632,17 +632,43 @@ def test_eligible_markets_roundtrips_spread_cents(tmp_path):
         db.close()
 
 
-def test_template_defaults_has_size_range_and_amount_table():
+def test_template_defaults_size_tiers_replace_global_keys():
     from config import TEMPLATE_DEFAULTS
 
-    assert TEMPLATE_DEFAULTS["rewards_min_size_min"] == 1
-    assert TEMPLATE_DEFAULTS["rewards_min_size_max"] == 250
-    table = TEMPLATE_DEFAULTS["amount_value_table"]
-    assert table == [
-        {"upper": 0.20, "value": 1},
-        {"upper": 0.25, "value": 1.5},
-        {"upper": 0.31, "value": 2},
-    ]
+    assert TEMPLATE_DEFAULTS["size_tiers"] == []
+    for dead in (
+        "rule1_min_coeff",
+        "rule2_min_coeff",
+        "rule3_min_coeff",
+        "gap_high_coeff_sum_min",
+        "amount_value_table",
+        "rewards_min_size_min",
+        "rewards_min_size_max",
+    ):
+        assert dead not in TEMPLATE_DEFAULTS, f"被取代键 {dead} 应已删除"
+
+
+def test_migration_deletes_superseded_template_keys(tmp_path):
+    db = Database(str(tmp_path / "mig.db"))
+    db.init()
+    tid = db.get_default_template_id()
+    db.conn.execute(
+        "INSERT OR REPLACE INTO template_settings (template_id, key, value)"
+        " VALUES (?, ?, ?)",
+        (tid, "rule1_min_coeff", "3"),
+    )
+    db.conn.commit()
+    db.close()
+    db2 = Database(str(tmp_path / "mig.db"))
+    db2.init()  # 再次 init 触发迁移
+    try:
+        c = db2.conn.cursor()
+        c.execute(
+            "SELECT COUNT(*) AS n FROM template_settings WHERE key = 'rule1_min_coeff'"
+        )
+        assert c.fetchone()["n"] == 0
+    finally:
+        db2.close()
 
 
 def test_category_catalog_roundtrip(tmp_path):
