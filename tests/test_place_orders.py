@@ -475,3 +475,16 @@ def test_tier_shares_used_for_order_size():
     worker.place_orders([_elig("A", "A-y", "Yes")])
     assert api.place_limit_buy.call_count == 1
     assert api.place_limit_buy.call_args_list[0].args[2] == 150
+
+
+def test_tier_shares_zero_falls_back_to_min_size():
+    # 档位 shares 为 0(校验未接入前可直接写进模板)-> 回退挂 min_size(100),
+    # 而不是把 0 当合法份数:那会让该边 plan 为空 -> reconcile 撤掉现有买单且不补,
+    # 静默摘牌无痕。
+    t = _tier(100)
+    t["shares"] = 0  # _tier 的 `shares or size` 会把 0 变 size,须直接改 dict
+    worker, api, db = _make_worker(template={"size_tiers": [t]})
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    assert api.place_limit_buy.call_count == 1
+    assert api.place_limit_buy.call_args_list[0].args[2] == 100

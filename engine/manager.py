@@ -270,7 +270,9 @@ class WalletWorker:
             rule1_min_coeff = float(tier.get("rule1_min_coeff", 0))
             rule2_min_coeff = float(tier.get("rule2_min_coeff", 0))
             rule3_min_coeff = float(tier.get("rule3_min_coeff", 0))
-            tier_shares = int(tier.get("shares", 0) or 0)
+            # shares 缺失/0 -> None:laddering 回退按 min_size 挂(奖励资格安全),
+            # 绝不能把 0 当合法份数(plan 为空 -> reconcile 撤掉现有买单且不补,静默摘牌)。
+            tier_shares = int(tier.get("shares", 0) or 0) or None
             if (
                 mid not in markets_with_open
                 and len(markets_with_open) >= max_concurrent
