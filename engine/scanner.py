@@ -66,6 +66,28 @@ class ScanSuperseded(Exception):
     """本轮扫描被更新一轮接管,应立即让位(合作式取消)。"""
 
 
+def book_spread(bids, asks) -> float:
+    """买卖价差 = 卖一 − 买一,从已抓回的订单簿本地算;缺任一边或价格解析不出返回 -1
+    (价差不可知);交叉盘(买一>卖一,负价差)clamp 到 0。
+
+    以前每个 token 额外发一次 GET /spread 拿这个数(实测 1.27s/次,比抓订单簿本身还慢
+    3 倍),整池刷簿时它占了一半的网络调用——而值就是订单簿一减。监控 Step 3 早就是
+    本地算的(monitor.py),这里与之统一。-1 沿用旧 /spread 的「无簿」语义,filter 据此
+    跳过该 token;价格字段缺失/为 null 也归入 -1,绝不抛(否则一个畸形 level 会掀翻整轮
+    刷簿——refresh_orderbooks 的 try 只包住 get_orderbook)。交叉盘价差为负,若也当 -1
+    会被 filter 误当无簿跳过,而旧 /spread 让这类(常是最紧、最高奖励的瞬时交叉)市场可
+    下单——故 clamp 到 0(最窄价差,过 max_spread 门槛)。round 到 4 位小数:裸减的浮点尘
+    (0.53-0.51=0.020000000000000018)会让美分门槛的比较翻面。"""
+    if not bids or not asks:
+        return -1
+    try:
+        best_bid = max(float(b["price"]) for b in bids)
+        best_ask = min(float(a["price"]) for a in asks)
+    except (KeyError, TypeError, ValueError):
+        return -1
+    return max(0.0, round(best_ask - best_bid, 4))
+
+
 def _parse_end_date(end_date_str: str) -> float:
     """Parse end_date string to Unix timestamp."""
     if not end_date_str:
@@ -92,6 +114,27 @@ def _settlement_days_until(end_ts: float) -> int:
     回时区抵消,date.fromtimestamp(end_ts) 即 end_date 字符串里写的那个日期)。按整天
     日历日比较,避免小数天数在临近午夜分不清「今天」和「明天」。"""
     return (date.fromtimestamp(end_ts) - date.fromtimestamp(time.time())).days
+
+
+def _batch_rate(market: dict) -> float:
+    """批量奖励端点给的每日奖励(rewards_config 各档 rate_per_day 之和)。精确奖励拉取
+    失败/跳过时的兜底值。"""
+    return sum(rc.get("rate_per_day", 0) for rc in market.get("rewards_config", []))
+
+
+def _token_price_cents(token: dict) -> float:
+    """token 现价(美分)。price 缺失/JSON null/空串一律按 0(必落价带外),绝不抛——
+    奖励端点偶有 price 为 null 的 token,裸 float(None) 会 TypeError 掀翻整轮筛选。"""
+    return float(token.get("price") or 0) * 100
+
+
+def _tokens_in_price_band(market: dict, min_price_cents, max_price_cents) -> bool:
+    """该市场是否至少有一个 token 的现价落在单价区间内(端点含)。全都不在 -> 整市场
+    没有可下单的一侧,连订单簿都不必抓。"""
+    return any(
+        min_price_cents <= _token_price_cents(t) <= max_price_cents
+        for t in market.get("tokens", [])
+    )
 
 
 def _in_settlement_window(end_ts: float, min_days, max_days) -> bool:
@@ -173,9 +216,35 @@ class MarketScanner:
         pool = tag_pool(list(by_cid.values()), category_ids, slugs_needed)
         blacklist = self.db.get_blacklist_ids()
 
-        # 先无网络地筛出「想要且过粗筛」的市场(黑名单/品类/奖励地板),再**并发**拉每
-        # 市场精确奖励——原来是每候选一次串行网络请求(≈一秒蹦一个),并发后成批产出。
-        wanted = []
+        # 并集档位 sizes + 各模板结算窗口:精确奖励拉取(每市场一次网络、~0.78s)是发现
+        # 阶段的大头。档位/窗口这两个门槛既不需要订单簿也不需要精确奖励就能判——用它们
+        # 决定「要不要对该市场拉精确奖励」,而不是决定「进不进候选池」:品类匹配的市场都进
+        # 池(市场发现页照常显示、非幸存者价差显—),门控外的只用批量 total_rate 兜底奖励、
+        # 省下那次网络。union_sizes 空(无启用档位)时不按档位筛;窗口 fail-open(结算日
+        # 解析不出则保留,与 filter 一致)。
+        union_sizes = set()
+        windows = []
+        for t in templates:
+            union_sizes |= enabled_sizes(t.get("size_tiers") or [])
+            windows.append((t.get("min_settlement_days"), t.get("max_settlement_days")))
+
+        def _should_price(market):
+            """该市场是否值得拉精确奖励:档位被某模板要(或无档位门控)且落在某模板窗口内。"""
+            if (
+                union_sizes
+                and int(market.get("rewards_min_size", 0) or 0) not in union_sizes
+            ):
+                return False
+            end_ts = _parse_end_date(market.get("end_date", ""))
+            if end_ts and not any(
+                _in_settlement_window(end_ts, mn, mx) for mn, mx in windows
+            ):
+                return False
+            return True
+
+        # 品类匹配(过黑名单/奖励地板)的市场都进候选池;其中被档位+窗口门控选中的才拉精确
+        # 奖励(priced,并发),其余用批量奖励兜底(extra,不发网络)。
+        priced, extra = [], []
         for market in pool:
             if cancel and cancel():
                 raise ScanSuperseded()
@@ -183,20 +252,14 @@ class MarketScanner:
             if cid in blacklist:
                 continue
             if not market_wanted(market.get("tags", []), union, inc_other):
-                continue  # 没被任何模板 include(且非其他)-> 不做昂贵的精确奖励拉取
-            total_rate = sum(
-                rc.get("rate_per_day", 0) for rc in market.get("rewards_config", [])
-            )
-            if total_rate < min_floor:
+                continue  # 没被任何模板 include(且非其他)
+            if _batch_rate(market) < min_floor:
                 continue  # 比最宽松模板还低,任何模板都不会要
-            wanted.append(market)
+            (priced if _should_price(market) else extra).append(market)
 
         def _precise_reward(market):
             # 精确每市场奖励(与旧 scan 一致:/rewards/markets/{cid});失败退回批量 total_rate。
             cid = market.get("condition_id", "")
-            total_rate = sum(
-                rc.get("rate_per_day", 0) for rc in market.get("rewards_config", [])
-            )
             try:
                 raw = self.api.get_rewards_for_market(cid)
                 if raw:
@@ -207,13 +270,40 @@ class MarketScanner:
                     )
             except Exception as e:
                 logger.warning("Precise reward fetch failed for %s: %s", cid, e)
-            return total_rate
+            return _batch_rate(market)
 
-        # 精确奖励并发拉,用 as_completed **增量**出结果:每完成一个就报进度 + on_found,
-        # 让进度条/候选列表随扫描逐渐增长,而不是并发跑完后在收尾循环里一次性蹦出(2026-
-        # 07-05 用户反馈「一直卡在已找到 0 个、然后突然显示 100 多个」)。返回序=完成序
-        # (池后续按 market_competitiveness 重排,不依赖此序);代理隔离同 _parallel_map。
-        total = len(wanted)
+        out = []
+
+        def _finalize(market, reward):
+            cid = market.get("condition_id", "")
+            self.db.upsert_market_meta(
+                cid,
+                market.get("question", ""),
+                market.get("market_slug", ""),
+                market.get("event_slug", ""),
+            )
+            # 候选池展示就绪键(供 /api/eligible 与持久化显示市场名/奖励)。不含
+            # order_price/outcome:候选池按市场,单价每钱包下单时实时算,前端缺失以「—」兜底。
+            market["market_reward"] = reward
+            market["market_id"] = cid
+            market["market_name"] = market.get("question", "")
+            market["daily_reward"] = reward
+            out.append(market)
+            if on_found:
+                on_found(market)
+
+        # 门控外市场:不发网络,批量奖励直接入池(市场发现页照常显示,下单时由 filter 再筛)。
+        # extra 集可能几百个(每个 upsert + on_found),循环里查 cancel 让手动重扫能及时抢占。
+        for market in extra:
+            if cancel and cancel():
+                raise ScanSuperseded()
+            _finalize(market, _batch_rate(market))
+
+        # 门控内市场:精确奖励并发拉,as_completed **增量**出结果——每完成一个就报进度 +
+        # on_found,让进度条/候选列表随扫描逐渐增长,而不是跑完后一次性蹦出(2026-07-05
+        # 用户反馈「一直卡在 0、然后突然 100 多个」)。返回序=完成序(池后续按
+        # market_competitiveness 重排,不依赖此序);代理隔离同 _parallel_map。
+        total = len(priced)
         if on_progress:
             on_progress(0, total, "核对各市场精确奖励…")
         proxy = current_proxy.get()
@@ -225,36 +315,19 @@ class MarketScanner:
             finally:
                 current_proxy.reset(token)
 
-        out = []
+        done = 0
         with ThreadPoolExecutor(
             max_workers=min(_DISCOVERY_MAX_WORKERS, total or 1)
         ) as ex:
-            futures = [ex.submit(_reward_task, m) for m in wanted]
+            futures = [ex.submit(_reward_task, m) for m in priced]
             for fut in as_completed(futures):
                 if cancel and cancel():
                     raise ScanSuperseded()
                 market, market_reward = fut.result()
-                cid = market.get("condition_id", "")
-                self.db.upsert_market_meta(
-                    cid,
-                    market.get("question", ""),
-                    market.get("market_slug", ""),
-                    market.get("event_slug", ""),
-                )
-                # 候选池展示就绪键(供 /api/eligible 与持久化显示市场名/奖励)。
-                # 不含 order_price/outcome:候选池是按市场的,单价改为每钱包下单时
-                # 实时计算(见 filter_for_template),前端对缺失价格以「—」兜底。
-                market["market_reward"] = market_reward
-                market["market_id"] = cid
-                market["market_name"] = market.get("question", "")
-                market["daily_reward"] = market_reward
-                out.append(market)
+                _finalize(market, market_reward)
+                done += 1
                 if on_progress:
-                    on_progress(
-                        len(out), total, f"Checking: {market.get('question','')}"
-                    )
-                if on_found:
-                    on_found(market)
+                    on_progress(done, total, f"Checking: {market.get('question','')}")
         logger.info(
             "discover_candidates: %d candidates (included union %d categories)",
             len(out),
@@ -347,113 +420,77 @@ class MarketScanner:
         return {"categories": cats, "other_count": other}
 
     def _fetch_orderbooks(self, market: dict) -> dict:
-        """抓该市场每 token 的订单簿快照(钱包无关)。抓不到的略过。"""
+        """抓该市场每 token 的订单簿快照(钱包无关)。抓不到的略过。
+
+        每 token 只发一次请求:价差由 book_spread 从这份簿本地算,不再多发 /spread。"""
         books = {}
         for token in market.get("tokens", []):
             token_id = token.get("token_id", "")
             if not token_id:
                 continue
             try:
-                spread_val = self.api.get_spread(token_id)
                 ob = self.api.get_orderbook(token_id)
             except Exception as e:
                 logger.warning("Orderbook fetch failed for %s: %s", token_id, e)
                 continue
+            bids = ob.get("bids", [])
+            asks = ob.get("asks", [])
             books[token_id] = {
-                "bids": ob.get("bids", []),
-                "asks": ob.get("asks", []),
+                "bids": bids,
+                "asks": asks,
                 "tick_size": ob.get("tick_size", "0.01"),
-                "spread": spread_val,
+                "spread": book_spread(bids, asks),
             }
         return books
 
-    def filter_for_template(
+    def prefilter_for_template(
         self, candidate_pool, template, wallet_address
     ) -> list[dict]:
-        """从候选池产出某模板的 eligible(门槛过滤 + 品类 narrow + 老算法定价)。"""
+        """只跑「不需要订单簿」的门槛(品类/奖励/结算窗口/冷却/档位/价带),返回幸存市场。
+
+        下单轮据此决定给谁刷簿:整池 300+ 市场里真正能下单的只有几十个,以前却全刷了
+        (每市场每 token 一次网络请求),是首单等待时间的大头。filter_for_template 复用
+        本函数,两处门槛口径不会漂。"""
         min_reward = template["min_reward_usd"]
         min_price_cents = template["min_price_cents"]
         max_price_cents = template["max_price_cents"]
-        max_spread_cents = template["max_spread_cents"]
         min_days = template["min_settlement_days"]
         max_days = template.get("max_settlement_days")  # None=不限上限
         included = set(template.get("included_categories", []) or [])
         include_other = bool(template.get("include_other", False))
         tier_sizes = enabled_sizes(template.get("size_tiers") or [])
 
-        eligible = []
+        survivors = []
         for market in candidate_pool:
             if not market_wanted(market.get("tags", []), included, include_other):
                 continue
-            total_rate = sum(
-                rc.get("rate_per_day", 0) for rc in market.get("rewards_config", [])
-            )
+            total_rate = _batch_rate(market)
             market_reward = market.get("market_reward", total_rate)
             if total_rate < min_reward or market_reward < min_reward:
                 continue
-            end_date_str = market.get("end_date", "")
-            end_ts = _parse_end_date(end_date_str)
+            end_ts = _parse_end_date(market.get("end_date", ""))
             # 结算窗口 [min_days, max_days](整天)。无法解析结算日 -> 保留(fail-open)。
             if end_ts and not _in_settlement_window(end_ts, min_days, max_days):
                 continue
-
-            condition_id = market.get("condition_id", "")
-            if self.db.is_in_cooldown(wallet_address, condition_id):
+            if self.db.is_in_cooldown(wallet_address, market.get("condition_id", "")):
                 continue  # 该钱包对此市场仍在冷却(与旧 scan 口径一致)
-            max_spread_reward = float(market.get("rewards_max_spread", 2))
-            min_size = int(market.get("rewards_min_size", 0) or 0)
             # 档位模块精确匹配:最低份额必须等于某个已启用模块的档位值,否则不做。
-            if min_size not in tier_sizes:
+            if int(market.get("rewards_min_size", 0) or 0) not in tier_sizes:
                 continue
-            neg_risk = market.get("neg_risk", False)
-            books = market.get("_orderbooks", {})
-            valid_tokens = [
-                t
-                for t in market.get("tokens", [])
-                if min_price_cents <= float(t.get("price", 0)) * 100 <= max_price_cents
-            ]
-            for token in valid_tokens:
-                token_id = token.get("token_id", "")
-                book = books.get(token_id)
-                if not book:
-                    continue
-                spread_val = book.get("spread", -1)
-                if spread_val < 0 or spread_val * 100 >= max_spread_cents:
-                    continue
-                bids = sorted(
-                    book.get("bids", []), key=lambda x: float(x["price"]), reverse=True
-                )
-                asks = sorted(book.get("asks", []), key=lambda x: float(x["price"]))
-                if not bids or not asks:
-                    continue
-                best_bid = float(bids[0]["price"])
-                best_ask = float(asks[0]["price"])
-                if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
-                    continue
-                tick_size_str = book.get("tick_size", "0.01")
-                midpoint = (best_bid + best_ask) / 2
-                rmin, rmax = reward_price_range(midpoint, max_spread_reward)
-                eligible.append(
-                    {
-                        "market_id": condition_id,
-                        "token_id": token_id,
-                        "market_name": market.get("question", ""),
-                        "outcome": token.get("outcome", ""),
-                        "market_competitiveness": market.get(
-                            "market_competitiveness", 0
-                        ),
-                        "end_date": end_date_str,
-                        "daily_reward": market_reward,
-                        "rewards_max_spread": max_spread_reward,
-                        "rewards_min_size": min_size,
-                        "tick_size_str": tick_size_str,
-                        "neg_risk": neg_risk,
-                        "tags": market.get("tags", []),
-                        "reward_range_min": rmin,
-                        "reward_range_max": rmax,
-                        "spread_cents": spread_val * 100,
-                    }
-                )
+            if not _tokens_in_price_band(market, min_price_cents, max_price_cents):
+                continue
+            survivors.append(market)
+        return survivors
+
+    def filter_for_template(
+        self, candidate_pool, template, wallet_address
+    ) -> list[dict]:
+        """从候选池产出某模板的 eligible(无簿门槛 + 订单簿门槛/定价)。"""
+        eligible = []
+        for market in self.prefilter_for_template(
+            candidate_pool, template, wallet_address
+        ):
+            eligible.extend(self.book_eligible(market, template))
         logger.info(
             "filter_for_template(%s): %d eligible from %d candidates",
             wallet_address,
@@ -461,3 +498,68 @@ class MarketScanner:
             len(candidate_pool),
         )
         return eligible
+
+    def book_eligible(self, market, template) -> list[dict]:
+        """单个**已过无簿门槛**的市场,跑订单簿门槛(价带/价差)+ 定价,产出逐 token eligible。
+
+        与无簿门槛(prefilter_for_template)分离:下单轮已用 prefilter 选出 subset 决定刷哪些
+        簿,直接对 subset 逐个调本函数即可,不必再走一遍 prefilter 的无簿门槛(热路径上省下
+        重复的品类/冷却 DB 查询)。filter_for_template = prefilter + 本函数,对外仍自包含。"""
+        min_price_cents = template["min_price_cents"]
+        max_price_cents = template["max_price_cents"]
+        max_spread_cents = template["max_spread_cents"]
+
+        condition_id = market.get("condition_id", "")
+        end_date_str = market.get("end_date", "")
+        market_reward = market.get("market_reward", _batch_rate(market))
+        max_spread_reward = float(market.get("rewards_max_spread", 2))
+        min_size = int(market.get("rewards_min_size", 0) or 0)
+        neg_risk = market.get("neg_risk", False)
+        books = market.get("_orderbooks", {})
+        valid_tokens = [
+            t
+            for t in market.get("tokens", [])
+            if min_price_cents <= _token_price_cents(t) <= max_price_cents
+        ]
+        out = []
+        for token in valid_tokens:
+            token_id = token.get("token_id", "")
+            book = books.get(token_id)
+            if not book:
+                continue
+            spread_val = book.get("spread", -1)
+            if spread_val < 0 or spread_val * 100 >= max_spread_cents:
+                continue
+            bids = sorted(
+                book.get("bids", []), key=lambda x: float(x["price"]), reverse=True
+            )
+            asks = sorted(book.get("asks", []), key=lambda x: float(x["price"]))
+            if not bids or not asks:
+                continue
+            best_bid = float(bids[0]["price"])
+            best_ask = float(asks[0]["price"])
+            if best_bid * 100 < min_price_cents or best_bid * 100 > max_price_cents:
+                continue
+            tick_size_str = book.get("tick_size", "0.01")
+            midpoint = (best_bid + best_ask) / 2
+            rmin, rmax = reward_price_range(midpoint, max_spread_reward)
+            out.append(
+                {
+                    "market_id": condition_id,
+                    "token_id": token_id,
+                    "market_name": market.get("question", ""),
+                    "outcome": token.get("outcome", ""),
+                    "market_competitiveness": market.get("market_competitiveness", 0),
+                    "end_date": end_date_str,
+                    "daily_reward": market_reward,
+                    "rewards_max_spread": max_spread_reward,
+                    "rewards_min_size": min_size,
+                    "tick_size_str": tick_size_str,
+                    "neg_risk": neg_risk,
+                    "tags": market.get("tags", []),
+                    "reward_range_min": rmin,
+                    "reward_range_max": rmax,
+                    "spread_cents": spread_val * 100,
+                }
+            )
+        return out

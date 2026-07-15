@@ -4,7 +4,7 @@ import time
 import pytest
 from datetime import datetime, timedelta, date
 from unittest.mock import MagicMock
-from engine.scanner import MarketScanner
+from engine.scanner import MarketScanner, ScanSuperseded
 
 
 def _tier(size, shares=None, **over):
@@ -887,3 +887,327 @@ class TestDiscoverNeededSlugsOnly:
         ]
         scanner.discover_candidates(templates)
         assert getattr(scanner, "last_catalog", None) is None
+
+
+class TestSpreadComputedLocally:
+    """价差从已抓回的订单簿本地算(卖一−买一),不再每 token 多发一次 /spread 请求。
+
+    /spread 实测 1.27s/次、比抓订单簿本身还慢 3 倍,而它的值就是订单簿一减;整池刷簿
+    时它占了一半的网络调用,是首单等待时间的大头(2026-07-14)。
+    """
+
+    def _scanner(self, bids, asks):
+        api = MagicMock()
+        api.get_orderbook.return_value = {
+            "bids": bids,
+            "asks": asks,
+            "tick_size": "0.01",
+        }
+        return api, MarketScanner(api, MagicMock(), "")
+
+    def _refresh(self, scanner):
+        pool = [{"condition_id": "A", "tokens": [{"token_id": "A-y"}]}]
+        scanner.refresh_orderbooks(pool)
+        return pool[0]["_orderbooks"]["A-y"]
+
+    def test_spread_from_book_without_extra_request(self):
+        api, scanner = self._scanner(
+            [{"price": "0.30", "size": "100"}], [{"price": "0.33", "size": "100"}]
+        )
+        assert self._refresh(scanner)["spread"] == 0.03
+        api.get_spread.assert_not_called()
+
+    def test_spread_has_no_float_dust(self):
+        # 0.53-0.51 裸减 = 0.020000000000000018 -> *100 后与 max_spread_cents 的比较会翻面。
+        _, scanner = self._scanner(
+            [{"price": "0.51", "size": "1"}], [{"price": "0.53", "size": "1"}]
+        )
+        assert self._refresh(scanner)["spread"] == 0.02
+
+    def test_book_side_missing_spread_unknown(self):
+        # 缺一边 -> 价差无从谈起,沿用 -1(filter 据此跳过该 token)。
+        _, scanner = self._scanner([], [{"price": "0.33", "size": "1"}])
+        assert self._refresh(scanner)["spread"] == -1
+
+
+class TestPrefilterForTemplate:
+    """把「不需要订单簿就能判定」的门槛单独暴露出来:下单轮据此只给幸存市场刷簿,
+    而不是整池 300+ 市场全刷(其中真正能下单的只有几十个)。"""
+
+    def _candidate(self, cid, min_size=100, reward=50, tags=None, price=0.30):
+        return {
+            "condition_id": cid,
+            "question": "M",
+            "tags": tags or [],
+            "end_date": "",
+            "rewards_max_spread": 2,
+            "rewards_min_size": min_size,
+            "market_reward": reward,
+            "rewards_config": [{"rate_per_day": reward}],
+            "tokens": [{"token_id": cid + "-y", "outcome": "Yes", "price": price}],
+        }
+
+    def _template(self, **over):
+        t = {
+            "min_reward_usd": 6,
+            "min_price_cents": 10,
+            "max_price_cents": 90,
+            "max_spread_cents": 6,
+            "min_settlement_days": 0,
+            "included_categories": ["politics"],
+            "include_other": True,
+            "size_tiers": [_tier(100)],
+        }
+        t.update(over)
+        return t
+
+    def _scanner(self, cooldown=False):
+        db = MagicMock()
+        db.is_in_cooldown.return_value = cooldown
+        return MarketScanner(MagicMock(), db, "")
+
+    def _ids(self, scanner, pool, tmpl):
+        return {
+            m["condition_id"] for m in scanner.prefilter_for_template(pool, tmpl, "0xW")
+        }
+
+    def test_keeps_market_that_has_no_orderbook_yet(self):
+        # 关键契约:prefilter 必须在「还没刷簿」的候选上就能判定,否则省不掉任何请求。
+        scanner = self._scanner()
+        pool = [self._candidate("A")]
+        assert self._ids(scanner, pool, self._template()) == {"A"}
+
+    def test_drops_unmatched_tier(self):
+        scanner = self._scanner()
+        pool = [self._candidate("A"), self._candidate("B", min_size=300)]
+        assert self._ids(scanner, pool, self._template()) == {"A"}
+
+    def test_drops_low_reward(self):
+        scanner = self._scanner()
+        pool = [self._candidate("A"), self._candidate("B", reward=3)]
+        assert self._ids(scanner, pool, self._template()) == {"A"}
+
+    def test_drops_excluded_category(self):
+        scanner = self._scanner()
+        pool = [
+            self._candidate("A", tags=["politics"]),
+            self._candidate("B", tags=["esports"]),
+        ]
+        tmpl = self._template(included_categories=["politics"], include_other=False)
+        assert self._ids(scanner, pool, tmpl) == {"A"}
+
+    def test_drops_cooldown(self):
+        scanner = self._scanner(cooldown=True)
+        assert self._ids(scanner, [self._candidate("A")], self._template()) == set()
+
+    def test_drops_market_with_no_token_in_price_band(self):
+        scanner = self._scanner()
+        pool = [self._candidate("A"), self._candidate("B", price=0.95)]
+        assert self._ids(scanner, pool, self._template()) == {"A"}
+
+
+class TestDiscoveryTierWindowGating:
+    """发现阶段:拉「精确奖励」(每市场一次网络、0.78s/次)前,先用不需要订单簿也不需要
+    精确奖励的并集门槛(档位 sizes 并集 + 各模板结算窗口)剔掉注定不被任何模板要的市场。
+
+    整池 300+ 候选逐个拉精确奖励是发现阶段的大头;真正会被下单的只有几十个(2026-07-14)。
+    """
+
+    def _api(self, markets):
+        api = MagicMock()
+
+        def fake_rewards(tag_slug=None, **kw):
+            return list(markets) if tag_slug is None else []
+
+        api.get_rewards_markets.side_effect = fake_rewards
+        api.get_rewards_for_market.return_value = []  # 精确奖励:记录被对谁调用
+        return api
+
+    def _mkt(self, cid, min_size=100, end_days=10, rate=50):
+        end = (date.today() + timedelta(days=end_days)).strftime("%Y-%m-%d")
+        return {
+            "condition_id": cid,
+            "question": cid,
+            "tokens": [{"token_id": cid + "-y"}],
+            "rewards_config": [{"rate_per_day": rate}],
+            "rewards_min_size": min_size,
+            "end_date": end,
+        }
+
+    def _tmpl(self, **over):
+        t = {
+            "included_categories": [],
+            "include_other": True,
+            "min_reward_usd": 0,
+            "size_tiers": [_tier(100)],
+            "min_settlement_days": 0,
+            "max_settlement_days": None,
+        }
+        t.update(over)
+        return t
+
+    def _db(self):
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        return db
+
+    def _priced(self, api):
+        return {c.args[0] for c in api.get_rewards_for_market.call_args_list}
+
+    def test_skips_precise_reward_for_unmatched_tier(self):
+        api = self._api([self._mkt("A", min_size=100), self._mkt("B", min_size=300)])
+        sc = MarketScanner(api, self._db(), "")
+        pool = sc.discover_candidates([self._tmpl()])
+        assert self._priced(api) == {"A"}  # B 档位对不上 -> 不拉精确奖励
+        # 但 B 仍进候选池(市场发现页照常显示),只是用批量奖励兜底、下单时由 filter 再剔。
+        assert {m["condition_id"] for m in pool} == {"A", "B"}
+
+    def test_skips_precise_reward_outside_all_windows(self):
+        api = self._api([self._mkt("A", end_days=0), self._mkt("B", end_days=10)])
+        sc = MarketScanner(api, self._db(), "")
+        pool = sc.discover_candidates([self._tmpl(max_settlement_days=0)])
+        assert self._priced(api) == {"A"}  # B 结算在窗口外 -> 不拉精确奖励
+        assert {m["condition_id"] for m in pool} == {"A", "B"}  # B 仍进池
+
+    def test_unparseable_end_date_is_fail_open(self):
+        m = self._mkt("A")
+        m["end_date"] = ""  # 解析不出结算日 -> 保留(与 filter 一致)
+        api = self._api([m])
+        sc = MarketScanner(api, self._db(), "")
+        sc.discover_candidates([self._tmpl(max_settlement_days=0)])
+        assert api.get_rewards_for_market.called
+
+    def test_union_across_templates(self):
+        api = self._api([self._mkt("A", 100), self._mkt("B", 300), self._mkt("C", 500)])
+        sc = MarketScanner(api, self._db(), "")
+        pool = sc.discover_candidates(
+            [self._tmpl(size_tiers=[_tier(100)]), self._tmpl(size_tiers=[_tier(300)])]
+        )
+        assert self._priced(api) == {"A", "B"}  # C 两个模板档位都不要 -> 不拉精确奖励
+        assert {m["condition_id"] for m in pool} == {"A", "B", "C"}  # 但都进池
+
+    def test_no_tiers_configured_does_not_gate_by_tier(self):
+        # 无任何启用档位 -> 并集为空 -> 不按档位筛(退化为旧行为,避免全剔)。
+        api = self._api([self._mkt("A", 100), self._mkt("B", 300)])
+        sc = MarketScanner(api, self._db(), "")
+        sc.discover_candidates([self._tmpl(size_tiers=[])])
+        assert self._priced(api) == {"A", "B"}
+
+
+class TestReviewHardening:
+    """/code-review high 发现的加固(2026-07-14):
+    [0] book_spread 价格解析放进容错,坏 level 不再掀翻整轮刷簿。
+    [2] 交叉盘(bid>ask)负价差 clamp 到 0(与旧 get_spread 一致让其可下单),不被当无簿跳过。
+    [1] 价带判断对 price=null 不崩。
+    [6] extra 循环尊重 cancel。
+    """
+
+    # --- [0]/[2] book_spread 健壮化 ---
+    def test_book_spread_malformed_level_is_unknown(self):
+        from engine.scanner import book_spread
+
+        # 某档缺 price 键 -> 价差不可知(-1),绝不抛(否则整轮刷簿/扫描中止)。
+        assert book_spread([{"size": "1"}], [{"price": "0.33", "size": "1"}]) == -1
+
+    def test_book_spread_none_price_is_unknown(self):
+        from engine.scanner import book_spread
+
+        assert book_spread([{"price": None}], [{"price": "0.33"}]) == -1
+
+    def test_book_spread_crossed_book_clamps_to_zero(self):
+        from engine.scanner import book_spread
+
+        # 交叉盘 best_bid 0.55 > best_ask 0.53 -> 价差为负,clamp 到 0(最窄,过 max_spread)。
+        assert book_spread([{"price": "0.55"}], [{"price": "0.53"}]) == 0.0
+
+    def test_book_spread_normal_unchanged(self):
+        from engine.scanner import book_spread
+
+        assert book_spread([{"price": "0.30"}], [{"price": "0.33"}]) == 0.03
+
+    # --- [6] extra 循环尊重 cancel ---
+    def test_extra_loop_honors_cancel(self):
+        api = MagicMock()
+
+        def fake_rewards(tag_slug=None, **kw):
+            # 两个市场,档位都对不上 -> 都进 extra(不拉精确奖励)。
+            return (
+                [
+                    {
+                        "condition_id": "A",
+                        "question": "A",
+                        "tokens": [{"token_id": "A-y"}],
+                        "rewards_config": [{"rate_per_day": 50}],
+                        "rewards_min_size": 999,
+                        "end_date": "",
+                    },
+                    {
+                        "condition_id": "B",
+                        "question": "B",
+                        "tokens": [{"token_id": "B-y"}],
+                        "rewards_config": [{"rate_per_day": 50}],
+                        "rewards_min_size": 999,
+                        "end_date": "",
+                    },
+                ]
+                if tag_slug is None
+                else []
+            )
+
+        api.get_rewards_markets.side_effect = fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        sc = MarketScanner(api, db, "")
+        tmpl = {
+            "included_categories": [],
+            "include_other": True,
+            "min_reward_usd": 0,
+            "size_tiers": [_tier(100)],
+            "min_settlement_days": 0,
+            "max_settlement_days": None,
+        }
+        calls = {"n": 0}
+
+        def cancel():
+            calls["n"] += 1
+            return calls["n"] > 2  # 前 2 次(pool 循环)False,第 3 次(extra 循环)True
+
+        with pytest.raises(ScanSuperseded):
+            sc.discover_candidates([tmpl], cancel=cancel)
+
+
+class TestPrefilterNullPrice:
+    """[1] 价带判断对 price=null 不崩(prefilter 是新暴露面,filter 的 valid_tokens 同修)。"""
+
+    def _template(self):
+        return {
+            "min_reward_usd": 6,
+            "min_price_cents": 10,
+            "max_price_cents": 90,
+            "max_spread_cents": 6,
+            "min_settlement_days": 0,
+            "included_categories": [],
+            "include_other": True,
+            "size_tiers": [_tier(100)],
+        }
+
+    def _candidate(self, cid, price):
+        return {
+            "condition_id": cid,
+            "question": "M",
+            "tags": [],
+            "end_date": "",
+            "rewards_max_spread": 2,
+            "rewards_min_size": 100,
+            "market_reward": 50,
+            "rewards_config": [{"rate_per_day": 50}],
+            "tokens": [{"token_id": cid + "-y", "outcome": "Yes", "price": price}],
+        }
+
+    def test_null_price_treated_as_out_of_band(self):
+        db = MagicMock()
+        db.is_in_cooldown.return_value = False
+        scanner = MarketScanner(MagicMock(), db, "")
+        pool = [self._candidate("A", 0.30), self._candidate("B", None)]
+        out = scanner.prefilter_for_template(pool, self._template(), "0xW")
+        assert {m["condition_id"] for m in out} == {"A"}  # B 的 null 价按 0 落带外,不崩

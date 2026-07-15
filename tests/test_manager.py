@@ -344,11 +344,17 @@ class TestSharedScanWithStatus:
             def __init__(self, api, db, addr):
                 pass
 
+            def prefilter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
             def refresh_orderbooks(self, pool):
                 pass
 
             def filter_for_template(self, pool, tmpl, addr):
                 return pool
+
+            def book_eligible(self, market, tmpl):
+                return [market]
 
         with patch("engine.manager.MarketScanner", FakeScanner):
             manager._place_round()
@@ -383,11 +389,17 @@ class TestSharedScanWithStatus:
             def __init__(self, api, db, addr):
                 pass
 
+            def prefilter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
             def refresh_orderbooks(self, pool):
                 pass
 
             def filter_for_template(self, pool, tmpl, addr):
                 return list(pool)
+
+            def book_eligible(self, market, tmpl):
+                return [market]
 
         with patch("engine.manager.MarketScanner", FakeScanner):
             manager._place_round()
@@ -463,11 +475,17 @@ class TestSharedScanWithStatus:
             ):
                 raise RuntimeError("discovery down")
 
+            def prefilter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
             def refresh_orderbooks(self, pool):
                 refreshed["pool"] = pool
 
             def filter_for_template(self, pool, tmpl, addr):
                 return pool
+
+            def book_eligible(self, market, tmpl):
+                return [market]
 
         with patch("engine.manager.MarketScanner", FlakyScanner):
             try:
@@ -684,3 +702,148 @@ class TestScanGuard:
         with patch("engine.manager.MarketScanner", FakeScanner):
             manager.scan_markets()
         assert seen["max_pages"] == 42
+
+
+class TestPlaceRoundRefreshesOnlySurvivors:
+    """下单轮只给「无簿门槛已通过」的市场刷订单簿。
+
+    整池 300+ 市场全刷、每 token 一次网络请求,是首单等待时间的大头——而真正能下单的
+    只有几十个,其余市场的簿抓回来只是被 filter 当场丢掉(2026-07-14)。
+    """
+
+    def _fake_scanner(self, survivors_by_wallet, refreshed):
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def prefilter_for_template(self, pool, tmpl, addr):
+                keep = survivors_by_wallet[addr]
+                return [m for m in pool if m["condition_id"] in keep]
+
+            def refresh_orderbooks(self, pool):
+                refreshed.extend(m["condition_id"] for m in pool)
+
+            def filter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
+            def book_eligible(self, market, tmpl):
+                return [market]
+
+        return FakeScanner
+
+    def _pool(self, *cids):
+        return [{"condition_id": c, "market_id": c} for c in cids]
+
+    def test_refreshes_only_prefiltered_markets(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xA": worker}
+        manager.eligible_markets = self._pool("m1", "m2", "m3")
+        refreshed = []
+
+        with patch(
+            "engine.manager.MarketScanner",
+            self._fake_scanner({"0xA": {"m2"}}, refreshed),
+        ):
+            manager._place_round()
+
+        assert refreshed == ["m2"]  # m1/m3 连簿都不抓
+        placed = worker.place_orders.call_args[0][0]
+        assert [m["condition_id"] for m in placed] == ["m2"]
+
+    def test_union_across_wallets_refreshed_once(self):
+        # 两个钱包模板不同 -> 幸存集取并集刷一次(共有市场不重复抓簿)。
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        wa, wb = MagicMock(), MagicMock()
+        wa.running = wb.running = True
+        manager.engines = {"0xA": wa, "0xB": wb}
+        manager.eligible_markets = self._pool("m1", "m2", "m3")
+        refreshed = []
+
+        with patch(
+            "engine.manager.MarketScanner",
+            self._fake_scanner({"0xA": {"m1", "m2"}, "0xB": {"m2", "m3"}}, refreshed),
+        ):
+            manager._place_round()
+
+        assert sorted(refreshed) == ["m1", "m2", "m3"]
+        assert len(refreshed) == 3  # m2 只刷一次
+        assert [m["condition_id"] for m in wa.place_orders.call_args[0][0]] == [
+            "m1",
+            "m2",
+        ]
+        assert [m["condition_id"] for m in wb.place_orders.call_args[0][0]] == [
+            "m2",
+            "m3",
+        ]
+
+    def test_no_survivor_skips_orderbook_fetch_entirely(self):
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xA": worker}
+        manager.eligible_markets = self._pool("m1")
+        refreshed = []
+
+        with patch(
+            "engine.manager.MarketScanner",
+            self._fake_scanner({"0xA": set()}, refreshed),
+        ):
+            manager._place_round()
+
+        assert refreshed == []
+        worker.place_orders.assert_called_once_with([], cancel_dropouts=True)
+
+
+class TestActiveTemplatesDedupKey:
+    """_active_templates 去重键必须含发现阶段实际用到的每个维度。发现阶段现在也用结算
+    窗口和档位 sizes 做并集门控,所以窗口/档位不同的模板不能被去重成一个(否则另一个的
+    窗口/档位没进并集 -> 误剔本该被它要的市场)。"""
+
+    def _mgr_with(self, tmpl_for):
+        manager, db = _make_manager()
+        db.list_wallets.return_value = [
+            {"address": "0xA", "enabled": True},
+            {"address": "0xB", "enabled": True},
+        ]
+        db.get_template_for.side_effect = tmpl_for
+        return manager
+
+    def _base(self, **over):
+        t = {
+            "included_categories": ["politics"],
+            "include_other": False,
+            "min_reward_usd": 100,
+            "size_tiers": [],
+            "min_settlement_days": 0,
+            "max_settlement_days": None,
+        }
+        t.update(over)
+        return t
+
+    def test_window_variants_not_deduped(self):
+        def tmpl_for(addr):
+            return self._base(max_settlement_days=0 if addr == "0xA" else 5)
+
+        assert len(self._mgr_with(tmpl_for)._active_templates()) == 2
+
+    def test_tier_variants_not_deduped(self):
+        def tmpl_for(addr):
+            sizes = (
+                [{"size": 100, "enabled": True}]
+                if addr == "0xA"
+                else [{"size": 300, "enabled": True}]
+            )
+            return self._base(size_tiers=sizes)
+
+        assert len(self._mgr_with(tmpl_for)._active_templates()) == 2
+
+    def test_identical_templates_still_deduped(self):
+        def tmpl_for(addr):
+            return self._base()
+
+        assert len(self._mgr_with(tmpl_for)._active_templates()) == 1

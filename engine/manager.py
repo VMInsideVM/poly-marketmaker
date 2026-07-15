@@ -840,7 +840,9 @@ class EngineManager:
             self._stop_event.wait(timeout=place_interval)
 
     def _active_templates(self) -> list[dict]:
-        """所有启用钱包绑定模板(按 included_categories 去重),供采集器算并集/交集。"""
+        """所有启用钱包绑定模板(按采集器实际用到的维度去重),供采集器算并集/交集。"""
+        from engine.tiers import enabled_sizes
+
         try:
             wallets = self.db.list_wallets()
         except Exception:
@@ -850,12 +852,16 @@ class EngineManager:
             if not w.get("enabled"):
                 continue
             tmpl = self.db.get_template_for(w["address"])
-            # 去重键须含采集器实际用到的三个维度:品类包含集 + 是否含其他 + 奖励下限
-            # (min_reward_usd 决定预筛 min_floor);只按品类去重会丢掉下限差异。
+            # 去重键须含采集器实际用到的每个维度:品类包含集 + 是否含其他 + 奖励下限
+            # (决定预筛 min_floor) + 结算窗口 + 档位 sizes(后两者决定发现阶段的并集门控:
+            # 窗口/档位不同的模板不能被去重成一个,否则另一个的窗口/档位没进并集就会误剔)。
             key = (
                 tuple(sorted(tmpl.get("included_categories", []) or [])),
                 bool(tmpl.get("include_other", False)),
                 tmpl.get("min_reward_usd", 0),
+                tmpl.get("min_settlement_days"),
+                tmpl.get("max_settlement_days"),
+                tuple(sorted(enabled_sizes(tmpl.get("size_tiers") or []))),
             )
             seen[key] = tmpl
         if seen:
@@ -941,7 +947,12 @@ class EngineManager:
         self._scan_with_status(skip_orderbook=True)
 
     def _place_round(self):
-        """快节奏:刷新订单簿 -> 每钱包精筛 + 下单(跌出撤单)。空池跳过。
+        """快节奏:无簿门槛精筛 -> 只给幸存市场刷订单簿 -> 每钱包下单(跌出撤单)。空池跳过。
+
+        刷簿是整轮最贵的一步(每市场每 token 一次网络请求),所以先用不需要订单簿的门槛
+        (品类/奖励/结算/冷却/档位/价带)把候选池筛一遍,只抓真正可能下单的那几十个市场的
+        簿——整池 300+ 全刷时,绝大多数簿抓回来只是被 filter 当场丢掉。各钱包幸存集取并集
+        刷一次(共有市场不重复抓)。
 
         先把候选池快照到本地 pool:并发的手动扫描会重绑 self.eligible_markets
         (扫描中先清空再重建),本轮持快照不受影响,免得中途看到空池误跳过。"""
@@ -949,13 +960,33 @@ class EngineManager:
         if not pool:
             return
         scanner = MarketScanner(self._scanner_api, self.db, "")
-        scanner.refresh_orderbooks(pool)
+
+        survivors, needed = {}, {}
         for address, worker in self.engines.items():
             if not worker.running:
                 continue
             try:
                 tmpl = self.db.get_template_for(address)
-                eligible = scanner.filter_for_template(pool, tmpl, address)
+                subset = scanner.prefilter_for_template(pool, tmpl, address)
+            except Exception as e:
+                logger.error("Prefilter failed for wallet %s: %s", address, e)
+                continue
+            survivors[address] = (tmpl, subset)
+            for market in subset:
+                needed.setdefault(market.get("condition_id", ""), market)
+        if not needed:
+            logger.info("本轮无市场通过无簿门槛,跳过刷订单簿")
+        scanner.refresh_orderbooks(list(needed.values()))
+
+        for address, (tmpl, subset) in survivors.items():
+            worker = self.engines.get(address)
+            if not worker or not worker.running:
+                continue
+            try:
+                # subset 已过无簿门槛(prefilter),直接跑簿门槛即可,不重复走 prefilter。
+                eligible = []
+                for market in subset:
+                    eligible.extend(scanner.book_eligible(market, tmpl))
                 eligible.sort(
                     key=lambda m: float(m.get("market_competitiveness", 0) or 0)
                 )
