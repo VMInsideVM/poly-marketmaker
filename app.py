@@ -5,6 +5,7 @@ import signal
 import sys
 import webbrowser
 import threading
+from logging.handlers import TimedRotatingFileHandler
 from models.database import Database
 from engine.manager import EngineManager
 from web.routes import app, init_app, init_manager, set_encryption_key
@@ -16,7 +17,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(LOG_PATH, encoding="utf-8"),
+        # 按天切,留 30 天:一个文件长到几 GB 就没法排查了(实盘 57MB/天、单文件累到
+        # 3.1GB,grep 一次要几分钟)。跨天重启也会补切——rolloverAt 按文件 mtime 算,
+        # 不需要程序在午夜时刻活着。
+        TimedRotatingFileHandler(
+            LOG_PATH, when="midnight", backupCount=30, encoding="utf-8"
+        ),
     ],
 )
 logger = logging.getLogger(__name__)
