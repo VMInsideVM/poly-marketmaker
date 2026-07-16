@@ -1177,6 +1177,48 @@ def api_networth():
     return jsonify({"wallet": wallet, "series": db.get_net_worth_daily(wallet, days)})
 
 
+@app.route("/api/pnl", methods=["GET"])
+@login_required
+def api_pnl():
+    """每日盈亏台账。wallet=<addr> 单钱包,wallet=all 全钱包按日期汇总。
+
+    返回 {series:[{date,reward,rebate,sell_profit,loss,fee,net}], totals, cumulative_net}。
+    日期按北京日回溯 days 天。
+    """
+    import time
+    from engine.pnl import beijing_day
+
+    wallet = (request.args.get("wallet") or "").strip()
+    if not wallet:
+        return jsonify({"error": "缺少 wallet 参数"}), 400
+    try:
+        days = int(request.args.get("days", 90))
+    except (TypeError, ValueError):
+        days = 90
+    now = time.time()
+    to_date = beijing_day(now)
+    from_date = beijing_day(now - days * 86400)
+    if wallet == "all":
+        series = db.get_daily_pnl_all(from_date, to_date)
+    else:
+        series = db.get_daily_pnl(wallet, from_date, to_date)
+    keys = ("reward", "rebate", "sell_profit", "loss", "fee", "net")
+    totals = {k: round(sum(s[k] for s in series), 6) for k in keys}
+    cum = 0.0
+    cumulative_net = []
+    for s in series:
+        cum += s["net"]
+        cumulative_net.append(round(cum, 6))
+    return jsonify(
+        {
+            "wallet": wallet,
+            "series": series,
+            "totals": totals,
+            "cumulative_net": cumulative_net,
+        }
+    )
+
+
 # --- API: Dashboard Summary ---
 
 
