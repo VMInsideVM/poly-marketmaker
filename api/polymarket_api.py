@@ -473,6 +473,35 @@ class PolymarketAPI:
         data = resp.json()
         return data if isinstance(data, list) else []
 
+    def get_activity(self, types=None, start=None, end=None) -> list:
+        """Data API /activity（公开，按 funder）。offset 翻页至末页。
+
+        types: 可选 type 白名单（逗号拼接）;start/end: epoch 秒窗口。用于盈亏台账取
+        奖励(REWARD)/返佣(MAKER_REBATE)/赎回(REDEEM)。走本钱包代理(self.proxy_url)。
+        """
+        user = self.get_funder()
+        limit = 500
+        offset = 0
+        out: list = []
+        while True:
+            params = {"user": user, "limit": limit, "offset": offset}
+            if types:
+                params["type"] = ",".join(types)
+            if start is not None:
+                params["start"] = int(start)
+            if end is not None:
+                params["end"] = int(end)
+            resp = http_get(f"{DATA_API_HOST}/activity", params=params, timeout=20)
+            resp.raise_for_status()
+            page = resp.json()
+            if not isinstance(page, list) or not page:
+                break
+            out.extend(page)
+            if len(page) < limit or offset + limit >= 10000:  # 末页 / offset 上限
+                break
+            offset += limit
+        return out
+
     # --- Rewards (CLOB API - public endpoints) ---
 
     @staticmethod
@@ -750,6 +779,7 @@ _PROXIED_METHODS = (
     "get_trades",
     "are_orders_scoring",
     "get_user_positions",
+    "get_activity",
 )
 for _name in _PROXIED_METHODS:
     setattr(PolymarketAPI, _name, _proxied(getattr(PolymarketAPI, _name)))
