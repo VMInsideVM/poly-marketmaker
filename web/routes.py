@@ -537,6 +537,8 @@ def api_add_wallet():
 
     # 该钱包专属代理(明文存原串);此后含本次导入探测在内的所有网络活动都走它。
     proxy = (data.get("proxy") or "").strip()
+    # 可选备注(纯展示,截断 40 字)。
+    remark = (data.get("remark") or "").strip()[:40]
 
     from api.polymarket_api import (
         PolymarketAPI,
@@ -570,7 +572,7 @@ def api_add_wallet():
 
     encrypted = encrypt(private_key, encryption_key)
     try:
-        db.add_wallet(address, encrypted, funder, sig_type, proxy=proxy)
+        db.add_wallet(address, encrypted, funder, sig_type, proxy=proxy, remark=remark)
     except Exception:
         return jsonify({"error": "该钱包已存在"}), 400
 
@@ -600,6 +602,15 @@ def api_set_wallet_proxy(address):
     proxy = ((request.get_json() or {}).get("proxy") or "").strip()
     db.set_wallet_proxy(address, proxy)
     _api_cache.pop(address, None)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/wallets/<address>/remark", methods=["PUT"])
+@login_required
+def api_set_wallet_remark(address):
+    """设置/清空某钱包备注(纯展示,不影响任何 API 客户端;空串=清空,截断到 40 字)。"""
+    remark = ((request.get_json() or {}).get("remark") or "").strip()[:40]
+    db.set_wallet_remark(address, remark)
     return jsonify({"ok": True})
 
 
@@ -1218,6 +1229,7 @@ def api_dashboard():
         wallet_summaries.append(
             {
                 "address": w["address"],
+                "remark": w.get("remark", ""),
                 "enabled": w["enabled"],
                 "running": running,
                 "balance": balance,
