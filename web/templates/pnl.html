@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>盈亏台账</h1>
+<section class="config-section">
+    <div class="form-inline">
+        <label>钱包 <select id="pnl-wallet"></select></label>
+        <span class="hint" style="color:#888;font-size:12px">近一年 · 北京时间为界 · 奖励次日 8 点到账归前一天</span>
+    </div>
+
+    <div id="pnl-totals" class="pnl-totals" style="display:flex;flex-wrap:wrap;gap:10px;margin:14px 0"></div>
+
+    <div id="pnl-chart-wrap" style="position:relative;margin-top:6px">
+        <svg id="pnl-chart" viewBox="0 0 900 300" style="width:100%;height:300px;display:block"></svg>
+        <div id="pnl-tip" style="display:none;position:absolute;pointer-events:none;background:rgba(0,0,0,.78);color:#fff;padding:6px 8px;border-radius:4px;font-size:12px;white-space:nowrap"></div>
+    </div>
+    <p class="hint" style="color:#888;font-size:12px"><span style="color:#4a90d9">━ 累计净利润</span>。净利润 = 做市奖励 + 做市返佣 + 卖出盈利 − 亏损 − taker手续费。转入转出不计入。</p>
+
+    <div id="pnl-empty" class="hint" style="display:none;color:#888">暂无盈亏记录：启动引擎后自动从 2026-06-01 补齐。</div>
+
+    <table class="data-table" id="pnl-table" style="margin-top:8px">
+        <thead>
+            <tr><th>日期</th><th>做市奖励</th><th>做市返佣</th><th>卖出盈利</th><th>亏损</th><th>手续费</th><th>净利润</th></tr>
+        </thead>
+        <tbody id="pnl-body"></tbody>
+    </table>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PNL_COLS = ['reward', 'rebate', 'sell_profit', 'loss', 'fee', 'net'];
+const PNL_LABELS = {reward: '做市奖励', rebate: '做市返佣', sell_profit: '卖出盈利', loss: '亏损', fee: '手续费', net: '净利润'};
+
+function money(v) { return (v == null ? 0 : v).toFixed(2); }
+function netColor(v) { return v > 1e-9 ? '#3aa66a' : (v < -1e-9 ? '#d24b4b' : '#888'); }
+
+function loadPnlWallets() {
+    fetch('/api/wallets').then(r => r.json()).then(ws => {
+        const sel = document.getElementById('pnl-wallet');
+        const opts = ['<option value="all">全部钱包</option>'].concat(ws.map(w =>
+            `<option value="${w.address}">${(w.remark && w.remark.trim()) ? escapeHtml(w.remark) + ' (' + shortAddr(w.address) + ')' : shortAddr(w.address)}</option>`
+        ));
+        sel.innerHTML = opts.join('');
+        sel.onchange = loadPnl;
+        loadPnl();
+    });
+}
+
+function loadPnl() {
+    const w = document.getElementById('pnl-wallet').value || 'all';
+    fetch(`/api/pnl?wallet=${encodeURIComponent(w)}&days=365`)
+        .then(r => r.json())
+        .then(d => { renderTotals(d.totals || {}); renderTable(d.series || []); drawPnlChart(d.series || [], d.cumulative_net || []); });
+}
+
+function renderTotals(t) {
+    const box = document.getElementById('pnl-totals');
+    box.innerHTML = PNL_COLS.map(k => {
+        const v = t[k] || 0;
+        const color = k === 'net' ? netColor(v) : (k === 'loss' || k === 'fee' ? '#d24b4b' : '#333');
+        return `<div style="min-width:110px;padding:8px 12px;border:1px solid #8883;border-radius:6px">
+            <div style="font-size:12px;color:#888">${PNL_LABELS[k]}</div>
+            <div style="font-size:18px;font-weight:600;color:${color}">${money(v)}</div></div>`;
+    }).join('');
+}
+
+function renderTable(series) {
+    const body = document.getElementById('pnl-body');
+    document.getElementById('pnl-empty').style.display = series.length ? 'none' : '';
+    // 倒序(最近在上)
+    body.innerHTML = series.slice().reverse().map(s => `
+        <tr>
+            <td>${s.date}</td>
+            <td>${money(s.reward)}</td>
+            <td>${money(s.rebate)}</td>
+            <td style="color:#3aa66a">${money(s.sell_profit)}</td>
+            <td style="color:#d24b4b">${money(s.loss)}</td>
+            <td style="color:#d24b4b">${money(s.fee)}</td>
+            <td style="color:${netColor(s.net)};font-weight:600">${money(s.net)}</td>
+        </tr>`).join('');
+}
+
+const P_PAD = {l: 60, r: 16, t: 12, b: 26}, P_W = 900, P_H = 300;
+
+function drawPnlChart(series, cum) {
+    const svg = document.getElementById('pnl-chart');
+    svg.innerHTML = '';
+    const wrap = document.getElementById('pnl-chart-wrap');
+    if (!series.length) { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+    const maxV = Math.max(...cum, 0);
+    const minV = Math.min(...cum, 0);
+    const n = series.length;
+    const x = i => n === 1 ? (P_PAD.l + (P_W - P_PAD.l - P_PAD.r) / 2)
+        : P_PAD.l + (P_W - P_PAD.l - P_PAD.r) * i / (n - 1);
+    const y = v => P_H - P_PAD.b - (P_H - P_PAD.t - P_PAD.b) * (v - minV) / (maxV - minV || 1);
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(tag, attrs) {
+        const e = document.createElementNS(NS, tag);
+        Object.keys(attrs).forEach(k => e.setAttribute(k, attrs[k]));
+        return e;
+    }
+    for (let g = 0; g <= 4; g++) {
+        const v = minV + (maxV - minV) * g / 4;
+        const gy = y(v);
+        svg.appendChild(el('line', {x1: P_PAD.l, y1: gy, x2: P_W - P_PAD.r, y2: gy, stroke: '#8884', 'stroke-width': 1}));
+        const t = el('text', {x: P_PAD.l - 6, y: gy + 4, 'text-anchor': 'end', 'font-size': 11, fill: '#888'});
+        t.textContent = v.toFixed(v >= 100 || v <= -100 ? 0 : 2);
+        svg.appendChild(t);
+    }
+    // 0 基准线(若跨正负)
+    if (minV < 0 && maxV > 0) {
+        svg.appendChild(el('line', {x1: P_PAD.l, y1: y(0), x2: P_W - P_PAD.r, y2: y(0), stroke: '#8886', 'stroke-width': 1, 'stroke-dasharray': '3 3'}));
+    }
+    [[0, 'start'], [n - 1, 'end']].forEach(pair => {
+        const t = el('text', {x: x(pair[0]), y: P_H - 8, 'text-anchor': pair[1], 'font-size': 11, fill: '#888'});
+        t.textContent = series[pair[0]].date;
+        svg.appendChild(t);
+    });
+    const pts = cum.map((v, i) => `${x(i)},${y(v)}`).join(' ');
+    svg.appendChild(el('polyline', {points: pts, fill: 'none', stroke: '#4a90d9', 'stroke-width': 2}));
+    const tip = document.getElementById('pnl-tip');
+    series.forEach((p, i) => {
+        const c = el('circle', {cx: x(i), cy: y(cum[i]), r: 4, fill: '#4a90d9', opacity: 0});
+        c.addEventListener('mouseenter', ev => {
+            c.setAttribute('opacity', 1);
+            tip.innerHTML = `${p.date}<br>累计净利润 ${money(cum[i])}<br>当日净 ${money(p.net)}（奖励 ${money(p.reward)} 返佣 ${money(p.rebate)} 盈 ${money(p.sell_profit)} 亏 ${money(p.loss)} 费 ${money(p.fee)}）`;
+            tip.style.display = '';
+            const box = wrap.getBoundingClientRect();
+            tip.style.left = Math.min(ev.clientX - box.left + 12, box.width - 250) + 'px';
+            tip.style.top = (ev.clientY - box.top - 10) + 'px';
+        });
+        c.addEventListener('mouseleave', () => { c.setAttribute('opacity', 0); tip.style.display = 'none'; });
+        svg.appendChild(c);
+    });
+}
+
+loadPnlWallets();
+</script>
+{% endblock %}

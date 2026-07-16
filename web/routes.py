@@ -298,6 +298,12 @@ def networth_page():
     return render_template("networth.html")
 
 
+@app.route("/pnl")
+@login_required
+def pnl_page():
+    return render_template("pnl.html")
+
+
 @app.route("/api/monitor-status", methods=["GET"])
 @login_required
 def api_monitor_status():
