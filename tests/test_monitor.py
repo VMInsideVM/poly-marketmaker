@@ -1610,3 +1610,16 @@ class TestResolutionExit:
         monitor._status_add = lambda **kw: rows.append(kw)
         monitor.check_exit()  # 不应抛
         assert any("裸奔" in (r.get("action") or "") for r in rows), rows
+
+    def test_resolving_no_bid_skips_without_phantom_record(self):
+        # 结算市场但盘口无买盘:市价卖不出,不能记幻影成交、更不能退回 Data API 现价。
+        # 不卖不记,发 ⚠️ 无买盘状态行,待有买盘再清。
+        monitor, api, db = self._setup(
+            0.30, 100, [], [(0.33, 500)], cur_price=0.13, gamma={"A": "proposed"}
+        )
+        rows = []
+        monitor._status_add = lambda **kw: rows.append(kw)
+        monitor.check_exit()
+        api.place_market_sell.assert_not_called()
+        db.record_trade.assert_not_called()
+        assert any("无买盘" in (r.get("action") or "") for r in rows), rows

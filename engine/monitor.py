@@ -639,7 +639,22 @@ class OrderMonitor:
         情况。先撤该 asset 全部挂卖单(否则挂卖单占用份额,市价卖没份额可卖),再市价卖。
         成交价用 market_fill_price(≈买一),绝不用 Data API 现价。
         """
-        tick, tick_str, best_bid, best_ask = self._sell_book(asset_id)
+        _, _, best_bid, _ = self._sell_book(asset_id)
+        if best_bid is None:
+            # 无买盘(或盘口拉取失败):市价单吃不到任何流动性(卖不出),且此时
+            # market_fill_price 会退回被禁的 Data API 现价 -> 会记一笔幻影成交。
+            # 故不卖不记,发 ⚠️ 状态行标记该持仓仍暴露,下个 tick 有买盘再清(自愈)。
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price="-",
+                size=str(size),
+                matched="-",
+                stage="离场",
+                action="⚠️结算·无买盘暂未清仓",
+                detail="市场结果已提交但盘口无买盘，市价卖不出，该持仓仍暴露，待有买盘再清",
+            )
+            return
         sells = [
             o
             for o in open_orders
