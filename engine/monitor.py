@@ -640,10 +640,10 @@ class OrderMonitor:
         成交价用 market_fill_price(≈买一),绝不用 Data API 现价。
         """
         _, _, best_bid, _ = self._sell_book(asset_id)
-        if best_bid is None:
-            # 无买盘(或盘口拉取失败):市价单吃不到任何流动性(卖不出),且此时
-            # market_fill_price 会退回被禁的 Data API 现价 -> 会记一笔幻影成交。
-            # 故不卖不记,发 ⚠️ 状态行标记该持仓仍暴露,下个 tick 有买盘再清(自愈)。
+        if best_bid is None or best_bid <= 0:
+            # 无买盘 / 买一≤0(或盘口拉取失败):市价单吃不到任何流动性(卖不出),且
+            # market_fill_price 仅当 best_bid>0 才取买一、否则退回被禁的 Data API 现价
+            # -> 会记一笔幻影成交。故不卖不记,发 ⚠️ 状态行标记该持仓仍暴露,下 tick 再清(自愈)。
             self._status_add(
                 market=cid,
                 side="卖出",

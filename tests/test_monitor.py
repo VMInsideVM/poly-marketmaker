@@ -1623,3 +1623,21 @@ class TestResolutionExit:
         api.place_market_sell.assert_not_called()
         db.record_trade.assert_not_called()
         assert any("无买盘" in (r.get("action") or "") for r in rows), rows
+
+    def test_resolving_zero_bid_also_skips(self):
+        # 买一==0(退化盘口):market_fill_price 仅在 best_bid>0 才取买一,否则退回被禁现价。
+        # 守卫用 <=0(不只是 is None)拦下,同样不卖不记,避免幻影成交按现价落库。
+        monitor, api, db = self._setup(
+            0.30,
+            100,
+            [(0, 500)],
+            [(0.33, 500)],
+            cur_price=0.13,
+            gamma={"A": "proposed"},
+        )
+        rows = []
+        monitor._status_add = lambda **kw: rows.append(kw)
+        monitor.check_exit()
+        api.place_market_sell.assert_not_called()
+        db.record_trade.assert_not_called()
+        assert any("无买盘" in (r.get("action") or "") for r in rows), rows
