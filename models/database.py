@@ -71,6 +71,7 @@ class Database:
                 funder TEXT NOT NULL DEFAULT '',
                 signature_type INTEGER NOT NULL DEFAULT 2,
                 proxy TEXT NOT NULL DEFAULT '',
+                remark TEXT NOT NULL DEFAULT '',
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
@@ -204,6 +205,9 @@ class Database:
             self.conn.commit()
         if "proxy" not in cols:
             c.execute("ALTER TABLE wallets ADD COLUMN proxy TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
+        if "remark" not in cols:
+            c.execute("ALTER TABLE wallets ADD COLUMN remark TEXT NOT NULL DEFAULT ''")
             self.conn.commit()
         c.execute("PRAGMA table_info(eligible_markets)")
         em_cols = {row[1] for row in c.fetchall()}
@@ -407,12 +411,13 @@ class Database:
         funder: str = "",
         signature_type: int = 2,
         proxy: str = "",
+        remark: str = "",
     ):
         c = self.conn.cursor()
         c.execute(
-            "INSERT INTO wallets (address, encrypted_key, funder, signature_type, proxy) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (address, encrypted_key, funder, signature_type, proxy),
+            "INSERT INTO wallets (address, encrypted_key, funder, signature_type, proxy, remark) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (address, encrypted_key, funder, signature_type, proxy, remark),
         )
         self.conn.commit()
 
@@ -420,6 +425,12 @@ class Database:
         """更新某钱包的代理串(明文)。下次启动引擎/重建该 worker 时生效。"""
         c = self.conn.cursor()
         c.execute("UPDATE wallets SET proxy = ? WHERE address = ?", (proxy, address))
+        self.conn.commit()
+
+    def set_wallet_remark(self, address: str, remark: str):
+        """更新某钱包的备注(纯展示,不影响任何交易/API 客户端)。"""
+        c = self.conn.cursor()
+        c.execute("UPDATE wallets SET remark = ? WHERE address = ?", (remark, address))
         self.conn.commit()
 
     def remove_wallet(self, address: str):
@@ -438,7 +449,7 @@ class Database:
     def list_wallets(self) -> list[dict]:
         c = self.conn.cursor()
         c.execute(
-            "SELECT address, encrypted_key, funder, signature_type, proxy, enabled, "
+            "SELECT address, encrypted_key, funder, signature_type, proxy, remark, enabled, "
             "created_at, template_id FROM wallets"
         )
         return [dict(row) for row in c.fetchall()]

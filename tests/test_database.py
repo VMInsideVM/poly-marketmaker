@@ -226,6 +226,48 @@ class TestWallets:
         finally:
             database.close()
 
+    def test_remark_defaults_to_empty(self, db):
+        db.add_wallet("0xABC", "enc")
+        assert db.list_wallets()[0]["remark"] == ""
+
+    def test_add_wallet_stores_remark(self, db):
+        db.add_wallet("0xABC", "enc", remark="主号")
+        assert db.list_wallets()[0]["remark"] == "主号"
+
+    def test_set_wallet_remark_updates(self, db):
+        db.add_wallet("0xABC", "enc")
+        db.set_wallet_remark("0xABC", "小号2")
+        assert db.list_wallets()[0]["remark"] == "小号2"
+
+    def test_migration_adds_remark_to_old_db(self, tmp_path):
+        import sqlite3
+
+        db_path = str(tmp_path / "old.db")
+        # 模拟老库:wallets 表没有 remark 列
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE wallets (address TEXT PRIMARY KEY, encrypted_key TEXT NOT NULL,"
+            " funder TEXT NOT NULL DEFAULT '', signature_type INTEGER NOT NULL DEFAULT 2,"
+            " proxy TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,"
+            " created_at REAL NOT NULL DEFAULT (strftime('%s','now')))"
+        )
+        conn.execute(
+            "INSERT INTO wallets (address, encrypted_key) VALUES ('0xOLD', 'enc')"
+        )
+        conn.commit()
+        conn.close()
+
+        database = Database(db_path)
+        database.init()  # 应迁移补 remark 列,默认 ''
+        try:
+            w = database.list_wallets()[0]
+            assert w["address"] == "0xOLD"
+            assert w["remark"] == ""
+            database.set_wallet_remark("0xOLD", "回填")
+            assert database.list_wallets()[0]["remark"] == "回填"
+        finally:
+            database.close()
+
 
 class TestOrders:
     def test_record_and_get_buy_order(self, db):
