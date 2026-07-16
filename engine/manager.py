@@ -18,9 +18,14 @@ from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
 from engine.resolution import in_resolution
 from engine.tiers import tier_for
+from engine.pnl import beijing_day
+from engine.pnl_ledger import rebuild_wallet_pnl
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
+
+# 盈亏台账补漏起点(北京日)。启动/重启后从这天补到今天;每日跨天再重算。
+PNL_START_DATE = "2026-06-01"
 
 
 def _worker_proxied(method):
@@ -54,6 +59,9 @@ class WalletWorker:
         # 净值快照:上次快照的本地日期(YYYY-MM-DD)。None=本进程还没记过 ->
         # 首个 tick 必记(覆盖引擎启动/单钱包启动/手动启动监控),之后跨天才再记。
         self._last_networth_date = None
+        # 盈亏台账:上次重算的北京日期(None=本进程还没算过)。首次(含每次重启)全量补漏
+        # 2026-06-01 起,之后跨北京日再重算(幂等 upsert,近几天自然刷新)。
+        self._last_pnl_date = None
 
     def start(self):
         self._stop_event.clear()
@@ -112,6 +120,7 @@ class WalletWorker:
         detection to cancel buys in any market whose UMA resolution was just
         proposed; check_exit then reflects the latest fills."""
         self._maybe_snapshot_networth()
+        self._maybe_rebuild_pnl()
         self.monitor.begin_status_tick()
         self.monitor.check_buy_orders()
         self.monitor.check_resolution()
@@ -139,6 +148,24 @@ class WalletWorker:
             self._last_networth_date = today
         except Exception as e:
             logger.warning("净值快照失败 %s: %s", self.wallet_address, e)
+
+    def _maybe_rebuild_pnl(self):
+        """每日盈亏台账:首个 tick(含每次重启)从 2026-06-01 全量补漏到今天;之后跨北京日
+        再重算一次(幂等 upsert,近几天奖励次日发放/成交滞后自然刷新)。
+
+        失败只打 WARNING、不置日期 -> 下个 tick 自然重试;绝不阻断监控步骤。台账仅展示,
+        不进任何交易决策。
+        """
+        today = beijing_day(time.time())
+        if self._last_pnl_date == today:
+            return
+        try:
+            rebuild_wallet_pnl(
+                self.api, self.db, self.wallet_address, PNL_START_DATE, today
+            )
+            self._last_pnl_date = today
+        except Exception as e:
+            logger.warning("台账重算失败 %s: %s", self.wallet_address, e)
 
     @_worker_proxied
     def place_orders(
