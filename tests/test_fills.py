@@ -281,6 +281,7 @@ def test_extract_fills_includes_our_maker_buy_with_side():
             "size": 20.0,
             "ts": 1779030000.0,
             "trade_id": "trade-2",
+            "fee_rate_bps": 0.0,
         }
     ]
 
@@ -295,6 +296,7 @@ def test_extract_fills_includes_our_maker_sell():
             "size": 190.31,
             "ts": 1779035234.0,
             "trade_id": "trade-1",
+            "fee_rate_bps": 0.0,
         }
     ]
 
@@ -308,6 +310,7 @@ def test_extract_fills_includes_our_taker_buy():
             "size": 100.0,
             "ts": 1779040000.0,
             "trade_id": "trade-taker-1",
+            "fee_rate_bps": 0.0,
         }
     ]
 
@@ -321,6 +324,7 @@ def test_extract_fills_includes_our_taker_sell():
             "size": 80.0,
             "ts": 1779060000.0,
             "trade_id": "trade-taker-sell",
+            "fee_rate_bps": 0.0,
         }
     ]
 
@@ -339,3 +343,43 @@ def test_extract_fills_buy_then_sell_across_trades_same_asset():
     assert ("BUY", 100.0) in sides
     assert ("SELL", 80.0) in sides
     assert len(fills) == 2
+
+
+def test_extract_fills_carries_fee_rate_bps():
+    from engine.fills import extract_fills
+
+    trades = [
+        {
+            "id": "t1",
+            "match_time": "100",
+            "trader_side": "TAKER",
+            "side": "SELL",
+            "asset_id": "A",
+            "size": "10",
+            "price": "0.2",
+            "fee_rate_bps": "30",
+            "maker_orders": [],
+        },
+        {
+            "id": "t2",
+            "match_time": "200",
+            "trader_side": "MAKER",
+            "asset_id": "X",
+            "maker_orders": [
+                {
+                    "maker_address": "0xFUND",
+                    "asset_id": "A",
+                    "side": "BUY",
+                    "matched_amount": "5",
+                    "price": "0.1",
+                    "fee_rate_bps": "",
+                }
+            ],
+        },
+    ]
+    fills = extract_fills(trades, "0xFUND", "A")
+    taker = [f for f in fills if f["trade_id"] == "t1"][0]
+    maker = [f for f in fills if f["trade_id"] == "t2"][0]
+    assert taker["fee_rate_bps"] == 30.0  # taker 取 top-level
+    assert maker["fee_rate_bps"] == 0.0  # maker 空串 -> 0
+    assert taker["side"] == "SELL" and taker["price"] == 0.2 and taker["size"] == 10.0

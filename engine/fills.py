@@ -77,6 +77,7 @@ def extract_fills(trades: list[dict], funder: str, asset_id: str) -> list[dict]:
                     "size": float(mo.get("matched_amount", 0) or 0),
                     "ts": ts,
                     "trade_id": trade_id,
+                    "fee_rate_bps": float(mo.get("fee_rate_bps") or 0),
                 }
             )
         if (
@@ -91,15 +92,18 @@ def extract_fills(trades: list[dict], funder: str, asset_id: str) -> list[dict]:
                     "size": float(tr.get("size", 0) or 0),
                     "ts": ts,
                     "trade_id": trade_id,
+                    "fee_rate_bps": float(tr.get("fee_rate_bps") or 0),
                 }
             )
     return out
 
 
 def extract_buy_fills(trades: list[dict], funder: str, asset_id: str) -> list[dict]:
-    """我们在某 token 上的全部 BUY 成交(extract_fills 的 BUY 视图,去掉 side 键)。"""
+    """我们在某 token 上的全部 BUY 成交(extract_fills 的 BUY 视图,去掉 side/费率键)。
+
+    成本重建不需手续费,故一并去掉 fee_rate_bps,保持既有 BUY 视图字段不变。"""
     return [
-        {k: v for k, v in f.items() if k != "side"}
+        {k: v for k, v in f.items() if k not in ("side", "fee_rate_bps")}
         for f in extract_fills(trades, funder, asset_id)
         if f["side"] == "BUY"
     ]
