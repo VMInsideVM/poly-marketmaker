@@ -8,12 +8,13 @@
         <input type="password" id="new-private-key" placeholder="钱包私钥（64位十六进制）">
         <input type="text" id="new-funder" placeholder="存款钱包地址（可选，留空自动识别）">
         <input type="text" id="new-proxy" placeholder="代理 host:port:user:pass（可选，留空直连）">
+        <input type="text" id="new-remark" placeholder="备注（可选，如 主号/小号2）">
         <button class="btn btn-primary" onclick="addWallet()">添加钱包</button>
     </div>
     <p style="color:#888;font-size:12px;margin-top:4px;">一般只需输入私钥，存款钱包地址会自动识别；若自动识别的地址与 polymarket.com/settings 不一致，可在第二个框手动填写正确的存款地址。</p>
     <table class="data-table" id="wallet-config-table">
         <thead>
-            <tr><th>地址</th><th>存款地址</th><th>代理</th><th>模板</th><th>状态</th><th>操作</th></tr>
+            <tr><th>地址</th><th>存款地址</th><th>代理</th><th>备注</th><th>模板</th><th>状态</th><th>操作</th></tr>
         </thead>
         <tbody id="wallet-config-body"></tbody>
     </table>
@@ -480,6 +481,7 @@ document.getElementById('engine-form').addEventListener('submit', function(e) {
 });
 
 let _walletProxies = {};
+let _walletRemarks = {};
 
 function proxyLabel(p) {
     if (!p) return '<span style="color:#888">直连</span>';
@@ -500,12 +502,27 @@ function editProxy(address) {
     });
 }
 
+function editRemark(address) {
+    const cur = _walletRemarks[address] || '';
+    const v = prompt('备注（留空=清除）：', cur);
+    if (v === null) return;
+    fetch(`/api/wallets/${address}/remark`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({remark: v.trim()}),
+    }).then(r => r.json()).then(() => {
+        showToast('备注已更新');
+        loadWallets();
+    });
+}
+
 function loadWallets() {
     fetch('/api/wallets').then(r => r.json()).then(wallets => {
         const tbody = document.getElementById('wallet-config-body');
         _walletProxies = {};
+        _walletRemarks = {};
         tbody.innerHTML = wallets.map(w => {
             _walletProxies[w.address] = w.proxy || '';
+            _walletRemarks[w.address] = w.remark || '';
             const opts = templates.map(t => {
                 const sel = (w.template_id === t.id) ||
                     (w.template_id == null && t.id === defaultTemplateId);
@@ -516,6 +533,7 @@ function loadWallets() {
                 <td title="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</td>
                 <td title="${w.funder || ''}">${w.funder ? w.funder.slice(0,6)+'...'+w.funder.slice(-4) : '-'}</td>
                 <td title="${w.proxy || ''}">${proxyLabel(w.proxy)}</td>
+                <td title="${escapeHtml(w.address)}">${escapeHtml(w.remark || '')}</td>
                 <td><select onchange="bindWalletTemplate('${w.address}', this.value)">${opts}</select></td>
                 <td>
                     <label class="switch">
@@ -526,6 +544,7 @@ function loadWallets() {
                 </td>
                 <td>
                     <button class="btn btn-sm" onclick="editProxy('${w.address}')">代理</button>
+                    <button class="btn btn-sm" onclick="editRemark('${w.address}')">备注</button>
                     <button class="btn btn-sm btn-danger" onclick="removeWallet('${w.address}')">删除</button>
                 </td>
             </tr>`;
@@ -576,8 +595,10 @@ function closeWalletModal() {
 
 function finalizeImport(key, funder) {
     const proxy = document.getElementById('new-proxy').value.trim();
+    const remark = document.getElementById('new-remark').value.trim();
     const body = funder ? {private_key: key, funder: funder} : {private_key: key};
     if (proxy) body.proxy = proxy;
+    if (remark) body.remark = remark;
     fetch('/api/wallets', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -595,6 +616,7 @@ function finalizeImport(key, funder) {
         document.getElementById('new-private-key').value = '';
         document.getElementById('new-funder').value = '';
         document.getElementById('new-proxy').value = '';
+        document.getElementById('new-remark').value = '';
         showToast('钱包已添加 · 账户类型：' + (ACCT_TYPES[data.signature_type] || ('sig=' + data.signature_type)));
         loadWallets();
     });

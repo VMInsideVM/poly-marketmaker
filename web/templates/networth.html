@@ -24,7 +24,7 @@ function loadWalletList() {
     fetch('/api/wallets').then(r => r.json()).then(ws => {
         const sel = document.getElementById('nw-wallet');
         sel.innerHTML = ws.map(w =>
-            `<option value="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</option>`
+            `<option value="${w.address}">${(w.remark && w.remark.trim()) ? escapeHtml(w.remark) + ' (' + shortAddr(w.address) + ')' : shortAddr(w.address)}</option>`
         ).join('');
         sel.onchange = loadSeries;
         if (ws.length) loadSeries(); else showEmpty(true);

@@ -68,7 +68,7 @@ function refreshDashboard() {
         const tbody = document.getElementById('wallet-body');
         tbody.innerHTML = (data.wallets || []).map(w => `
             <tr>
-                <td title="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</td>
+                <td title="${escapeHtml(w.address)}">${escapeHtml(walletLabel(w.remark, w.address))}</td>
                 <td>${w.balance != null ? w.balance.toFixed(2) : '-'}</td>
                 <td>${w.open_orders ?? '-'}</td>
                 <td>${w.positions ?? '-'}</td>

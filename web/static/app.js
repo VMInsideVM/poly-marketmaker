@@ -6,6 +6,15 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+// 钱包短地址 + 备注标签(备注纯展示,各页复用)。
+function shortAddr(a) {
+  return a && a.length > 12 ? a.slice(0, 6) + '...' + a.slice(-4) : (a || '');
+}
+// 钱包标签:有备注显示备注,否则短地址;完整地址请放到 title。
+function walletLabel(remark, addr) {
+  return (remark && String(remark).trim()) ? String(remark) : shortAddr(addr);
+}
+
 let _toastTimer = null;
 function showToast(msg) {
   let el = document.getElementById('app-toast');

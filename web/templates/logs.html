@@ -28,9 +28,7 @@
 
 {% block scripts %}
 <script>
-function shortWallet(w) {
-    return w && w.length > 12 ? w.slice(0, 6) + '..' + w.slice(-4) : (w || '');
-}
+let _remarkByAddr = {};
 function actionClass(a) {
     a = a || '';
     if (/replace|cancel|止损|跳过|stoploss/.test(a)) return 'loss';
@@ -56,7 +54,7 @@ function refreshStatus() {
                 ? new Date(r.ts * 1000).toLocaleString('zh-CN') : '';
             return `<tr>
                 <td>${escapeHtml(t)}</td>
-                <td title="${escapeHtml(r.wallet)}">${escapeHtml(shortWallet(r.wallet))}</td>
+                <td title="${escapeHtml(r.wallet)}">${escapeHtml(walletLabel(_remarkByAddr[r.wallet] || '', r.wallet))}</td>
                 <td>${marketCell(r.market_name, r.market, r.market_url)}</td>
                 <td>${escapeHtml(r.side)}</td>
                 <td>${escapeHtml(r.price)}</td>
@@ -73,9 +71,11 @@ function refreshStatus() {
 fetch('/api/wallets').then(r => r.json()).then(wallets => {
     const select = document.getElementById('wallet-filter');
     wallets.forEach(w => {
+        _remarkByAddr[w.address] = w.remark || '';
         const opt = document.createElement('option');
         opt.value = w.address;
-        opt.textContent = `${w.address.slice(0,6)}...${w.address.slice(-4)}`;
+        opt.textContent = (w.remark && w.remark.trim())
+            ? `${w.remark} (${shortAddr(w.address)})` : shortAddr(w.address);
         select.appendChild(opt);
     });
 });

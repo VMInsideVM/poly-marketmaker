@@ -46,9 +46,7 @@
 
 {% block scripts %}
 <script>
-function shortWallet(w) {
-    return w && w.length > 12 ? w.slice(0, 6) + '..' + w.slice(-4) : (w || '');
-}
+let _remarkByAddr = {};
 function actionClass(a) {
     a = a || '';
     if (/replace|cancel|止损|跳过|stoploss/.test(a)) return 'loss';
@@ -109,7 +107,7 @@ function refreshActions() {
         body.innerHTML = rows.map(a => `
             <tr>
                 <td>${escapeHtml(new Date(a.created_at * 1000).toLocaleString('zh-CN'))}</td>
-                <td title="${escapeHtml(a.wallet)}">${escapeHtml(shortWallet(a.wallet))}</td>
+                <td title="${escapeHtml(a.wallet)}">${escapeHtml(walletLabel(_remarkByAddr[a.wallet] || '', a.wallet))}</td>
                 <td>${marketCell(a.market_name, a.market_id, a.market_url)}</td>
                 <td class="${actionClass(a.action_type)}">${escapeHtml(ACTION_LABELS[a.action_type] || a.action_type)}</td>
                 <td>${escapeHtml(a.side)}</td>
@@ -130,9 +128,11 @@ function refreshActions() {
 fetch('/api/wallets').then(r => r.json()).then(wallets => {
     const select = document.getElementById('wallet-filter');
     wallets.forEach(w => {
+        _remarkByAddr[w.address] = w.remark || '';
         const opt = document.createElement('option');
         opt.value = w.address;
-        opt.textContent = `${w.address.slice(0,6)}...${w.address.slice(-4)}`;
+        opt.textContent = (w.remark && w.remark.trim())
+            ? `${w.remark} (${shortAddr(w.address)})` : shortAddr(w.address);
         select.appendChild(opt);
     });
 });
