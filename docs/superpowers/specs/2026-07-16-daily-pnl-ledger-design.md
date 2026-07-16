@@ -141,3 +141,18 @@ CREATE TABLE IF NOT EXISTS daily_pnl (
 - 结算归零 v1 尽力而为(主路径市价卖亏损已覆盖),不为极少数归零仓做重型链上追溯。
 - 不自己维护品类费率表(用逐笔实际费率)。
 - 不引入新数据源做「本地成交账本」(成本仍只认 get_trades,禁 avgPrice/curPrice)。
+
+## 十四、Phase 0 探针结论（2026-07-16 实盘锁定，覆盖 §三/§五 相关不确定项）
+
+实盘 `probe_pnl.py` 跑通,字段形态锁定如下（后续 Phase 按此写，不再猜）：
+
+- **奖励改用公开 `/activity` type=REWARD**（**弃用 `/rewards/user/total`**——实盘该 L2 端点建 api-key 报 400、逐日返回 `[]`，而同期 `/activity` 有 45 条 REWARD，故不可靠）。
+  - REWARD 记录：`usdcSize` = 美元奖励额（`size == usdcSize`），`conditionId/asset/price/side` 均空，`timestamp` = UTC 秒（发放时刻，实测 UTC 00:00:xx）。
+  - **归日**：`reward_date = beijing_day(timestamp) − 1 天`（发放当北京日的前一天 = earning 日，正合「8点到账=前一天」）。
+- **MAKER_REBATE 单列** `rebate_usd`：公开 `/activity` type=MAKER_REBATE 的 `usdcSize`，按 `beijing_day(timestamp)` 归日（做市返佣，用户要求单列统计）。
+- **成交与手续费 = authed `get_trades`**（实盘 626 笔可用）：**复用现有 `engine/fills.py extract_fills`**（按 asset 抽我方 maker∪taker 成交）+ `position_cost_with_lots` 方法论。
+  - 字段：top-level `side/size/price/match_time(秒,字符串)/fee_rate_bps/trader_side/maker_orders[]`；我方 maker 成交 = `maker_orders[]` 里 `maker_address==funder` 的条目（其 `fee_rate_bps` 为空串=0），taker 成交 = top-level（`trader_side=="TAKER"`）。
+  - **实测所有 `fee_rate_bps`=0**（maker 恒 0、当前 taker 也 0）→ `fee_usd` 目前恒 0；仍按 `fee = (fee_rate_bps/10000) × price × size` 现算以备将来收费（**该公式未经非零费率验证**，注明；将来收费再校准）。
+- **REDEEM/DEPOSIT/WITHDRAWAL**：本次 500 条窗口**无样本**。⇒ 结算盈亏（含归零）**v1 先不计**（骨架留 `/activity` REDEEM.usdcSize − 成本，待有样本再启用）；主路径「结算前市价卖 = 卖出亏损」已由 get_trades FIFO 覆盖。转账默认不进利润，不需拉取。
+- **口径更新**：`daily_pnl` 加 `rebate_usd` 列；`net_usd = reward_usd + rebate_usd + sell_profit_usd − loss_usd − fee_usd`。
+- **鉴权影响**：奖励/返佣/赎回走**公开** `/activity`（免鉴权，一次 `user=funder` 取回）；成交/手续费走 **authed `get_trades`**（app 内该钱包 L2 已建，可用）。台账取数 = 每钱包 1 次 `/activity` + `get_trades`（已自动翻页）。
