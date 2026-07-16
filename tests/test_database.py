@@ -731,3 +731,32 @@ def test_category_catalog_roundtrip(tmp_path):
         assert "category_catalog" not in db.get_settings()
     finally:
         db.close()
+
+
+class TestDailyPnl:
+    def test_upsert_and_get(self, db):
+        db.upsert_daily_pnl(
+            "0xA", "2026-06-01", reward=7, rebate=0.5, sell_profit=2, loss=1, fee=0.1
+        )
+        row = db.get_daily_pnl("0xA", "2026-06-01", "2026-06-01")[0]
+        assert row["reward"] == 7 and row["rebate"] == 0.5
+        assert abs(row["net"] - (7 + 0.5 + 2 - 1 - 0.1)) < 1e-9
+
+    def test_upsert_overwrites_same_day(self, db):
+        db.upsert_daily_pnl("0xA", "2026-06-01", 1, 0, 0, 0, 0)
+        db.upsert_daily_pnl("0xA", "2026-06-01", 9, 0, 0, 0, 0)  # 幂等覆盖
+        rows = db.get_daily_pnl("0xA", "2026-06-01", "2026-06-01")
+        assert len(rows) == 1 and rows[0]["reward"] == 9
+
+    def test_get_filters_by_range_and_orders(self, db):
+        db.upsert_daily_pnl("0xA", "2026-06-03", 3, 0, 0, 0, 0)
+        db.upsert_daily_pnl("0xA", "2026-06-01", 1, 0, 0, 0, 0)
+        db.upsert_daily_pnl("0xA", "2026-05-30", 9, 0, 0, 0, 0)  # 区间外
+        rows = db.get_daily_pnl("0xA", "2026-06-01", "2026-06-03")
+        assert [r["date"] for r in rows] == ["2026-06-01", "2026-06-03"]
+
+    def test_get_all_aggregates_across_wallets(self, db):
+        db.upsert_daily_pnl("0xA", "2026-06-01", reward=7, rebate=0, sell_profit=0, loss=0, fee=0)
+        db.upsert_daily_pnl("0xB", "2026-06-01", reward=3, rebate=0, sell_profit=0, loss=0, fee=0)
+        agg = db.get_daily_pnl_all("2026-06-01", "2026-06-01")[0]
+        assert agg["date"] == "2026-06-01" and agg["reward"] == 10

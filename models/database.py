@@ -185,6 +185,18 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_networth_wallet_time
                 ON net_worth_history(wallet, created_at);
+            CREATE TABLE IF NOT EXISTS daily_pnl (
+                wallet TEXT NOT NULL,
+                date TEXT NOT NULL,
+                reward REAL NOT NULL DEFAULT 0,
+                rebate REAL NOT NULL DEFAULT 0,
+                sell_profit REAL NOT NULL DEFAULT 0,
+                loss REAL NOT NULL DEFAULT 0,
+                fee REAL NOT NULL DEFAULT 0,
+                net REAL NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                PRIMARY KEY (wallet, date)
+            );
         """
         )
         self.conn.commit()
@@ -830,6 +842,42 @@ class Database:
             (wallet, cash, positions_value, cash + positions_value),
         )
         self.conn.commit()
+
+    def upsert_daily_pnl(self, wallet, date, reward, rebate, sell_profit, loss, fee):
+        """幂等写入某钱包某日盈亏行(主键 wallet+date,补漏/重算安全覆盖)。net 内部算。"""
+        net = reward + rebate + sell_profit - loss - fee
+        c = self.conn.cursor()
+        c.execute(
+            "INSERT INTO daily_pnl (wallet, date, reward, rebate, sell_profit, loss, fee, net)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(wallet, date) DO UPDATE SET"
+            " reward=excluded.reward, rebate=excluded.rebate, sell_profit=excluded.sell_profit,"
+            " loss=excluded.loss, fee=excluded.fee, net=excluded.net,"
+            " updated_at=strftime('%s','now')",
+            (wallet, date, reward, rebate, sell_profit, loss, fee, net),
+        )
+        self.conn.commit()
+
+    def get_daily_pnl(self, wallet, from_date, to_date) -> list[dict]:
+        """某钱包 [from_date, to_date] 的每日盈亏行,日期升序。"""
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT date, reward, rebate, sell_profit, loss, fee, net FROM daily_pnl"
+            " WHERE wallet = ? AND date >= ? AND date <= ? ORDER BY date",
+            (wallet, from_date, to_date),
+        )
+        return [dict(r) for r in c.fetchall()]
+
+    def get_daily_pnl_all(self, from_date, to_date) -> list[dict]:
+        """全钱包按日期求和的每日盈亏,日期升序。"""
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT date, SUM(reward) reward, SUM(rebate) rebate, SUM(sell_profit) sell_profit,"
+            " SUM(loss) loss, SUM(fee) fee, SUM(net) net FROM daily_pnl"
+            " WHERE date >= ? AND date <= ? GROUP BY date ORDER BY date",
+            (from_date, to_date),
+        )
+        return [dict(r) for r in c.fetchall()]
 
     def get_net_worth_daily(self, wallet: str, days: int = 90) -> list[dict]:
         """按本地日期聚合的净值序列:每天取最后一条,日期升序。"""
