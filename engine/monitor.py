@@ -349,6 +349,15 @@ class OrderMonitor:
         except Exception as e:
             logger.error("get_open_orders failed (skip exit): %s", e)
             return
+        # 结算守卫(持仓侧):对持仓所在市场批量取 UMA 结算状态,结果已提交(非空)的市场,
+        # 该持仓无视盈亏市价清仓。fail-open:Gamma 返回 {} -> resolving 空 -> 全部走原离场。
+        cids = [
+            pos.get("conditionId", "")
+            for pos in positions
+            if float(pos.get("size", 0) or 0) > 0
+        ]
+        status_map = self.api.gamma_resolution_status(cids)
+        resolving = {c for c in cids if in_resolution(status_map.get(c))}
         for pos in positions:
             try:
                 self._exit_position(
@@ -360,6 +369,7 @@ class OrderMonitor:
                     stop_cents,
                     case_a_mode,
                     take_profit_mode,
+                    in_resolution_market=pos.get("conditionId", "") in resolving,
                 )
             except Exception as e:
                 logger.error("Exit error on %s: %s", pos.get("asset"), e)
@@ -374,6 +384,7 @@ class OrderMonitor:
         stop_cents,
         case_a_mode,
         take_profit_mode="maker",
+        in_resolution_market=False,
     ):
         asset_id = pos.get("asset", "")
         size = float(pos.get("size", 0) or 0)
@@ -382,6 +393,10 @@ class OrderMonitor:
         if size <= 0:
             return
         cost, lots = self._cost_lots(asset_id, size, cid)
+        if in_resolution_market:
+            # 结算清仓:结果已提交,无视盈亏、无视成本是否算得出,市价清掉该持仓。
+            self._resolution_dump(cid, asset_id, size, cur, cost, lots, open_orders)
+            return
         if cost is None or cost <= 0:
             logger.warning(
                 "Exit skipped (no buy fills) asset=%s size=%s — UNPROTECTED",
@@ -616,6 +631,99 @@ class OrderMonitor:
                 detail=f"成本{cost:.4f} 成交≈{fill:.4f}",
             )
             return
+
+    def _resolution_dump(self, cid, asset_id, size, cur, cost, lots, open_orders):
+        """结算清仓:市场结果已提交(umaResolutionStatus 非空)时,无视盈亏市价把该持仓清掉。
+
+        与正常离场的关键差异:成本取不到也照卖——结算在即,裸奔不卖=等着被结算成 0,是最坏
+        情况。先撤该 asset 全部挂卖单(否则挂卖单占用份额,市价卖没份额可卖),再市价卖。
+        成交价用 market_fill_price(≈买一),绝不用 Data API 现价。
+        """
+        tick, tick_str, best_bid, best_ask = self._sell_book(asset_id)
+        sells = [
+            o
+            for o in open_orders
+            if o.get("asset_id") == asset_id and o.get("side") == "SELL"
+        ]
+        sell_ids = [o["id"] for o in sells]
+        if sell_ids:
+            try:
+                self.api.cancel_orders(sell_ids)
+                self._record_action(
+                    market_id=cid,
+                    action_type="exit_cancel_sell",
+                    side="-",
+                    price=-1,
+                    size=size,
+                    reason="结算清仓:先撤全部挂卖单以便市价清仓",
+                    price_basis=f"撤 {len(sell_ids)} 笔 SELL",
+                )
+            except Exception as e:
+                # 撤单失败仍继续清仓:结算离场优先保证出手(超卖不会发生,没有的份额卖不出)。
+                logger.warning(
+                    "Cancel sells %s failed (proceed to resolution dump): %s",
+                    asset_id,
+                    e,
+                )
+        try:
+            resp = self.api.place_market_sell(asset_id, size)
+        except Exception as e:
+            logger.error(
+                "Resolution dump failed asset=%s: %s — UNPROTECTED", asset_id, e
+            )
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price=f"{cur:.4f}",
+                size=str(size),
+                matched="-",
+                stage="离场",
+                action="⚠️结算清仓失败·裸奔",
+                detail=f"市场结果已提交，市价清仓被拒，该持仓未受保护：{e}",
+            )
+            return
+        fill = market_fill_price(resp, best_bid, cur)
+        if cost is not None and cost > 0:
+            self.db.record_trade(
+                wallet=self.wallet_address,
+                market_id=cid,
+                market_name="",
+                side="stop_loss",
+                price=fill,
+                size=size,
+                pnl=(fill - cost) * size,
+            )
+            basis = describe_cost_basis(cost, lots)
+            price_basis = (
+                f"{basis}；结算市价清仓·成交≈买一{fill:.4f}（精确成交以链上为准）；"
+                f"来源：CLOB get_trades+get_orderbook"
+            )
+            detail = f"成本{cost:.4f} 成交≈{fill:.4f}"
+        else:
+            price_basis = (
+                f"成本未知（get_trades 无买入成交）；结算市价清仓·"
+                f"成交≈买一{fill:.4f}（精确成交以链上为准）"
+            )
+            detail = f"成本未知 成交≈{fill:.4f}"
+        self._record_action(
+            market_id=cid,
+            action_type="exit_market",
+            side="卖出",
+            price=fill,
+            size=size,
+            reason="市场结果已提交/进入 UMA 结算 → 市价清仓（无视盈亏）",
+            price_basis=price_basis,
+        )
+        self._status_add(
+            market=cid,
+            side="卖出",
+            price=f"{fill:.4f}",
+            size=str(size),
+            matched="-",
+            stage="离场",
+            action="⚠️结算·市价清仓",
+            detail=detail,
+        )
 
     # --- Step 3: strategy compliance on resting buy orders ---
     def check_sell_orders(self):

@@ -23,6 +23,8 @@ def _make_monitor(settings=None):
     api.get_funder.return_value = "0xFUNDER"
     # sane default so methods that read get_trades don't iterate a MagicMock
     api.get_trades.return_value = []
+    # 结算守卫默认:无市场在结算(否则裸 MagicMock 会被 in_resolution 判真,冲垮离场用例)
+    api.gamma_resolution_status.return_value = {}
     # Step 1 只撤仍在挂的单;默认无在挂单(测试按需覆盖)
     api.get_open_orders.return_value = []
     monitor = OrderMonitor(api, db, "0xABC")
@@ -1467,3 +1469,144 @@ class TestExitTakeProfitMode:
         api.place_limit_sell.assert_called_once()
         args, kwargs = api.place_limit_sell.call_args
         assert abs(args[1] - 0.40) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# 结算守卫(持仓侧):umaResolutionStatus 非空 -> 该持仓无视盈亏市价清仓
+# ---------------------------------------------------------------------------
+
+
+class TestResolutionExit:
+    """结算(umaResolutionStatus 非空)时,该市场持仓无视盈亏市价清仓。"""
+
+    def _setup(self, cost, size, bids, asks, sells=None, cur_price=None, gamma=None):
+        monitor, api, db = _make_monitor(
+            settings={
+                "theta_loss_cents": 2,
+                "theta_stop_cents": 5,
+                "stop_loss_mode": "fixed",
+                "stop_loss_percent": 20,
+                "case_a_mode": "ask",
+            }
+        )
+        api.get_user_positions.return_value = [
+            {
+                "asset": "A-y",
+                "size": size,
+                "curPrice": (
+                    cur_price if cur_price is not None else (bids[0][0] if bids else 0)
+                ),
+                "conditionId": "A",
+            }
+        ]
+        api.get_open_orders.return_value = sells or []
+        api.get_orderbook.return_value = {
+            "bids": [{"price": str(p), "size": str(s)} for p, s in bids],
+            "asks": [{"price": str(p), "size": str(s)} for p, s in asks],
+            "tick_size": "0.01",
+        }
+        api.gamma_resolution_status.return_value = gamma if gamma is not None else {}
+        monitor._cost_lots = lambda a, s, c: (
+            cost,
+            [{"price": cost, "take": s, "ts": 0, "trade_id": "t"}],
+        )
+        return monitor, api, db
+
+    def test_resolving_market_market_sells_not_rests(self):
+        # 结果已提交 + 盈利持仓:仍市价清仓(不再挂 maker 卖单等价差)。
+        monitor, api, db = self._setup(
+            0.30, 100, [(0.31, 500)], [(0.33, 500)], gamma={"A": "proposed"}
+        )
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once_with("A-y", 100)
+        api.place_limit_sell.assert_not_called()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert "exit_market" in ats
+        db.record_trade.assert_called_once()  # 成本已知 -> 记 pnl
+
+    def test_resolving_cancels_resting_sell_before_market(self):
+        # 已有挂卖单 -> 必须先撤再市价卖(否则挂卖单占用份额,市价卖没份额可卖)。
+        sells = [
+            {
+                "id": "s1",
+                "asset_id": "A-y",
+                "side": "SELL",
+                "price": "0.42",
+                "original_size": "100",
+                "size_matched": "0",
+            }
+        ]
+        calls = []
+        monitor, api, db = self._setup(
+            0.30,
+            100,
+            [(0.31, 500)],
+            [(0.33, 500)],
+            sells=sells,
+            gamma={"A": "proposed"},
+        )
+        api.cancel_orders.side_effect = lambda ids: calls.append(("cancel", ids))
+        api.place_market_sell.side_effect = lambda a, s: calls.append(("market", a, s))
+        monitor.check_exit()
+        assert calls[0][0] == "cancel" and "s1" in calls[0][1]
+        assert calls[1][0] == "market"
+
+    def test_resolving_cost_unknown_still_market_sells(self):
+        # 成本重建失败(get_trades 无买入成交):正常离场会「跳过·裸奔」,但结算市场必须照卖。
+        monitor, api, db = self._setup(
+            0.30, 100, [(0.06, 500)], [(0.20, 500)], gamma={"A": "proposed"}
+        )
+        monitor._cost_lots = lambda a, s, c: (None, [])
+        rows = []
+        monitor._status_add = lambda **kw: rows.append(kw)
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once_with("A-y", 100)
+        db.record_trade.assert_not_called()  # 成本未知 -> 不记 pnl
+        assert any("结算" in (r.get("action") or "") for r in rows), rows
+        assert not any("跳过" in (r.get("action") or "") for r in rows), rows
+
+    def test_resolving_records_real_fill_not_curprice(self):
+        # 记录价必须是真实成交价≈买一 0.06,绝不用抽风现价 0.13。
+        monitor, api, db = self._setup(
+            0.1133,
+            60,
+            [(0.06, 500)],
+            [(0.20, 500)],
+            cur_price=0.13,
+            gamma={"A": "proposed"},
+        )
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once()
+        _, k = db.record_trade.call_args
+        assert abs(k["price"] - 0.06) < 1e-9
+
+    def test_gamma_empty_falls_back_to_normal_exit(self):
+        # fail-open:Gamma 返回 {} -> 走原离场(盈利挂 maker 卖一,不市价)。
+        monitor, api, db = self._setup(
+            0.30, 100, [(0.31, 500)], [(0.33, 500)], gamma={}
+        )
+        monitor.check_exit()
+        api.place_limit_sell.assert_called_once()
+        api.place_market_sell.assert_not_called()
+
+    def test_non_resolving_status_none_normal_exit(self):
+        # umaResolutionStatus 为 None(正常交易)-> 原离场,不市价。
+        monitor, api, db = self._setup(
+            0.30, 100, [(0.31, 500)], [(0.33, 500)], gamma={"A": None}
+        )
+        monitor.check_exit()
+        api.place_limit_sell.assert_called_once()
+        api.place_market_sell.assert_not_called()
+
+    def test_market_sell_rejection_emits_naked_warning(self):
+        # 市价清仓被 CLOB 拒 -> 不静默裸奔:不抛,且留含「裸奔」的 ⚠️ 状态行。
+        from api.polymarket_api import OrderRejected
+
+        monitor, api, db = self._setup(
+            0.30, 100, [(0.31, 500)], [(0.33, 500)], gamma={"A": "proposed"}
+        )
+        api.place_market_sell.side_effect = OrderRejected("市价卖单 被拒")
+        rows = []
+        monitor._status_add = lambda **kw: rows.append(kw)
+        monitor.check_exit()  # 不应抛
+        assert any("裸奔" in (r.get("action") or "") for r in rows), rows
