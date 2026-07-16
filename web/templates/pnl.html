@@ -57,7 +57,9 @@ function renderTotals(t) {
     const box = document.getElementById('pnl-totals');
     box.innerHTML = PNL_COLS.map(k => {
         const v = t[k] || 0;
-        const color = k === 'net' ? netColor(v) : (k === 'loss' || k === 'fee' ? '#d24b4b' : '#333');
+        const color = k === 'net' ? netColor(v)
+            : (k === 'loss' || k === 'fee' ? '#d24b4b'
+            : (k === 'sell_profit' ? '#3aa66a' : '#333'));
         return `<div style="min-width:110px;padding:8px 12px;border:1px solid #8883;border-radius:6px">
             <div style="font-size:12px;color:#888">${PNL_LABELS[k]}</div>
             <div style="font-size:18px;font-weight:600;color:${color}">${money(v)}</div></div>`;

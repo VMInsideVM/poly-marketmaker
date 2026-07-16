@@ -60,8 +60,11 @@ class WalletWorker:
         # 首个 tick 必记(覆盖引擎启动/单钱包启动/手动启动监控),之后跨天才再记。
         self._last_networth_date = None
         # 盈亏台账:上次重算的北京日期(None=本进程还没算过)。首次(含每次重启)全量补漏
-        # 2026-06-01 起,之后跨北京日再重算(幂等 upsert,近几天自然刷新)。
+        # 2026-06-01 起,之后跨北京日再重算(幂等 upsert,近几天自然刷新)。**在后台线程跑**,
+        # 绝不阻塞 _tick(离场/止损检查在同一 tick 里,不能被全量重算的网络往返拖住)。
         self._last_pnl_date = None
+        self._pnl_rebuilding = False
+        self._pnl_thread = None
 
     def start(self):
         self._stop_event.clear()
@@ -153,12 +156,26 @@ class WalletWorker:
         """每日盈亏台账:首个 tick(含每次重启)从 2026-06-01 全量补漏到今天;之后跨北京日
         再重算一次(幂等 upsert,近几天奖励次日发放/成交滞后自然刷新)。
 
-        失败只打 WARNING、不置日期 -> 下个 tick 自然重试;绝不阻断监控步骤。台账仅展示,
-        不进任何交易决策。
+        **在后台守护线程跑**,_tick 立即返回——全量重算要拉全历史 get_trades/activity(随
+        账户增长、可能走抖动代理),绝不能坐在同一 tick 的离场/止损检查前面把它们拖慢。
+        `_pnl_rebuilding` 防重入(一次只跑一个);失败只 WARNING、不置日期 -> 下拍重试。
+        台账仅展示,不进任何交易决策。
         """
         today = beijing_day(time.time())
-        if self._last_pnl_date == today:
+        if self._last_pnl_date == today or self._pnl_rebuilding:
             return
+        self._pnl_rebuilding = True
+        self._pnl_thread = threading.Thread(
+            target=self._rebuild_pnl_now,
+            args=(today,),
+            daemon=True,
+            name=f"pnl-{self.wallet_address[:8]}",
+        )
+        self._pnl_thread.start()
+
+    def _rebuild_pnl_now(self, today):
+        """后台线程体:全量重算并 upsert;成功才置 _last_pnl_date。DB 用每线程独立连接
+        (惰性 conn property),API 实例方法各自 _proxied 自 route 钱包代理,均线程安全。"""
         try:
             rebuild_wallet_pnl(
                 self.api, self.db, self.wallet_address, PNL_START_DATE, today
@@ -166,6 +183,8 @@ class WalletWorker:
             self._last_pnl_date = today
         except Exception as e:
             logger.warning("台账重算失败 %s: %s", self.wallet_address, e)
+        finally:
+            self._pnl_rebuilding = False
 
     @_worker_proxied
     def place_orders(

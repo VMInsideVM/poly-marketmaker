@@ -32,6 +32,14 @@ def rebuild_wallet_pnl(api, db, wallet, from_date, to_date):
     rr = reward_rebate_by_day(activity)
 
     trades = api.get_trades(TradeParams(maker_address=funder))
+    logger.info(
+        "台账重算 %s [%s..%s]:activity=%d 笔、trades=%d 笔",
+        wallet,
+        from_date,
+        to_date,
+        len(activity),
+        len(trades),
+    )
     realized: dict = {}
     for asset in our_traded_assets(trades, funder):
         for d, v in realized_pnl_by_day(extract_fills(trades, funder, asset)).items():
