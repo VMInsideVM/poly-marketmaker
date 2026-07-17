@@ -24,6 +24,7 @@ from engine.monitor_status import get_snapshot
 from engine.market_links import enrich_with_market_meta, ensure_market_meta
 from engine.blacklist_ops import buy_order_ids_for_condition
 from engine.take_profit import effective_theta_stop
+from engine.notify import send_telegram
 from config import DB_PATH, HOST, PORT
 from web import update as updater
 from version import __version__
@@ -1223,6 +1224,24 @@ def api_pnl():
             "cumulative_net": cumulative_net,
         }
     )
+
+
+@app.route("/api/push/test", methods=["POST"])
+@login_required
+def api_push_test():
+    """立即发一条 Telegram 测试消息(验证 token/chat_id/代理)。"""
+    s = db.get_settings()
+    token, chat_id = s.get("tg_bot_token", ""), s.get("tg_chat_id", "")
+    if not token or not chat_id:
+        return jsonify({"error": "请先填写 Telegram token 和 chat_id"}), 400
+    proxy = None
+    if manager and getattr(manager, "_scanner_api", None):
+        proxy = getattr(manager._scanner_api, "proxy_url", None)
+    try:
+        send_telegram(token, chat_id, "✅ 做市助手测试推送：配置成功", proxy)
+    except Exception as e:
+        return jsonify({"error": f"发送失败：{e}"}), 200
+    return jsonify({"ok": True})
 
 
 # --- API: Dashboard Summary ---
