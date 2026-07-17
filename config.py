@@ -39,6 +39,11 @@ ENGINE_DEFAULTS = {
     # 每品类奖励抓取页数上限(每页 100)。默认 20=2000/品类,覆盖天气等大品类;
     # 扫描级全局,由 manager 透传给 scanner。
     "reward_scan_max_pages": 20,
+    # 每日盈亏日报远程推送(Telegram)。明文存(与 proxy 一致,本地单用户库)。
+    "push_enabled": False,
+    "tg_bot_token": "",
+    "tg_chat_id": "",
+    "push_hour": 9,  # 北京时间几点后推(8点奖励到账之后)
 }
 
 # 策略级参数:每钱包/每模板取值,存 template_settings 表。

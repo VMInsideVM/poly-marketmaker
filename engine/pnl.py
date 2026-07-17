@@ -14,6 +14,11 @@ def beijing_day(ts) -> str:
     return datetime.fromtimestamp(float(ts or 0), _BJ).strftime("%Y-%m-%d")
 
 
+def beijing_hour(ts) -> int:
+    """epoch 秒 -> 北京(UTC+8)小时(0-23)。"""
+    return datetime.fromtimestamp(float(ts or 0), _BJ).hour
+
+
 def _prev_day(date_str: str) -> str:
     return (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).strftime(
         "%Y-%m-%d"

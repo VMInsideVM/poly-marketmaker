@@ -148,3 +148,12 @@ def test_realized_pnl_unmatched_sell_ignored():
     out = realized_pnl_by_day(fills)
     assert out.get("2026-01-03", {}).get("sell_profit", 0) == 0
     assert out.get("2026-01-03", {}).get("loss", 0) == 0
+
+
+def test_beijing_hour():
+    from engine.pnl import beijing_hour
+
+    # UTC 01:00 -> 北京 09:00
+    assert beijing_hour(_utc_ts(2026, 1, 1, 1, 0)) == 9
+    # UTC 16:30 -> 北京 次日 00:30 -> 0
+    assert beijing_hour(_utc_ts(2026, 1, 1, 16, 30)) == 0

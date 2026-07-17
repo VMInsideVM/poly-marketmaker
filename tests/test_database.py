@@ -37,6 +37,10 @@ def test_config_split_engine_and_template_defaults():
         "rewards_cache_ttl_sec",
         "discovery_interval_sec",
         "reward_scan_max_pages",
+        "push_enabled",
+        "tg_bot_token",
+        "tg_chat_id",
+        "push_hour",
     }
     assert "excluded_categories" not in TEMPLATE_DEFAULTS
     assert TEMPLATE_DEFAULTS["include_other"] is True
@@ -756,7 +760,11 @@ class TestDailyPnl:
         assert [r["date"] for r in rows] == ["2026-06-01", "2026-06-03"]
 
     def test_get_all_aggregates_across_wallets(self, db):
-        db.upsert_daily_pnl("0xA", "2026-06-01", reward=7, rebate=0, sell_profit=0, loss=0, fee=0)
-        db.upsert_daily_pnl("0xB", "2026-06-01", reward=3, rebate=0, sell_profit=0, loss=0, fee=0)
+        db.upsert_daily_pnl(
+            "0xA", "2026-06-01", reward=7, rebate=0, sell_profit=0, loss=0, fee=0
+        )
+        db.upsert_daily_pnl(
+            "0xB", "2026-06-01", reward=3, rebate=0, sell_profit=0, loss=0, fee=0
+        )
         agg = db.get_daily_pnl_all("2026-06-01", "2026-06-01")[0]
         assert agg["date"] == "2026-06-01" and agg["reward"] == 10
