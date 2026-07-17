@@ -26,7 +26,7 @@ from utils.crypto import decrypt
 logger = logging.getLogger(__name__)
 
 # 盈亏台账补漏起点(北京日)。启动/重启后从这天补到今天;每日跨天再重算。
-PNL_START_DATE = "2026-06-01"
+PNL_START_DATE = "2026-07-01"
 
 
 def _worker_proxied(method):
@@ -61,7 +61,7 @@ class WalletWorker:
         # 首个 tick 必记(覆盖引擎启动/单钱包启动/手动启动监控),之后跨天才再记。
         self._last_networth_date = None
         # 盈亏台账:上次重算的北京日期(None=本进程还没算过)。首次(含每次重启)全量补漏
-        # 2026-06-01 起,之后跨北京日再重算(幂等 upsert,近几天自然刷新)。**在后台线程跑**,
+        # 2026-07-01 起,之后跨北京日再重算(幂等 upsert,近几天自然刷新)。**在后台线程跑**,
         # 绝不阻塞 _tick(离场/止损检查在同一 tick 里,不能被全量重算的网络往返拖住)。
         self._last_pnl_date = None
         self._pnl_rebuilding = False
@@ -155,7 +155,7 @@ class WalletWorker:
             logger.warning("净值快照失败 %s: %s", self.wallet_address, e)
 
     def _maybe_rebuild_pnl(self):
-        """每日盈亏台账:首个 tick(含每次重启)从 2026-06-01 全量补漏到今天;之后跨北京日
+        """每日盈亏台账:首个 tick(含每次重启)从 2026-07-01 全量补漏到今天;之后跨北京日
         再重算一次(幂等 upsert,近几天奖励次日发放/成交滞后自然刷新)。
 
         **在后台守护线程跑**,_tick 立即返回——全量重算要拉全历史 get_trades/activity(随
