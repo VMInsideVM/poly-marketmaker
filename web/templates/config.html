@@ -109,6 +109,34 @@
             </select>
         </div>
 
+        <h3>低余额清仓（腾现金）</h3>
+        <p class="hint" style="color:#888;font-size:12px">现金余额低于「触发线」时，按优先级逐笔<b>市价卖</b>持仓腾现金（会低于成本认亏）：先卖所在市场奖励低于阈值的、再卖份额小的、最后按亏损从小到大。触发线设 <b>0 = 关闭</b>。</p>
+        <div class="form-grid">
+            <div class="form-group">
+                <label>触发线（余额低于此值 U 就清仓，0=关闭）</label>
+                <input type="number" name="low_balance_threshold_usd" step="0.5">
+            </div>
+            <div class="form-group">
+                <label>低奖励市场阈值（市场奖励＜此值 U 优先卖）</label>
+                <input type="number" name="low_reward_threshold_usd" step="1">
+            </div>
+            <div class="form-group">
+                <label>小仓阈值（份额＜此值 次优先卖）</label>
+                <input type="number" name="small_position_shares" step="1">
+            </div>
+            <div class="form-group">
+                <label>停手目标</label>
+                <select name="liquidate_target_mode" id="liquidate-target-mode">
+                    <option value="balance">卖到余额线（默认）</option>
+                    <option value="next_order">卖到够挂下一单</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>余额目标 U（「卖到余额线」模式用）</label>
+                <input type="number" name="liquidate_target_usd" step="0.5">
+            </div>
+        </div>
+
         <h3>做市品类（只做勾选的）
             <a href="#" onclick="refreshCategories(event)" style="font-size:13px;font-weight:normal">刷新计数</a>
             <span id="cat-updated" class="hint" style="color:#888;font-size:12px;font-weight:normal"></span>
@@ -451,6 +479,7 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     // select 不在 input[type=number] 里,单独收。
     data.stop_loss_mode = (document.getElementById('stop-loss-mode') || {}).value || 'percent';
     data.take_profit_mode = (document.getElementById('take-profit-mode') || {}).value || 'maker';
+    data.liquidate_target_mode = (document.getElementById('liquidate-target-mode') || {}).value || 'balance';
     const st = serializeTiers();
     if (st.error) { alert(st.error); return; }
     data.size_tiers = st.tiers;
