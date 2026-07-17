@@ -18,7 +18,6 @@
         <a href="{{ url_for('markets_page') }}" class="{% if request.endpoint=='markets_page' %}active{% endif %}">市场发现</a>
         <a href="{{ url_for('orders_page') }}" class="{% if request.endpoint=='orders_page' %}active{% endif %}">挂单与持仓</a>
         <a href="{{ url_for('history_page') }}" class="{% if request.endpoint=='history_page' %}active{% endif %}">历史</a>
-        <a href="{{ url_for('networth_page') }}" class="{% if request.endpoint=='networth_page' %}active{% endif %}">资产曲线</a>
         <a href="{{ url_for('pnl_page') }}" class="{% if request.endpoint=='pnl_page' %}active{% endif %}">盈亏台账</a>
         <a href="{{ url_for('logs_page') }}" class="{% if request.endpoint=='logs_page' %}active{% endif %}">监控</a>
         <a href="{{ url_for('config_page') }}" class="{% if request.endpoint=='config_page' %}active{% endif %}">配置</a>

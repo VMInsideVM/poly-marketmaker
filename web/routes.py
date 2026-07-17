@@ -292,12 +292,6 @@ def help_page():
     return render_template("help.html")
 
 
-@app.route("/networth")
-@login_required
-def networth_page():
-    return render_template("networth.html")
-
-
 @app.route("/pnl")
 @login_required
 def pnl_page():
@@ -1165,22 +1159,6 @@ def _ladder_payload(market_id):
             "placement_mode": "gap_single",
         }
     )
-
-
-# --- API: 净值历史 ---
-
-
-@app.route("/api/networth", methods=["GET"])
-@login_required
-def api_networth():
-    wallet = (request.args.get("wallet") or "").strip()
-    if not wallet:
-        return jsonify({"error": "缺少 wallet 参数"}), 400
-    try:
-        days = int(request.args.get("days", 90))
-    except (TypeError, ValueError):
-        days = 90
-    return jsonify({"wallet": wallet, "series": db.get_net_worth_daily(wallet, days)})
 
 
 @app.route("/api/pnl", methods=["GET"])

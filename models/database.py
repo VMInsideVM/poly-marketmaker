@@ -175,16 +175,6 @@ class Database:
                 value TEXT NOT NULL,
                 PRIMARY KEY (template_id, key)
             );
-            CREATE TABLE IF NOT EXISTS net_worth_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                wallet TEXT NOT NULL,
-                cash REAL NOT NULL,
-                positions_value REAL NOT NULL,
-                total REAL NOT NULL,
-                created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
-            );
-            CREATE INDEX IF NOT EXISTS idx_networth_wallet_time
-                ON net_worth_history(wallet, created_at);
             CREATE TABLE IF NOT EXISTS daily_pnl (
                 wallet TEXT NOT NULL,
                 date TEXT NOT NULL,
@@ -868,15 +858,6 @@ class Database:
         row = c.fetchone()
         return float(row["m"]) if row and row["m"] is not None else None
 
-    def record_net_worth(self, wallet: str, cash: float, positions_value: float):
-        c = self.conn.cursor()
-        c.execute(
-            "INSERT INTO net_worth_history (wallet, cash, positions_value, total)"
-            " VALUES (?, ?, ?, ?)",
-            (wallet, cash, positions_value, cash + positions_value),
-        )
-        self.conn.commit()
-
     def upsert_daily_pnl(self, wallet, date, reward, rebate, sell_profit, loss, fee):
         """幂等写入某钱包某日盈亏行(主键 wallet+date,补漏/重算安全覆盖)。net 内部算。"""
         net = reward + rebate + sell_profit - loss - fee
@@ -912,27 +893,3 @@ class Database:
             (from_date, to_date),
         )
         return [dict(r) for r in c.fetchall()]
-
-    def get_net_worth_daily(self, wallet: str, days: int = 90) -> list[dict]:
-        """按本地日期聚合的净值序列:每天取最后一条,日期升序。"""
-        cutoff = time.time() - days * 86400
-        c = self.conn.cursor()
-        c.execute(
-            "SELECT date(created_at, 'unixepoch', 'localtime') AS d,"
-            " cash, positions_value, total"
-            " FROM net_worth_history WHERE wallet = ? AND created_at >= ?"
-            " ORDER BY created_at",
-            (wallet, cutoff),
-        )
-        by_day = {}
-        for row in c.fetchall():
-            by_day[row["d"]] = row  # 升序遍历,后写覆盖 => 每天最后一条
-        return [
-            {
-                "date": d,
-                "cash": r["cash"],
-                "positions_value": r["positions_value"],
-                "total": r["total"],
-            }
-            for d, r in by_day.items()
-        ]
