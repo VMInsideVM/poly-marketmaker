@@ -37,10 +37,6 @@ def test_config_split_engine_and_template_defaults():
         "rewards_cache_ttl_sec",
         "discovery_interval_sec",
         "reward_scan_max_pages",
-        "push_enabled",
-        "tg_bot_token",
-        "tg_chat_id",
-        "push_hour",
     }
     assert "excluded_categories" not in TEMPLATE_DEFAULTS
     assert TEMPLATE_DEFAULTS["include_other"] is True

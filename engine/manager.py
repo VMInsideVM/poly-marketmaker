@@ -12,7 +12,7 @@ import threading
 import time
 from api.polymarket_api import PolymarketAPI
 from api.proxy import use_proxy
-from config import CATEGORY_CATALOG
+from config import CATEGORY_CATALOG, TG_BOT_TOKEN, TG_CHAT_ID, PUSH_HOUR
 from engine.scanner import MarketScanner, ScanSuperseded
 from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
@@ -890,20 +890,17 @@ class EngineManager:
             self._stop_event.wait(timeout=place_interval)
 
     def _maybe_push_daily(self):
-        """每日 push_hour 点后推「昨天」盈亏日报到 Telegram(全局一次/天)。组装(本地 DB 读,
-        快)在 loop 线程,**发送(网络往返)放后台线程**——绝不让慢/被墙的 Telegram 请求
-        阻塞 _scanner_loop/下单(代理烂时曾拖垮下单轮,见 [[proxy-flakiness-no-placement]])。
-        `_pushing` 防重入(一次只发一个);成功才置 _last_push_date、失败下轮重试。纯外发,
-        不改交易逻辑。整体 try/except、绝不抛进 loop。"""
+        """每日 PUSH_HOUR 点后推「昨天」盈亏日报到 Telegram(全局一次/天)。目标(token/chat)
+        写死在 config,始终开启,对方更新即生效、无需配置。组装(本地 DB 读,快)在 loop 线程,
+        **发送(网络往返)放后台线程**——绝不让慢/被墙的 Telegram 请求阻塞 _scanner_loop/下单
+        (代理烂时曾拖垮下单轮,见 [[proxy-flakiness-no-placement]])。`_pushing` 防重入;成功才
+        置 _last_push_date、失败下轮重试。纯外发,不改交易逻辑。整体 try/except、绝不抛进 loop。"""
         try:
-            s = self.db.get_settings()
-            if not s.get("push_enabled") or self._pushing:
+            if self._pushing:
                 return
             now = time.time()
             today = beijing_day(now)
-            ph = s.get("push_hour", 9)
-            ph = 9 if ph in (None, "") else int(ph)  # 0 是合法值,不能被 `or 9` 吞掉
-            if self._last_push_date == today or beijing_hour(now) < ph:
+            if self._last_push_date == today or beijing_hour(now) < PUSH_HOUR:
                 return
             yesterday = _prev_day(today)  # 今天(北京)减一天 = 昨天
             KEYS = ("reward", "rebate", "sell_profit", "loss", "fee", "net")
@@ -926,11 +923,10 @@ class EngineManager:
                 if self._scanner_api
                 else None
             )
-            token, chat_id = s.get("tg_bot_token", ""), s.get("tg_chat_id", "")
             self._pushing = True
             self._push_thread = threading.Thread(
                 target=self._send_report,
-                args=(token, chat_id, text, today, proxy),
+                args=(TG_BOT_TOKEN, TG_CHAT_ID, text, today, proxy),
                 daemon=True,
                 name="pnl-push",
             )

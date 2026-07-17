@@ -159,31 +159,6 @@
     </form>
 </section>
 
-<section class="config-section">
-    <h2>远程推送（Telegram 日报）</h2>
-    <p class="hint" style="color:#888;font-size:12px">每天北京时间指定小时后，把「昨天」的全钱包盈亏汇总推送到 Telegram（引擎运行时生效）。用 BotFather 建 bot 拿 token，给 bot 发条消息后从 <code>api.telegram.org/bot&lt;token&gt;/getUpdates</code> 拿 chat_id。</p>
-    <div class="form-grid">
-        <div class="form-group">
-            <label><input type="checkbox" id="push-enabled"> 启用每日推送</label>
-        </div>
-        <div class="form-group">
-            <label>Bot Token</label>
-            <input type="password" id="tg-bot-token" placeholder="123456:ABC-...">
-        </div>
-        <div class="form-group">
-            <label>Chat ID</label>
-            <input type="text" id="tg-chat-id" placeholder="你的 chat_id">
-        </div>
-        <div class="form-group">
-            <label>推送时间 (北京小时，0-23，默认 9)</label>
-            <input type="number" id="push-hour" min="0" max="23" step="1">
-        </div>
-    </div>
-    <button class="btn btn-primary" onclick="savePush()">保存推送设置</button>
-    <button class="btn" onclick="testPush()">测试推送</button>
-    <span id="push-test-result" class="hint" style="margin-left:8px"></span>
-</section>
-
 <div id="wallet-modal" class="modal-overlay" style="display:none">
     <div class="modal-box">
         <h2>确认存款钱包地址</h2>
@@ -414,35 +389,7 @@ function loadEngine() {
         document.querySelectorAll('#engine-form input[name]').forEach(inp => {
             if (data[inp.name] !== undefined) inp.value = data[inp.name];
         });
-        // 远程推送(独立表单,checkbox 用 checked、其余 value)
-        document.getElementById('push-enabled').checked = !!data.push_enabled;
-        document.getElementById('tg-bot-token').value = data.tg_bot_token || '';
-        document.getElementById('tg-chat-id').value = data.tg_chat_id || '';
-        document.getElementById('push-hour').value = (data.push_hour ?? 9);
     });
-}
-
-function savePush() {
-    const ph = parseInt(document.getElementById('push-hour').value, 10);
-    const data = {
-        push_enabled: document.getElementById('push-enabled').checked,
-        tg_bot_token: document.getElementById('tg-bot-token').value.trim(),
-        tg_chat_id: document.getElementById('tg-chat-id').value.trim(),
-        push_hour: Number.isNaN(ph) ? 9 : ph,  // 0 是合法值,不能被 || 吞成 9
-    };
-    fetch('/api/settings', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(data),
-    }).then(r => r.json()).then(() => showToast('推送设置已保存 · 下次引擎启动生效'));
-}
-
-function testPush() {
-    const out = document.getElementById('push-test-result');
-    out.textContent = '发送中…'; out.style.color = '#888';
-    fetch('/api/push/test', {method: 'POST'}).then(r => r.json()).then(resp => {
-        if (resp.ok) { out.textContent = '✅ 已发送，去 Telegram 查看'; out.style.color = '#3aa66a'; }
-        else { out.textContent = '❌ ' + (resp.error || '失败'); out.style.color = '#d24b4b'; }
-    }).catch(e => { out.textContent = '❌ ' + e; out.style.color = '#d24b4b'; });
 }
 
 document.getElementById('template-select').addEventListener('change', function() {
