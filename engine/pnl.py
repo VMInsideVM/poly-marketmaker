@@ -19,16 +19,21 @@ def beijing_hour(ts) -> int:
     return datetime.fromtimestamp(float(ts or 0), _BJ).hour
 
 
-def last_week_range(today_str):
-    """给定北京日期 'YYYY-MM-DD',返回上一个完整周(周一~周日)的 (start, end)。
+def weekly_window(today_str):
+    """周报窗口。给定北京日期 'YYYY-MM-DD',返回 (week_key, start, end):
 
-    周报用:报「上一个完整周」。周一=weekday()==0。
+    - week_key = 本周周一日期(节流键:一周只推一次)。
+    - [start, end] = 最近 7 整天(截止昨天),即 [昨天-6天, 昨天]——这样最近收到的奖励立刻在报里。
     """
     d = datetime.strptime(today_str, "%Y-%m-%d")
-    monday = d - timedelta(days=d.weekday())  # 本周一
-    start = monday - timedelta(days=7)  # 上周一
-    end = monday - timedelta(days=1)  # 上周日
-    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+    monday = d - timedelta(days=d.weekday())  # 本周一(周一 weekday()==0)
+    yesterday = d - timedelta(days=1)
+    start = yesterday - timedelta(days=6)  # 含昨天共 7 天
+    return (
+        monday.strftime("%Y-%m-%d"),
+        start.strftime("%Y-%m-%d"),
+        yesterday.strftime("%Y-%m-%d"),
+    )
 
 
 def _prev_day(date_str: str) -> str:

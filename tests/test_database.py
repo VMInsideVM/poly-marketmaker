@@ -786,3 +786,16 @@ class TestLiquidationQueries:
         self._seed_eligible(db, "0xC1", 25.0, 5.0)
         self._seed_eligible(db, "0xC2", 40.0, 2.0)
         assert db.get_min_order_cost() == 2.0
+
+
+class TestLastPushWeek:
+    def test_roundtrip_and_default_none(self, db):
+        assert db.get_last_push_week() is None
+        db.set_last_push_week("2026-07-13")
+        assert db.get_last_push_week() == "2026-07-13"
+        db.set_last_push_week("2026-07-20")  # 覆盖
+        assert db.get_last_push_week() == "2026-07-20"
+
+    def test_not_polluting_engine_settings(self, db):
+        db.set_last_push_week("2026-07-13")
+        assert "last_push_week" not in db.get_settings()  # 不进 ENGINE_DEFAULTS 白名单
