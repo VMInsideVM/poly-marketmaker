@@ -4,4 +4,4 @@
 运行时 web/update.py 用它与 GitHub 最新 Release 比对。
 """
 
-__version__ = "6.0.2"
+__version__ = "7.0.0"
