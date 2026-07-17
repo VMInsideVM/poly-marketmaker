@@ -18,8 +18,9 @@ from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
 from engine.resolution import in_resolution
 from engine.tiers import tier_for
-from engine.pnl import beijing_day
+from engine.pnl import beijing_day, beijing_hour, _prev_day
 from engine.pnl_ledger import rebuild_wallet_pnl
+from engine.notify import format_daily_report, send_telegram
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
@@ -552,6 +553,7 @@ class EngineManager:
         self._scanner_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._scanner_api: PolymarketAPI | None = None  # Shared API for scanning
+        self._last_push_date = None  # 每日日报推送:上次推送的北京日期(全局一次/天)
         self._catalog_cache = None
         self._catalog_cache_ts = 0.0
         self.eligible_markets: list[dict] = []  # Latest scan results
@@ -882,8 +884,50 @@ class EngineManager:
                     self._place_round()
                 except Exception as e:
                     logger.error("Place round error: %s", e)
+            self._maybe_push_daily()
 
             self._stop_event.wait(timeout=place_interval)
+
+    def _maybe_push_daily(self):
+        """每日 push_hour 点后推「昨天」盈亏日报到 Telegram(全局一次/天)。整体 try/except、
+        失败 WARNING 不置日期 -> 下轮重试;绝不阻断 _scanner_loop/下单。纯外发,不改交易逻辑。"""
+        try:
+            s = self.db.get_settings()
+            if not s.get("push_enabled"):
+                return
+            now = time.time()
+            today = beijing_day(now)
+            if self._last_push_date == today or beijing_hour(now) < int(
+                s.get("push_hour", 9) or 9
+            ):
+                return
+            yesterday = _prev_day(today)  # 今天(北京)减一天 = 昨天
+            KEYS = ("reward", "rebate", "sell_profit", "loss", "fee", "net")
+            rows = self.db.get_daily_pnl_all(yesterday, yesterday)
+            totals = rows[0] if rows else {k: 0.0 for k in KEYS}
+            cum = sum(
+                r["net"] for r in self.db.get_daily_pnl_all(PNL_START_DATE, yesterday)
+            )
+            per_wallet = []
+            for w in self.db.list_wallets():
+                wr = self.db.get_daily_pnl(w["address"], yesterday, yesterday)
+                if not wr or not any(wr[0].get(k) for k in KEYS):
+                    continue  # 当天无任何活动的钱包不列
+                addr = w["address"]
+                label = (w.get("remark") or "").strip() or f"{addr[:6]}...{addr[-4:]}"
+                per_wallet.append({"label": label, "net": wr[0]["net"]})
+            text = format_daily_report(yesterday, totals, cum, per_wallet)
+            proxy = (
+                getattr(self._scanner_api, "proxy_url", None)
+                if self._scanner_api
+                else None
+            )
+            send_telegram(
+                s.get("tg_bot_token", ""), s.get("tg_chat_id", ""), text, proxy
+            )
+            self._last_push_date = today
+        except Exception as e:
+            logger.warning("日报推送失败: %s", e)
 
     def _active_templates(self) -> list[dict]:
         """所有启用钱包绑定模板(按采集器实际用到的维度去重),供采集器算并集/交集。"""
