@@ -20,7 +20,10 @@ farming 而认亏，用户明确选择：第三档就是「卖损失最小的」
 
 - **档内 + 档3 统一按「亏损从小到大」排**（先卖最不心疼的，含盈利仓 = 负亏损排最前）。
 - `亏损 = (成本 − 买一) × 份额`；**成本只走 `get_trades` 逐笔重建**（`_cost_lots`，禁 avgPrice/curPrice，见 [[take-profit-position-driven]]）。
-- **成本取不到**的持仓：仍按 daily_reward/份额可归档1/档2；参与「亏损排序」时排到所在档**末尾**（`亏损=+∞`），即同档最后才卖；卖出时记账不带 pnl（同结算清仓 cost-unknown）。
+- **成本取不到**的持仓（`_cost_lots` 返回 None，新成交未进 get_trades）：**跳过、推迟**到下 tick 成本重建
+  （与 check_exit 的裸奔跳过一致；低余额无结算 deadline，不必像结算清仓那样成本未知也照卖——**2026-07-17
+  评审后由「仍照卖」改为「跳过」**，避免刚买入的新仓被低于未知成本甩卖）。`plan_liquidation` 仍保留
+  loss=None→档末的处理（供 best_bid 空但成本已知的情形）。
 - **无买盘**（`best_bid` 空/≤0）的持仓：市价卖不出 → **跳过该笔**（不计入已腾现金），下 tick 有买盘再清。
 
 ## 三、停手目标（配置页选，两模式）
@@ -55,9 +58,10 @@ PUT 已按 `TEMPLATE_DEFAULTS` 白名单存取；select 需前端单独收（见
 
 ## 六、数据来源
 
-- **市场奖励 `daily_reward`**：优先查该 condition_id 是否在最近 `eligible_markets`（有 `daily_reward`）；
-  不在则用 rewards API 现拉（TTL 缓存，仿 monitor 的 `_market_max_spread` → 新增 `_market_daily_reward(cid)`）。
-  拉不到 → `daily_reward=None` → **不进档1**（保守，当高奖励对待，不优先卖）。
+- **市场奖励 `daily_reward`**：查 `eligible_markets` 表（`db.get_market_daily_reward(condition_id) →
+  float|None`，`SELECT daily_reward FROM eligible_markets WHERE market_id=? LIMIT 1`）。持仓市场多半近期扫过、
+  在表里；**不在表里 → `None` → 不进档1**（保守，当高奖励对待，不优先卖）。**不为持仓现拉 rewards API**
+  （避免复刻 scanner 的 reward 提取逻辑;YAGNI + 更稳）。
 - **成本 / 买一**：`_cost_lots`（成本）+ `_sell_book`（best_bid/cur/tick）——均 monitor 现成。
 - **eligible MIN(min_cost)**：新增 `db.get_min_order_cost() → float|None`（`SELECT MIN(min_cost) FROM eligible_markets`）。
 
