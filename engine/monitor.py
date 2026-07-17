@@ -15,6 +15,7 @@ from engine.take_profit import (
 )
 from engine.eligibility import recheck_resting_buy
 from engine.resolution import in_resolution
+from engine.liquidation import plan_liquidation
 from engine.strategy import reward_price_range
 from engine.rewards import extract_max_spread
 from engine import monitor_status
@@ -326,6 +327,91 @@ class OrderMonitor:
         except Exception as e:
             logger.warning("orderbook for %s failed (exit tick=0.01): %s", asset_id, e)
             return 0.01, "0.01", None, None
+
+    def check_low_balance(self):
+        """余额 < 阈值(0=关)时按优先级逐笔市价卖持仓腾现金,卖到「停手目标」停。
+        覆盖「永不低于成本」(主动清仓腾现金,同结算清仓)。用估算余额防过卖(市价卖后链上
+        余额有滞后,逐笔重查会过卖);无买盘跳过;整体失败不阻断其余步骤。在 check_exit 之前跑。"""
+        tmpl = self.db.get_template_for(self.wallet_address)
+        threshold = float(tmpl.get("low_balance_threshold_usd", 4) or 0)
+        if threshold <= 0:
+            return
+        try:
+            balance = float(self.api.get_balance() or 0)
+        except Exception as e:
+            logger.warning("get_balance failed (skip low-balance): %s", e)
+            return
+        if balance >= threshold:
+            return
+        low_reward = float(tmpl.get("low_reward_threshold_usd", 30))
+        small_shares = float(tmpl.get("small_position_shares", 20))
+        if tmpl.get("liquidate_target_mode", "balance") == "next_order":
+            moc = self.db.get_min_order_cost()
+            target = moc if moc else threshold
+        else:
+            target = float(tmpl.get("liquidate_target_usd", 4))
+        try:
+            positions = self.api.get_user_positions(self._funder())
+            open_orders = self.api.get_open_orders()
+        except Exception as e:
+            logger.warning("fetch failed (skip low-balance): %s", e)
+            return
+        meta, candidates = {}, []
+        for pos in positions:
+            asset_id = pos.get("asset", "")
+            size = float(pos.get("size", 0) or 0)
+            if size <= 0:
+                continue
+            cid = pos.get("conditionId", "")
+            cur = float(pos.get("curPrice", 0) or 0)
+            cost, lots = self._cost_lots(asset_id, size, cid)
+            _, _, best_bid, _ = self._sell_book(asset_id)
+            reward = self.db.get_market_daily_reward(cid)
+            loss = (
+                None if (cost is None or best_bid is None) else (cost - best_bid) * size
+            )
+            meta[asset_id] = {
+                "cid": cid,
+                "size": size,
+                "cur": cur,
+                "best_bid": best_bid,
+                "cost": cost,
+                "lots": lots,
+            }
+            candidates.append(
+                {
+                    "asset_id": asset_id,
+                    "size": size,
+                    "daily_reward": reward,
+                    "loss": loss,
+                }
+            )
+        est = balance
+        for asset_id in plan_liquidation(candidates, low_reward, small_shares):
+            if est >= target:
+                break
+            m = meta[asset_id]
+            bb = m["best_bid"]
+            if bb is None or bb <= 0:
+                continue  # 无买盘,卖不出 -> 跳过(不计入腾现金)
+            try:
+                fill = self._market_dump(
+                    m["cid"],
+                    asset_id,
+                    m["size"],
+                    m["cur"],
+                    bb,
+                    m["cost"],
+                    m["lots"],
+                    open_orders,
+                    tag="低余额",
+                    reason="低余额清仓腾现金（无视盈亏）",
+                )
+            except Exception as e:
+                logger.warning("low-balance dump %s failed: %s", asset_id, e)
+                continue
+            if fill is not None:
+                est += bb * m["size"]  # 保守估算到手(best_bid×份额),防过卖
 
     def check_exit(self):
         """两段式离场:成本≤买一挂卖一,成本>买一挂成本价(永不低于成本;亏损≥强平阈值兜底市价止损)。
@@ -655,6 +741,38 @@ class OrderMonitor:
                 detail="市场结果已提交但盘口无买盘，市价卖不出，该持仓仍暴露，待有买盘再清",
             )
             return
+        self._market_dump(
+            cid,
+            asset_id,
+            size,
+            cur,
+            best_bid,
+            cost,
+            lots,
+            open_orders,
+            tag="结算",
+            reason="市场结果已提交/进入 UMA 结算 → 市价清仓（无视盈亏）",
+            expose_on_fail=True,
+        )
+
+    def _market_dump(
+        self,
+        cid,
+        asset_id,
+        size,
+        cur,
+        best_bid,
+        cost,
+        lots,
+        open_orders,
+        tag,
+        reason,
+        expose_on_fail=False,
+    ):
+        """市价清仓一个持仓(撤挂卖→FAK 市价卖→记账),覆盖「永不低于成本」。tag=短标签
+        (结算/低余额),reason=record_action 理由。成功返成交价 fill、被拒返 None。
+        expose_on_fail=True(结算):卖失败时标「裸奔」(仓暴露给结算);False(低余额):仓仍
+        被 check_exit 保护、只标失败。调用方须先确保 best_bid 有效(无买盘不进来)。共用。"""
         sells = [
             o
             for o in open_orders
@@ -670,22 +788,18 @@ class OrderMonitor:
                     side="-",
                     price=-1,
                     size=size,
-                    reason="结算清仓:先撤全部挂卖单以便市价清仓",
+                    reason=f"{tag}清仓:先撤全部挂卖单以便市价清仓",
                     price_basis=f"撤 {len(sell_ids)} 笔 SELL",
                 )
             except Exception as e:
-                # 撤单失败仍继续清仓:结算离场优先保证出手(超卖不会发生,没有的份额卖不出)。
+                # 撤单失败仍继续清仓:优先保证出手(超卖不会发生,没有的份额卖不出)。
                 logger.warning(
-                    "Cancel sells %s failed (proceed to resolution dump): %s",
-                    asset_id,
-                    e,
+                    "Cancel sells %s failed (proceed to %s dump): %s", asset_id, tag, e
                 )
         try:
             resp = self.api.place_market_sell(asset_id, size)
         except Exception as e:
-            logger.error(
-                "Resolution dump failed asset=%s: %s — UNPROTECTED", asset_id, e
-            )
+            logger.error("%s dump failed asset=%s: %s", tag, asset_id, e)
             self._status_add(
                 market=cid,
                 side="卖出",
@@ -693,10 +807,11 @@ class OrderMonitor:
                 size=str(size),
                 matched="-",
                 stage="离场",
-                action="⚠️结算清仓失败·裸奔",
-                detail=f"市场结果已提交，市价清仓被拒，该持仓未受保护：{e}",
+                action=f"⚠️{tag}清仓失败" + ("·裸奔" if expose_on_fail else ""),
+                detail=f"{tag}市价清仓被拒:{e}"
+                + ("，该持仓未受保护" if expose_on_fail else ""),
             )
-            return
+            return None
         fill = market_fill_price(resp, best_bid, cur)
         if cost is not None and cost > 0:
             self.db.record_trade(
@@ -710,13 +825,13 @@ class OrderMonitor:
             )
             basis = describe_cost_basis(cost, lots)
             price_basis = (
-                f"{basis}；结算市价清仓·成交≈买一{fill:.4f}（精确成交以链上为准）；"
+                f"{basis}；{tag}市价清仓·成交≈买一{fill:.4f}（精确成交以链上为准）；"
                 f"来源：CLOB get_trades+get_orderbook"
             )
             detail = f"成本{cost:.4f} 成交≈{fill:.4f}"
         else:
             price_basis = (
-                f"成本未知（get_trades 无买入成交）；结算市价清仓·"
+                f"成本未知（get_trades 无买入成交）；{tag}市价清仓·"
                 f"成交≈买一{fill:.4f}（精确成交以链上为准）"
             )
             detail = f"成本未知 成交≈{fill:.4f}"
@@ -726,7 +841,7 @@ class OrderMonitor:
             side="卖出",
             price=fill,
             size=size,
-            reason="市场结果已提交/进入 UMA 结算 → 市价清仓（无视盈亏）",
+            reason=reason,
             price_basis=price_basis,
         )
         self._status_add(
@@ -736,9 +851,10 @@ class OrderMonitor:
             size=str(size),
             matched="-",
             stage="离场",
-            action="⚠️结算·市价清仓",
+            action=f"⚠️{tag}·市价清仓",
             detail=detail,
         )
+        return fill
 
     # --- Step 3: strategy compliance on resting buy orders ---
     def check_sell_orders(self):

@@ -1641,3 +1641,62 @@ class TestResolutionExit:
         api.place_market_sell.assert_not_called()
         db.record_trade.assert_not_called()
         assert any("无买盘" in (r.get("action") or "") for r in rows), rows
+
+
+class TestLowBalance:
+    def _mon(self, balance, positions, daily_rewards, costs, bids,
+             threshold=4, target_usd=4, mode="balance"):
+        monitor, api, db = _make_monitor(settings={
+            "low_balance_threshold_usd": threshold,
+            "low_reward_threshold_usd": 30,
+            "small_position_shares": 20,
+            "liquidate_target_mode": mode,
+            "liquidate_target_usd": target_usd,
+        })
+        api.get_balance.return_value = balance
+        api.get_user_positions.return_value = positions
+        api.get_open_orders.return_value = []
+        db.get_market_daily_reward.side_effect = lambda cid: daily_rewards.get(cid)
+        db.get_min_order_cost.return_value = 2.0
+        monitor._cost_lots = lambda a, s, c: (
+            costs.get(a),
+            [{"price": costs.get(a) or 0, "take": s, "ts": 0, "trade_id": "t"}],
+        )
+        monitor._sell_book = lambda a: (
+            0.01, "0.01", bids.get(a), (bids.get(a) or 0) + 0.02
+        )
+        return monitor, api, db
+
+    def _pos(self, asset, size, cid, cur=0.1):
+        return {"asset": asset, "size": size, "conditionId": cid, "curPrice": cur}
+
+    def test_no_action_when_balance_ok(self):
+        m, api, db = self._mon(10, [self._pos("A", 100, "cA")], {"cA": 10},
+                               {"A": 0.1}, {"A": 0.1})
+        m.check_low_balance()
+        api.place_market_sell.assert_not_called()
+
+    def test_sells_low_reward_first_until_target(self):
+        # 余额2<4;A 低奖励(档1)先卖,best_bid 0.05×100=5 到手 -> est 2+5=7≥4,只卖一笔。
+        m, api, db = self._mon(
+            2,
+            [self._pos("A", 100, "cA"), self._pos("B", 100, "cB")],
+            {"cA": 10, "cB": 50},
+            {"A": 0.1, "B": 0.1},
+            {"A": 0.05, "B": 0.05},
+        )
+        m.check_low_balance()
+        api.place_market_sell.assert_called_once_with("A", 100)
+
+    def test_skips_no_bid(self):
+        m, api, db = self._mon(2, [self._pos("A", 100, "cA")], {"cA": 10},
+                               {"A": 0.1}, {"A": None})
+        m.check_low_balance()
+        api.place_market_sell.assert_not_called()
+
+    def test_disabled_when_threshold_zero(self):
+        m, api, db = self._mon(1, [self._pos("A", 100, "cA")], {"cA": 10},
+                               {"A": 0.1}, {"A": 0.05}, threshold=0)
+        m.check_low_balance()
+        api.get_balance.assert_not_called()  # 阈值0秒退,连余额都不查
+        api.place_market_sell.assert_not_called()

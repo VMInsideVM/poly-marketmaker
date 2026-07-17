@@ -128,6 +128,7 @@ class WalletWorker:
         self.monitor.begin_status_tick()
         self.monitor.check_buy_orders()
         self.monitor.check_resolution()
+        self.monitor.check_low_balance()
         self.monitor.check_exit()
         self.monitor.check_sell_orders()
         self.monitor.publish_status()
