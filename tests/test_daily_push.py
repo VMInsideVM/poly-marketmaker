@@ -36,7 +36,14 @@ def _mgr(settings):
     ]
     m._scanner_api = MagicMock(proxy_url=None)
     m._last_push_date = None
+    m._pushing = False
+    m._push_thread = None
     return m
+
+
+def _join(m):
+    if getattr(m, "_push_thread", None):
+        m._push_thread.join(timeout=5)
 
 
 S_ON = {"push_enabled": True, "tg_bot_token": "T", "tg_chat_id": "C", "push_hour": 9}
@@ -66,7 +73,9 @@ def test_push_once_per_day_after_hour():
         "engine.manager.beijing_hour", return_value=10
     ), patch("engine.manager.beijing_day", return_value="2026-07-16"):
         m._maybe_push_daily()
-        m._maybe_push_daily()  # 同日第二次 -> 节流
+        _join(m)  # 发送在后台线程,等它做完
+        m._maybe_push_daily()  # 同日第二次 -> 节流(_last_push_date 已置)
+        _join(m)
     assert st.call_count == 1
     args = st.call_args.args
     assert args[0] == "T" and args[1] == "C" and "2026-07-15" in args[2]
@@ -78,4 +87,6 @@ def test_send_failure_no_raise_and_retries():
         "engine.manager.beijing_hour", return_value=10
     ), patch("engine.manager.beijing_day", return_value="2026-07-16"):
         m._maybe_push_daily()  # 不抛
+        _join(m)
     assert m._last_push_date is None  # 失败未置日期 -> 下轮重试
+    assert m._pushing is False  # 重入标志已复位

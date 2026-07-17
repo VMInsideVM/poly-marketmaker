@@ -3,11 +3,9 @@
 纯外发,不改任何交易逻辑。sendMessage 走 GET(复用 http_get + 钱包代理)。
 """
 
-import logging
+import requests
 
 from api.proxy import use_proxy, http_get
-
-logger = logging.getLogger(__name__)
 
 
 def format_daily_report(date, totals, cumulative_net, per_wallet) -> str:
@@ -40,14 +38,23 @@ def format_daily_report(date, totals, cumulative_net, per_wallet) -> str:
 
 
 def send_telegram(token, chat_id, text, proxy=None) -> None:
-    """发一条 Telegram 消息(sendMessage 走 GET,复用 http_get + 代理)。失败抛。"""
-    with use_proxy(proxy):
-        resp = http_get(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            params={"chat_id": chat_id, "text": text},
-            timeout=15,
-        )
-    resp.raise_for_status()
-    data = resp.json()
+    """发一条 Telegram 消息(sendMessage 走 GET,复用 http_get + 代理)。失败抛。
+
+    ⚠️ 异常消息**绝不能带请求 URL**——URL 里 `bot<token>` 含机器人 token,requests 的
+    HTTPError/连接错误默认把 URL 塞进消息,会经调用方 logger.warning 泄进日志文件。故这里
+    捕获 requests 异常、只保留状态码/Telegram 描述,重抛消毒后的消息。
+    """
+    try:
+        with use_proxy(proxy):
+            resp = http_get(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                params={"chat_id": chat_id, "text": text},
+                timeout=15,
+            )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.RequestException as e:
+        code = getattr(getattr(e, "response", None), "status_code", "?")
+        raise RuntimeError(f"Telegram 请求失败(HTTP {code})") from None
     if not data.get("ok"):
-        raise RuntimeError(f"Telegram 返回失败: {data}")
+        raise RuntimeError(f"Telegram 返回失败: {data.get('description') or data}")

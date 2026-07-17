@@ -45,6 +45,26 @@ def test_send_telegram_posts_and_checks_ok():
     assert g.call_args.kwargs["params"] == {"chat_id": "CHAT", "text": "hello"}
 
 
+def test_send_telegram_http_error_does_not_leak_token():
+    # HTTPError 默认消息含 .../bot<token>/... URL;重抛必须消毒,绝不带 token。
+    import requests
+
+    resp = MagicMock()
+    err = requests.exceptions.HTTPError(
+        "401 Client Error: Unauthorized for url: "
+        "https://api.telegram.org/botSECRETTOKEN/sendMessage"
+    )
+    err.response = MagicMock(status_code=401)
+    resp.raise_for_status.side_effect = err
+    with patch("engine.notify.http_get", return_value=resp):
+        try:
+            send_telegram("SECRETTOKEN", "CHAT", "hi")
+            assert False, "应抛"
+        except Exception as e:
+            assert "SECRETTOKEN" not in str(e)  # token 不得进异常消息
+            assert "401" in str(e)
+
+
 def test_send_telegram_raises_on_not_ok():
     resp = MagicMock()
     resp.raise_for_status.return_value = None

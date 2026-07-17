@@ -423,11 +423,12 @@ function loadEngine() {
 }
 
 function savePush() {
+    const ph = parseInt(document.getElementById('push-hour').value, 10);
     const data = {
         push_enabled: document.getElementById('push-enabled').checked,
         tg_bot_token: document.getElementById('tg-bot-token').value.trim(),
         tg_chat_id: document.getElementById('tg-chat-id').value.trim(),
-        push_hour: parseInt(document.getElementById('push-hour').value, 10) || 9,
+        push_hour: Number.isNaN(ph) ? 9 : ph,  // 0 是合法值,不能被 || 吞成 9
     };
     fetch('/api/settings', {
         method: 'POST', headers: {'Content-Type': 'application/json'},

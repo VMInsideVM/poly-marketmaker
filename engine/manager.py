@@ -553,7 +553,8 @@ class EngineManager:
         self._scanner_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._scanner_api: PolymarketAPI | None = None  # Shared API for scanning
-        self._last_push_date = None  # 每日日报推送:上次推送的北京日期(全局一次/天)
+        self._last_push_date = None  # 每日日报推送:上次成功推送的北京日期(全局一次/天)
+        self._pushing = False  # 日报发送在后台线程,此标志防重入(绝不阻塞下单循环)
         self._catalog_cache = None
         self._catalog_cache_ts = 0.0
         self.eligible_markets: list[dict] = []  # Latest scan results
@@ -889,17 +890,20 @@ class EngineManager:
             self._stop_event.wait(timeout=place_interval)
 
     def _maybe_push_daily(self):
-        """每日 push_hour 点后推「昨天」盈亏日报到 Telegram(全局一次/天)。整体 try/except、
-        失败 WARNING 不置日期 -> 下轮重试;绝不阻断 _scanner_loop/下单。纯外发,不改交易逻辑。"""
+        """每日 push_hour 点后推「昨天」盈亏日报到 Telegram(全局一次/天)。组装(本地 DB 读,
+        快)在 loop 线程,**发送(网络往返)放后台线程**——绝不让慢/被墙的 Telegram 请求
+        阻塞 _scanner_loop/下单(代理烂时曾拖垮下单轮,见 [[proxy-flakiness-no-placement]])。
+        `_pushing` 防重入(一次只发一个);成功才置 _last_push_date、失败下轮重试。纯外发,
+        不改交易逻辑。整体 try/except、绝不抛进 loop。"""
         try:
             s = self.db.get_settings()
-            if not s.get("push_enabled"):
+            if not s.get("push_enabled") or self._pushing:
                 return
             now = time.time()
             today = beijing_day(now)
-            if self._last_push_date == today or beijing_hour(now) < int(
-                s.get("push_hour", 9) or 9
-            ):
+            ph = s.get("push_hour", 9)
+            ph = 9 if ph in (None, "") else int(ph)  # 0 是合法值,不能被 `or 9` 吞掉
+            if self._last_push_date == today or beijing_hour(now) < ph:
                 return
             yesterday = _prev_day(today)  # 今天(北京)减一天 = 昨天
             KEYS = ("reward", "rebate", "sell_profit", "loss", "fee", "net")
@@ -922,12 +926,28 @@ class EngineManager:
                 if self._scanner_api
                 else None
             )
-            send_telegram(
-                s.get("tg_bot_token", ""), s.get("tg_chat_id", ""), text, proxy
+            token, chat_id = s.get("tg_bot_token", ""), s.get("tg_chat_id", "")
+            self._pushing = True
+            self._push_thread = threading.Thread(
+                target=self._send_report,
+                args=(token, chat_id, text, today, proxy),
+                daemon=True,
+                name="pnl-push",
             )
+            self._push_thread.start()
+        except Exception as e:
+            logger.warning("日报组装失败: %s", e)
+
+    def _send_report(self, token, chat_id, text, today, proxy):
+        """后台线程体:发 Telegram。成功才置 _last_push_date(失败下轮重试、不阻塞 loop)。
+        send_telegram 已消毒异常(不带含 token 的 URL),故此处 WARNING 不泄露 token。"""
+        try:
+            send_telegram(token, chat_id, text, proxy)
             self._last_push_date = today
         except Exception as e:
             logger.warning("日报推送失败: %s", e)
+        finally:
+            self._pushing = False
 
     def _active_templates(self) -> list[dict]:
         """所有启用钱包绑定模板(按采集器实际用到的维度去重),供采集器算并集/交集。"""
