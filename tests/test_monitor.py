@@ -1700,3 +1700,47 @@ class TestLowBalance:
         m.check_low_balance()
         api.get_balance.assert_not_called()  # 阈值0秒退,连余额都不查
         api.place_market_sell.assert_not_called()
+
+    def test_skips_cost_unknown(self):
+        # 成本没重建出(_cost_lots 返回 None):推迟,不盲目清仓
+        m, api, db = self._mon(2, [self._pos("A", 100, "cA")], {"cA": 10},
+                               {"A": None}, {"A": 0.05})
+        m.check_low_balance()
+        api.place_market_sell.assert_not_called()
+
+    def test_cooldown_after_dump_prevents_immediate_resweep(self):
+        # 卖一笔后设冷却:冷却期内再调不重扫(防余额结算滞后时跨 tick 过卖)
+        m, api, db = self._mon(
+            2,
+            [self._pos("A", 100, "cA"), self._pos("B", 100, "cB")],
+            {"cA": 10, "cB": 10},
+            {"A": 0.1, "B": 0.1},
+            {"A": 0.05, "B": 0.05},
+        )
+        m.check_low_balance()  # 卖 A(0.05×100=5 -> est 7≥4 停)-> 设冷却
+        n1 = api.place_market_sell.call_count
+        assert n1 == 1
+        m.check_low_balance()  # 冷却期内 -> 秒退
+        assert api.place_market_sell.call_count == n1
+
+    def test_early_return_when_balance_already_at_target(self):
+        # target<threshold 时余额在 [target,threshold):触发但已达目标 -> 不拉持仓、不卖
+        m, api, db = self._mon(3, [self._pos("A", 100, "cA")], {"cA": 10},
+                               {"A": 0.1}, {"A": 0.05}, threshold=4, target_usd=2)
+        m.check_low_balance()
+        api.get_user_positions.assert_not_called()
+        api.place_market_sell.assert_not_called()
+
+    def test_dumped_recorded_for_check_exit_skip(self):
+        m, api, db = self._mon(2, [self._pos("A", 100, "cA")], {"cA": 10},
+                               {"A": 0.1}, {"A": 0.05})
+        m.check_low_balance()
+        assert "A" in m._just_dumped  # 供 check_exit 同 tick 跳过
+
+    def test_check_exit_skips_just_dumped(self):
+        # check_exit 同 tick 跳过刚被低余额清仓的仓(否则对已卖仓挂卖被拒、报假裸奔)
+        m, api, db = self._mon(2, [self._pos("A", 100, "cA")], {"cA": 10},
+                               {"A": 0.3}, {"A": 0.05})
+        m._just_dumped = {"A"}
+        m.check_exit()
+        api.place_limit_sell.assert_not_called()

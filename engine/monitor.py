@@ -22,6 +22,10 @@ from engine import monitor_status
 
 logger = logging.getLogger(__name__)
 
+# 低余额清仓成功后的冷却秒数:市价卖的到手余额链上结算有滞后,冷却内不再清仓,
+# 防下个 tick(默认 5s)读到未结算的旧低余额而重扫、过卖不该卖的仓。
+LIQUIDATE_COOLDOWN_SEC = 60
+
 
 class OrderMonitor:
     def __init__(self, api, db, wallet_address: str):
@@ -41,11 +45,18 @@ class OrderMonitor:
         self._status_rows: list = []
         self._tick_ts: float = 0.0
         self._cost_cache: dict = {}  # asset_id -> 加权成本 or None(每 tick 重置)
+        # 低余额清仓:成功清仓后设冷却(让市价卖的到手余额链上结算),冷却内不再清仓 ->
+        # 防跨 tick 过卖(余额结算滞后时下个 tick 仍读到旧低余额会重扫、误卖不该卖的仓)。
+        self._liquidate_cooldown_until: float = 0.0
+        # 本 tick 刚被 check_low_balance 市价清掉的 asset:check_exit 同 tick 跳过它们
+        # (Data API /positions 滞后仍显示满仓,否则会对已卖仓挂卖单被拒、报假「裸奔」)。
+        self._just_dumped: set = set()
 
     def begin_status_tick(self) -> None:
         self._status_rows = []
         self._tick_ts = time.time()
         self._cost_cache = {}
+        self._just_dumped = set()
 
     def _status_add(self, **fields) -> None:
         try:
@@ -336,6 +347,8 @@ class OrderMonitor:
         threshold = float(tmpl.get("low_balance_threshold_usd", 4) or 0)
         if threshold <= 0:
             return
+        if time.time() < self._liquidate_cooldown_until:
+            return  # 上次清仓后的冷却期:等到手余额链上结算,避免跨 tick 过卖
         try:
             balance = float(self.api.get_balance() or 0)
         except Exception as e:
@@ -343,13 +356,15 @@ class OrderMonitor:
             return
         if balance >= threshold:
             return
-        low_reward = float(tmpl.get("low_reward_threshold_usd", 30))
-        small_shares = float(tmpl.get("small_position_shares", 20))
+        low_reward = float(tmpl.get("low_reward_threshold_usd", 30) or 30)
+        small_shares = float(tmpl.get("small_position_shares", 20) or 20)
         if tmpl.get("liquidate_target_mode", "balance") == "next_order":
             moc = self.db.get_min_order_cost()
             target = moc if moc else threshold
         else:
-            target = float(tmpl.get("liquidate_target_usd", 4))
+            target = float(tmpl.get("liquidate_target_usd", 4) or 4)
+        if balance >= target:
+            return  # 已达目标(target<threshold 时可能):免空扫拉持仓/成本
         try:
             positions = self.api.get_user_positions(self._funder())
             open_orders = self.api.get_open_orders()
@@ -365,11 +380,13 @@ class OrderMonitor:
             cid = pos.get("conditionId", "")
             cur = float(pos.get("curPrice", 0) or 0)
             cost, lots = self._cost_lots(asset_id, size, cid)
+            if cost is None:
+                # 成本没重建出(新成交未进 get_trades):推迟,不盲目清仓认亏(同 check_exit
+                # 的裸奔跳过;低余额无结算 deadline,不必像结算清仓那样成本未知也照卖)。
+                continue
             _, _, best_bid, _ = self._sell_book(asset_id)
             reward = self.db.get_market_daily_reward(cid)
-            loss = (
-                None if (cost is None or best_bid is None) else (cost - best_bid) * size
-            )
+            loss = None if best_bid is None else (cost - best_bid) * size
             meta[asset_id] = {
                 "cid": cid,
                 "size": size,
@@ -387,6 +404,7 @@ class OrderMonitor:
                 }
             )
         est = balance
+        dumped_any = False
         for asset_id in plan_liquidation(candidates, low_reward, small_shares):
             if est >= target:
                 break
@@ -411,7 +429,13 @@ class OrderMonitor:
                 logger.warning("low-balance dump %s failed: %s", asset_id, e)
                 continue
             if fill is not None:
+                self._just_dumped.add(
+                    asset_id
+                )  # check_exit 同 tick 跳过(仓已卖、Data API 滞后)
+                dumped_any = True
                 est += bb * m["size"]  # 保守估算到手(best_bid×份额),防过卖
+        if dumped_any:
+            self._liquidate_cooldown_until = time.time() + LIQUIDATE_COOLDOWN_SEC
 
     def check_exit(self):
         """两段式离场:成本≤买一挂卖一,成本>买一挂成本价(永不低于成本;亏损≥强平阈值兜底市价止损)。
@@ -445,6 +469,9 @@ class OrderMonitor:
         status_map = self.api.gamma_resolution_status(cids)
         resolving = {c for c in cids if in_resolution(status_map.get(c))}
         for pos in positions:
+            if pos.get("asset", "") in self._just_dumped:
+                continue  # 本 tick 已被低余额清仓卖掉:Data API /positions 滞后仍显满仓,
+                # 别对已无份额的仓挂卖单被拒、报假「裸奔」;下 tick 持仓刷新后自然消失。
             try:
                 self._exit_position(
                     pos,
