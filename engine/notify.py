@@ -1,4 +1,4 @@
-"""engine/notify.py — 每日盈亏日报推送(Telegram)。format 纯函数;send 薄封装。
+"""engine/notify.py — 每周盈亏周报推送(Telegram)。format 纯函数;send 薄封装。
 
 纯外发,不改任何交易逻辑。sendMessage 走 GET(复用 http_get + 钱包代理)。
 """
@@ -8,30 +8,39 @@ import requests
 from api.proxy import use_proxy, http_get
 
 
-def format_daily_report(date, totals, cumulative_net, per_wallet) -> str:
-    """组装「昨天」日报文本。totals=全钱包 6 类别 dict;per_wallet=[{label,net}]。
+def format_weekly_report(
+    week_start,
+    week_end,
+    daily_nets,
+    week_totals,
+    cumulative_net,
+    per_wallet,
+    since_date,
+) -> str:
+    """组装「上一周」周报文本:每日净利润(7 天)+ 本周汇总(6 类别)+ 累计净利润 + 各钱包本周净。
 
-    loss/fee 以负号展示(它们减小净利);net 已含扣减。数值 2 位小数带符号。
+    daily_nets=[(date, net), …];week_totals=全钱包本周 6 类别 dict;per_wallet=[{label, net}];
+    since_date=累计起点(供「(自 X)」显示)。loss/fee 以负号展示;数值 2 位小数带符号。
     """
 
     def s(v):
         return f"{float(v or 0):+.2f}"
 
-    lines = [
-        f"📊 做市日报 · {date}",
+    lines = [f"📊 做市周报 · {week_start} ~ {week_end}", "", "【每日净利润】"]
+    for date, net in daily_nets:
+        lines.append(f"{date[5:]}  {s(net)}")  # MM-DD
+    lines += [
         "",
-        "【全钱包汇总】",
-        f"做市奖励  {s(totals.get('reward', 0))}",
-        f"做市返佣  {s(totals.get('rebate', 0))}",
-        f"卖出盈利  {s(totals.get('sell_profit', 0))}",
-        f"亏损      {s(-float(totals.get('loss', 0) or 0))}",
-        f"手续费    {s(-float(totals.get('fee', 0) or 0))}",
-        f"净利润    {s(totals.get('net', 0))}",
+        "【本周汇总】",
+        f"做市奖励 {s(week_totals.get('reward', 0))} · 返佣 {s(week_totals.get('rebate', 0))}"
+        f" · 卖出盈利 {s(week_totals.get('sell_profit', 0))}",
+        f"亏损 {s(-float(week_totals.get('loss', 0) or 0))} · 手续费 "
+        f"{s(-float(week_totals.get('fee', 0) or 0))} · 净利润 {s(week_totals.get('net', 0))}",
         "",
-        f"累计净利润 {s(cumulative_net)}",
+        f"【累计净利润】(自 {since_date})  {s(cumulative_net)}",
     ]
     if per_wallet:
-        lines += ["", "【各钱包净利润】"]
+        lines += ["", "【各钱包本周净利润】"]
         for w in per_wallet:
             lines.append(f"{w['label']}  {s(w['net'])}")
     return "\n".join(lines)

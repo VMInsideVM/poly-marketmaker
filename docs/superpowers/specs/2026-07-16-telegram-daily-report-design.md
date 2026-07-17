@@ -7,6 +7,13 @@
 > `TG_CHAT_ID`/`PUSH_HOUR`），**不走配置页**——对方更新程序即生效、无需任何配置。故下文「§四 配置」的
 > settings 键 + config 页表单 + §五的 `/api/push/test` 测试按钮**已移除**；推送始终开启，仅保留每日节流 +
 > 后台线程发送 + 走扫描钱包代理。其余（时机/内容/format/send_telegram 消毒）不变。
+>
+> **⚠️后续变更（2026-07-17）：日报改周报**。频率从「每日推昨天」改为「**每周推上一个完整周（周一~周日）**」：
+> `_maybe_push_daily`→`_maybe_push_weekly`（挂 `_scanner_loop`，`_last_push_week` 按「上周周一日期」节流——本周内
+> 首次过 `PUSH_HOUR` 就推、周中开机也补推上周报，一周一次），`format_daily_report`→`format_weekly_report`
+> （每日净利润 7 行 + 本周 6 类别汇总 + 累计净利润「自 PNL_START_DATE」+ 各钱包本周净），新增纯函数
+> `engine/pnl.py last_week_range(today)→(周一,周日)`。汇总（本周/累计）用 `get_daily_pnl_all`（含已删钱包）；
+> 各钱包明细只列当前还在的钱包。后台线程 + 走代理 + 失败下轮重试 均不变。
 
 ## 一、背景与目标
 

@@ -157,3 +157,14 @@ def test_beijing_hour():
     assert beijing_hour(_utc_ts(2026, 1, 1, 1, 0)) == 9
     # UTC 16:30 -> 北京 次日 00:30 -> 0
     assert beijing_hour(_utc_ts(2026, 1, 1, 16, 30)) == 0
+
+
+def test_last_week_range():
+    from engine.pnl import last_week_range
+
+    # 2026-07-15 是周三 -> 本周一 07-13 -> 上周 07-06(周一)~ 07-12(周日)
+    assert last_week_range("2026-07-15") == ("2026-07-06", "2026-07-12")
+    # 周一当天(2026-07-13)-> 上周 07-06 ~ 07-12
+    assert last_week_range("2026-07-13") == ("2026-07-06", "2026-07-12")
+    # 周日(2026-07-12)-> 本周一 07-06 -> 上周 06-29 ~ 07-05
+    assert last_week_range("2026-07-12") == ("2026-06-29", "2026-07-05")

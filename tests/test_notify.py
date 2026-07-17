@@ -1,12 +1,13 @@
-"""tests/test_notify.py — Telegram 日报:format 纯函数 + send 薄封装。"""
+"""tests/test_notify.py — Telegram 周报:format 纯函数 + send 薄封装。"""
 
 from unittest.mock import patch, MagicMock
 
-from engine.notify import format_daily_report, send_telegram
+from engine.notify import format_weekly_report, send_telegram
 
 
-def test_format_daily_report_basic():
-    totals = {
+def test_format_weekly_report_basic():
+    daily_nets = [("2026-07-06", 2.0), ("2026-07-07", -1.0), ("2026-07-12", 3.0)]
+    week_totals = {
         "reward": 7.21,
         "rebate": 0.5,
         "sell_profit": 2.0,
@@ -18,20 +19,30 @@ def test_format_daily_report_basic():
         {"label": "主号", "net": 5.0},
         {"label": "0x1234...abcd", "net": 3.61},
     ]
-    txt = format_daily_report("2026-07-15", totals, 123.45, per_wallet)
-    assert "做市日报 · 2026-07-15" in txt
-    assert "净利润    +8.61" in txt
-    assert "亏损      -1.00" in txt  # loss 显示为负
-    assert "手续费    -0.10" in txt
-    assert "累计净利润 +123.45" in txt
+    txt = format_weekly_report(
+        "2026-07-06",
+        "2026-07-12",
+        daily_nets,
+        week_totals,
+        123.45,
+        per_wallet,
+        "2026-07-01",
+    )
+    assert "做市周报 · 2026-07-06 ~ 2026-07-12" in txt
+    assert "07-06  +2.00" in txt and "07-07  -1.00" in txt
+    assert "净利润 +8.61" in txt
+    assert "亏损 -1.00" in txt and "手续费 -0.10" in txt  # loss/fee 显示为负
+    assert "累计净利润" in txt and "自 2026-07-01" in txt and "+123.45" in txt
     assert "主号  +5.00" in txt and "0x1234...abcd  +3.61" in txt
 
 
-def test_format_daily_report_empty_totals():
+def test_format_weekly_report_empty_wallets():
     zero = {k: 0 for k in ("reward", "rebate", "sell_profit", "loss", "fee", "net")}
-    txt = format_daily_report("2026-07-15", zero, 0.0, [])
-    assert "净利润    +0.00" in txt
-    assert "【各钱包净利润】" not in txt  # 无钱包明细则不加该段
+    txt = format_weekly_report(
+        "2026-07-06", "2026-07-12", [], zero, 0.0, [], "2026-07-01"
+    )
+    assert "净利润 +0.00" in txt
+    assert "【各钱包本周净利润】" not in txt  # 无钱包明细则不加该段
 
 
 def test_send_telegram_posts_and_checks_ok():
