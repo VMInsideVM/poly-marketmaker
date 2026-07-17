@@ -764,3 +764,25 @@ class TestDailyPnl:
         )
         agg = db.get_daily_pnl_all("2026-06-01", "2026-06-01")[0]
         assert agg["date"] == "2026-06-01" and agg["reward"] == 10
+
+
+class TestLiquidationQueries:
+    def _seed_eligible(self, db, market_id, daily_reward, min_cost):
+        c = db.conn.cursor()
+        c.execute(
+            "INSERT INTO eligible_markets (market_id, token_id, market_name, outcome,"
+            " daily_reward, order_price, order_size, min_cost) VALUES (?,?,?,?,?,?,?,?)",
+            (market_id, "tok", "n", "Yes", daily_reward, 0.1, 20, min_cost),
+        )
+        db.conn.commit()
+
+    def test_get_market_daily_reward(self, db):
+        self._seed_eligible(db, "0xC1", 25.0, 2.0)
+        assert db.get_market_daily_reward("0xC1") == 25.0
+        assert db.get_market_daily_reward("0xNONE") is None
+
+    def test_get_min_order_cost(self, db):
+        assert db.get_min_order_cost() is None  # 空表
+        self._seed_eligible(db, "0xC1", 25.0, 5.0)
+        self._seed_eligible(db, "0xC2", 40.0, 2.0)
+        assert db.get_min_order_cost() == 2.0

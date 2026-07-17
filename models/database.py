@@ -834,6 +834,23 @@ class Database:
 
     # --- Net worth history (每钱包净值快照:启动 + 每日) ---
 
+    def get_market_daily_reward(self, condition_id):
+        """某市场在 eligible_markets 里的 daily_reward(市场奖励);不在表 -> None。"""
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT daily_reward FROM eligible_markets WHERE market_id = ? LIMIT 1",
+            (condition_id,),
+        )
+        row = c.fetchone()
+        return float(row["daily_reward"]) if row else None
+
+    def get_min_order_cost(self):
+        """当前 eligible_markets 里最便宜一单的 min_cost(能挂得起的最小本金);空表 -> None。"""
+        c = self.conn.cursor()
+        c.execute("SELECT MIN(min_cost) AS m FROM eligible_markets")
+        row = c.fetchone()
+        return float(row["m"]) if row and row["m"] is not None else None
+
     def record_net_worth(self, wallet: str, cash: float, positions_value: float):
         c = self.conn.cursor()
         c.execute(

@@ -75,6 +75,13 @@ TEMPLATE_DEFAULTS = {
     "max_exposure_usd": 250,
     "max_exposure_shares": 500,
     "max_concurrent_markets": 10,
+    # 低余额清仓:余额 < low_balance_threshold_usd(0=关)时按优先级逐笔市价卖持仓腾现金。
+    # 档1=市场奖励 < low_reward_threshold_usd、档2=份额 < small_position_shares、档3=按亏损从小到大。
+    "low_balance_threshold_usd": 4.0,
+    "low_reward_threshold_usd": 30.0,
+    "small_position_shares": 20.0,
+    "liquidate_target_mode": "balance",  # "balance"=卖到余额线 | "next_order"=卖到够下一单
+    "liquidate_target_usd": 4.0,
     # 档位模块:按市场最低奖励份额(rewards_min_size)精确匹配的挂单参数组,取代了
     # 原先的奖励最低份额范围筛选、选档系数门槛与金额数值表(均已下沉到每个档位内)。
     # 每项 {size, enabled, shares, rule1/2/3_min_coeff, gap_high_coeff_sum_min,
