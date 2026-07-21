@@ -11,7 +11,7 @@
         <input type="text" id="new-remark" placeholder="备注（可选，如 主号/小号2）">
         <button class="btn btn-primary" onclick="addWallet()">添加钱包</button>
     </div>
-    <p style="color:#888;font-size:12px;margin-top:4px;">一般只需输入私钥，存款钱包地址会自动识别；若自动识别的地址与 polymarket.com/settings 不一致，可在第二个框手动填写正确的存款地址。</p>
+    <p style="color:#888;font-size:12px;margin-top:4px;">一般只需输入私钥，存款钱包地址会自动识别；若自动识别的地址与 polymarket.com/settings 不一致，可在第二个框手动填写正确的存款地址。代理按 <code>host:port:账户:密码</code> 填即可，HTTP 还是 SOCKS5 会自动识别；连不通的代理不会被保存。</p>
     <table class="data-table" id="wallet-config-table">
         <thead>
             <tr><th>地址</th><th>存款地址</th><th>代理</th><th>备注</th><th>模板</th><th>状态</th><th>操作</th></tr>
@@ -514,21 +514,31 @@ let _walletRemarks = {};
 
 function proxyLabel(p) {
     if (!p) return '<span style="color:#888">直连</span>';
-    const parts = p.split(':');
-    return parts.length >= 2 ? (parts[0] + ':' + parts[1]) : p;
+    const m = p.match(/^socks5h?:(.*)$/i);   // 存库串带协议前缀时,展示去掉前缀的 host:port
+    const body = m ? m[1] : p;
+    const parts = body.split(':');
+    const hostPort = parts.length >= 2 ? (parts[0] + ':' + parts[1]) : body;
+    return m ? hostPort + ' <span style="color:#888">(SOCKS5)</span>' : hostPort;
 }
 
 function editProxy(address) {
     const cur = _walletProxies[address] || '';
-    const v = prompt('代理（host:port 或 host:port:user:pass，留空=直连）：', cur);
+    const v = prompt('代理（host:port 或 host:port:账户:密码，留空=直连）：\nHTTP / SOCKS5 自动识别，保存前会先测通。', cur);
     if (v === null) return;
+    if (v.trim()) showToast('正在测试代理…');
     fetch(`/api/wallets/${address}/proxy`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({proxy: v.trim()}),
-    }).then(r => r.json()).then(() => {
-        showToast('代理已更新 · 下次启动该钱包引擎时生效');
+    }).then(r => r.json()).then(data => {
+        if (data.error) { alert(data.error); return; }
+        showToast(proxySavedMsg(data.protocol, data.exit_ip));
         loadWallets();
     });
+}
+
+function proxySavedMsg(protocol, exitIp) {
+    if (!protocol) return '已改为直连 · 下次启动该钱包引擎时生效';
+    return `代理已更新（${protocol}${exitIp ? '，出口 IP ' + exitIp : ''}）· 下次启动该钱包引擎时生效`;
 }
 
 function editRemark(address) {
@@ -646,7 +656,10 @@ function finalizeImport(key, funder) {
         document.getElementById('new-funder').value = '';
         document.getElementById('new-proxy').value = '';
         document.getElementById('new-remark').value = '';
-        showToast('钱包已添加 · 账户类型：' + (ACCT_TYPES[data.signature_type] || ('sig=' + data.signature_type)));
+        const pInfo = data.proxy_protocol
+            ? ' · 代理 ' + data.proxy_protocol + (data.proxy_exit_ip ? '（出口 IP ' + data.proxy_exit_ip + '）' : '')
+            : '';
+        showToast('钱包已添加 · 账户类型：' + (ACCT_TYPES[data.signature_type] || ('sig=' + data.signature_type)) + pInfo);
         loadWallets();
     });
 }

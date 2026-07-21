@@ -1,8 +1,9 @@
 """tests/test_wallet_routes.py — 钱包路由(删除清缓存,避免 sig/funder 改了仍读旧实例)。"""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import web.routes as routes
+from api.proxy import ProxyUnreachable
 
 
 def _client_logged_in():
@@ -34,6 +35,22 @@ def test_preview_returns_eoa_and_derived_funder():
     assert resp.status_code == 200
     assert body["address"].startswith("0x") and len(body["address"]) == 42
     assert body["derived_funder"].startswith("0x") and len(body["derived_funder"]) == 42
+
+
+def test_add_wallet_rejected_when_proxy_unreachable(monkeypatch):
+    # 代理探测在导入(要走该代理联网)之前:不通就直接拒,既不联网也不落库。
+    db = MagicMock()
+    monkeypatch.setattr(routes, "db", db)
+    monkeypatch.setattr(routes, "encryption_key", b"k" * 32)
+    with patch("api.polymarket_api.PolymarketAPI"):  # 导入本身能成功,只有代理不通
+        with patch.object(routes, "probe_proxy", side_effect=ProxyUnreachable("连不上")):
+            resp = _client_logged_in().post(
+                "/api/wallets",
+                json={"private_key": "0x" + "1" * 64, "proxy": "1.2.3.4:12324:u:p"},
+            )
+    assert resp.status_code == 400
+    assert "代理" in resp.get_json()["error"]
+    db.add_wallet.assert_not_called()
 
 
 def test_preview_rejects_bad_key():

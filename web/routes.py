@@ -17,6 +17,7 @@ from flask import (
     url_for,
     flash,
 )
+from api.proxy import ProxyUnreachable, probe_proxy
 from models.database import Database
 from engine.manager import EngineManager
 from utils.crypto import derive_key, encrypt, decrypt
@@ -535,8 +536,13 @@ def api_add_wallet():
     if err:
         return jsonify({"error": err}), 400
 
-    # 该钱包专属代理(明文存原串);此后含本次导入探测在内的所有网络活动都走它。
-    proxy = (data.get("proxy") or "").strip()
+    # 该钱包专属代理(明文存);此后含本次导入探测在内的所有网络活动都走它。用户不知道
+    # 供应商给的是 HTTP 还是 SOCKS5 -> 先探测出协议再存,不通就当场拒(见 probe_proxy)。
+    proxy_exit_ip = None
+    try:
+        proxy, proxy_exit_ip = probe_proxy((data.get("proxy") or "").strip())
+    except ProxyUnreachable as e:
+        return jsonify({"error": f"代理不可用: {e}"}), 400
     # 可选备注(纯展示,截断 40 字)。
     remark = (data.get("remark") or "").strip()[:40]
 
@@ -578,7 +584,14 @@ def api_add_wallet():
 
     _api_cache.pop(address, None)  # 重新导入可能改了 sig/funder,清掉旧缓存
     return jsonify(
-        {"ok": True, "address": address, "funder": funder, "signature_type": sig_type}
+        {
+            "ok": True,
+            "address": address,
+            "funder": funder,
+            "signature_type": sig_type,
+            "proxy_protocol": _proxy_protocol(proxy),
+            "proxy_exit_ip": proxy_exit_ip,
+        }
     )
 
 
@@ -594,15 +607,31 @@ def api_remove_wallet(address):
     return jsonify({"ok": True})
 
 
+def _proxy_protocol(stored: str) -> str:
+    """存进库的代理串对应哪种协议(纯展示;空=直连)。"""
+    if not stored:
+        return ""
+    return "SOCKS5" if stored.lower().startswith(("socks5:", "socks5h:")) else "HTTP"
+
+
 @app.route("/api/wallets/<address>/proxy", methods=["PUT"])
 @login_required
 def api_set_wallet_proxy(address):
-    """设置/清空某钱包的 IP 代理(明文存)。代理变更在下次启动该钱包引擎时生效;
-    清掉缓存 api,使路由侧的余额查询按新代理重建。"""
-    proxy = ((request.get_json() or {}).get("proxy") or "").strip()
-    db.set_wallet_proxy(address, proxy)
+    """设置/清空某钱包的 IP 代理(明文存)。先探测协议(HTTP / SOCKS5)与连通性,不通就
+    拒绝保存——存下不通的代理等于该钱包每轮静默跳过(绝不回落直连)。代理变更在下次启动
+    该钱包引擎时生效;清掉缓存 api,使路由侧的余额查询按新代理重建。"""
+    raw = ((request.get_json() or {}).get("proxy") or "").strip()
+    exit_ip = None
+    if raw:
+        try:
+            raw, exit_ip = probe_proxy(raw)
+        except ProxyUnreachable as e:
+            return jsonify({"error": f"代理不可用: {e}"}), 400
+    db.set_wallet_proxy(address, raw)
     _api_cache.pop(address, None)
-    return jsonify({"ok": True})
+    return jsonify(
+        {"ok": True, "protocol": _proxy_protocol(raw), "exit_ip": exit_ip}
+    )
 
 
 @app.route("/api/wallets/<address>/remark", methods=["PUT"])

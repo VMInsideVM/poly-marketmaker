@@ -28,6 +28,10 @@ for pkg in (
     hiddenimports += collect_submodules(pkg)
     datas += collect_data_files(pkg)
 
+# SOCKS5 代理支持是 httpx / requests 的惰性 import（只在代理串是 socks5 时才走到），
+# 静态分析看不到 —— 漏掉的话配了 SOCKS5 代理的钱包一联网就 ImportError。
+hiddenimports += ["socksio", "socks", "urllib3.contrib.socks"]
+
 
 a = Analysis(
     ["app.py"],

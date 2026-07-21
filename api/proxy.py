@@ -147,29 +147,89 @@ def install_clob_proxy():
 
 
 def parse_proxy(raw) -> str | None:
-    """把用户填的代理串转成 http(s) 代理 URL;空/None -> None。
+    """把用户填的代理串转成代理 URL;空/None -> None。
 
-    - ``host:port:user:pass`` -> ``http://user:pass@host:port``(凭证 URL 编码)
-    - ``host:port``           -> ``http://host:port``
-    - 已是 ``http://``/``https://`` 原样返回
+    - ``host:port:user:pass``        -> ``http://user:pass@host:port``(凭证 URL 编码)
+    - ``host:port``                  -> ``http://host:port``
+    - ``socks5:host:port[:user:pass]``-> ``socks5h://...``
+    - 已是 ``http(s)://`` 原样返回;``socks5://`` 归一成 ``socks5h://``
     密码可能含 ``:`` -> ``split(":",3)`` 让前三段为 host/port/user、其余整体当密码。
+
+    SOCKS5 一律用 ``socks5h``(域名交给代理端解析):``socks5``(本地解析)会从真实 IP
+    发 DNS 查询、泄露访问目标,实测某些机房代理也直接拒连。
     """
     if not raw:
         return None
     s = str(raw).strip()
     if not s:
         return None
-    if s.lower().startswith(("http://", "https://")):
+    low = s.lower()
+    if low.startswith(("http://", "https://")):
         return s
+    if low.startswith(("socks5://", "socks5h://")):
+        return "socks5h://" + s.split("://", 1)[1]
+    scheme = "http"
+    for pfx in ("socks5h:", "socks5:"):
+        if low.startswith(pfx):
+            scheme, s = "socks5h", s[len(pfx) :]
+            break
     parts = s.split(":", 3)
     if len(parts) < 2 or not parts[0] or not parts[1]:
         return None
     host, port = parts[0], parts[1]
     if len(parts) == 2:
-        return f"http://{host}:{port}"
+        return f"{scheme}://{host}:{port}"
     user = parts[2]
     pw = parts[3] if len(parts) >= 4 else ""
     auth = quote(user, safe="")
     if pw:
         auth += ":" + quote(pw, safe="")
-    return f"http://{auth}@{host}:{port}"
+    return f"{scheme}://{auth}@{host}:{port}"
+
+
+class ProxyUnreachable(Exception):
+    """两种协议都连不通(或代理到不了 Polymarket)。"""
+
+
+# 探测用:必须能到交易所才算可用(有的代理能上网但被 Polymarket 拒);出口 IP 仅回显。
+_PROBE_URL = "https://clob.polymarket.com/ok"
+_EXIT_IP_URL = "https://api.ipify.org?format=json"
+
+
+def _probe_once(url, timeout):
+    requests.get(_PROBE_URL, proxies={"http": url, "https": url}, timeout=timeout)
+
+
+def _exit_ip(url, timeout):
+    try:
+        r = requests.get(_EXIT_IP_URL, proxies={"http": url, "https": url}, timeout=timeout)
+        return r.json().get("ip") or None
+    except Exception:
+        return None
+
+
+def probe_proxy(raw, *, timeout=8) -> tuple[str, str | None]:
+    """探测代理走 HTTP 还是 SOCKS5,返回(该存进库的串, 出口 IP 或 None)。
+
+    用户只填 ``host:port:账户:密码``,并不知道供应商给的是哪种协议(如 iproyal 的
+    机房 IP 只开 SOCKS5)。这里先按 HTTP 试、再按 SOCKS5 试,谁能连到 Polymarket 就
+    用谁,并把探测结果以 ``socks5:`` 前缀写回串里,运行期不再猜。
+    已显式写了协议的串只验连通、不改写。都不通 -> ProxyUnreachable(调用方拒绝保存:
+    代理不通时本钱包每轮都会被跳过且绝不直连,存下来等于静默停摆)。
+    """
+    s = (str(raw) if raw else "").strip()
+    if not s:
+        return "", None
+    low = s.lower()
+    explicit = low.startswith(("http://", "https://", "socks5://", "socks5h:", "socks5:"))
+    candidates = [s] if explicit else [s, "socks5:" + s]
+    for cand in candidates:
+        url = parse_proxy(cand)
+        if not url:
+            raise ProxyUnreachable("代理格式不对(应为 host:port 或 host:port:账户:密码)")
+        try:
+            _probe_once(url, timeout)
+        except Exception:
+            continue
+        return cand, _exit_ip(url, timeout)
+    raise ProxyUnreachable("代理连不上(HTTP / SOCKS5 都试过)")
