@@ -63,13 +63,13 @@ function refreshOrders(){
     const eb = document.getElementById('orders-error');
     if (d.errors && d.errors.length){
       eb.style.display='block';
-      eb.textContent = '部分钱包拉取失败: ' + d.errors.map(e=>`${e.wallet.slice(0,8)}(${e.msg})`).join('; ');
+      eb.textContent = '部分钱包拉取失败: ' + d.errors.map(e=>`${walletLabelOf(e.wallet)}(${e.msg})`).join('; ');
     } else { eb.style.display='none'; }
     renderOrders();
   });
   fetch(`/api/positions${qs}`).then(r=>r.json()).then(ps=>{
     document.getElementById('positions-body').innerHTML = ps.map(p=>`
-      <tr><td title="${p.wallet}">${p.wallet.slice(0,6)}...${p.wallet.slice(-4)}</td>
+      <tr><td title="${escapeHtml(p.wallet)}">${escapeHtml(walletLabelOf(p.wallet))}</td>
       <td>${marketCell(p.market_name, p.condition_id, p.market_url)}</td>
       <td>${p.outcome||''}</td>
       <td>${(p.buy_price||0).toFixed(4)}</td>
@@ -98,7 +98,7 @@ function renderOrders(){
   document.getElementById('orders-body').innerHTML = rows.map(o=>`
     <tr><td><input type="checkbox" class="order-check"
         data-id="${o.order_id}" data-wallet="${o.wallet}"></td>
-    <td title="${o.wallet}">${o.wallet.slice(0,6)}...${o.wallet.slice(-4)}</td>
+    <td title="${escapeHtml(o.wallet)}">${escapeHtml(walletLabelOf(o.wallet))}</td>
     <td>${marketCell(o.market_name, o.market, o.market_url)}</td><td>${o.side}</td><td>${o.outcome||''}</td>
     <td>${(o.price||0).toFixed(4)}</td><td>${o.original_size}</td>
     <td>${o.size_matched}</td>
@@ -148,13 +148,10 @@ function blacklistMarket(cid){
     });
 }
 
-fetch('/api/wallets').then(r=>r.json()).then(ws=>{
-  const s=document.getElementById('wallet-filter');
-  ws.forEach(w=>{const o=document.createElement('option');
-    o.value=w.address;o.textContent=`${w.address.slice(0,6)}...${w.address.slice(-4)}`;
-    s.appendChild(o);});
+// 先等备注映射就绪再首渲染,否则表格会先闪一遍短地址再变备注。
+fillWalletSelect(document.getElementById('wallet-filter')).then(()=>{
+  refreshOrders();
+  setInterval(refreshOrders, 10000);
 });
-refreshOrders();
-setInterval(refreshOrders, 10000);
 </script>
 {% endblock %}

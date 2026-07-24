@@ -3,7 +3,7 @@
 <h1>盈亏台账</h1>
 <section class="config-section">
     <div class="form-inline">
-        <label>钱包 <select id="pnl-wallet"></select></label>
+        <label>钱包 <select id="pnl-wallet"><option value="all">全部钱包</option></select></label>
         <span class="hint" style="color:#888;font-size:12px">近一年 · 北京时间为界 · 奖励次日 8 点到账归前一天</span>
     </div>
 
@@ -35,12 +35,8 @@ function money(v) { return (v == null ? 0 : v).toFixed(2); }
 function netColor(v) { return v > 1e-9 ? '#3aa66a' : (v < -1e-9 ? '#d24b4b' : '#888'); }
 
 function loadPnlWallets() {
-    fetch('/api/wallets').then(r => r.json()).then(ws => {
-        const sel = document.getElementById('pnl-wallet');
-        const opts = ['<option value="all">全部钱包</option>'].concat(ws.map(w =>
-            `<option value="${w.address}">${(w.remark && w.remark.trim()) ? escapeHtml(w.remark) + ' (' + shortAddr(w.address) + ')' : shortAddr(w.address)}</option>`
-        ));
-        sel.innerHTML = opts.join('');
+    const sel = document.getElementById('pnl-wallet');
+    fillWalletSelect(sel).then(() => {
         sel.onchange = loadPnl;
         loadPnl();
     });

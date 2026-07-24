@@ -15,6 +15,45 @@ function walletLabel(remark, addr) {
   return (remark && String(remark).trim()) ? String(remark) : shortAddr(addr);
 }
 
+// 备注只在 /api/wallets 上,而挂单/持仓/动作等接口只回地址 —— 这里把钱包列表
+// 缓存成一次全页面共享的请求,地址一律小写做 key(各接口回传的大小写来源不同,
+// 不归一会查不到备注而静默退回短地址)。
+let _walletsPromise = null;
+const _remarkCache = {};
+
+function walletList() {
+  if (!_walletsPromise) {
+    _walletsPromise = fetch('/api/wallets').then(r => r.json()).then(ws => {
+      const list = Array.isArray(ws) ? ws : [];
+      list.forEach(w => {
+        _remarkCache[String(w.address || '').toLowerCase()] = w.remark || '';
+      });
+      return list;
+    }).catch(() => []);
+  }
+  return _walletsPromise;
+}
+
+// 只拿得到地址时的钱包标签(备注优先)。缓存未就绪就退回短地址,下一轮刷新补上。
+function walletLabelOf(addr) {
+  return walletLabel(_remarkCache[String(addr || '').toLowerCase()] || '', addr);
+}
+
+// 往钱包下拉里追加选项(备注优先,完整地址进 title)。页面自带的「全部」选项写在
+// HTML 里,这里只负责追加钱包。返回 promise,便于首屏等备注就绪再渲染表格。
+function fillWalletSelect(sel) {
+  return walletList().then(ws => {
+    ws.forEach(w => {
+      const opt = document.createElement('option');
+      opt.value = w.address;
+      opt.textContent = walletLabel(w.remark, w.address);
+      opt.title = w.address;
+      sel.appendChild(opt);
+    });
+    return ws;
+  });
+}
+
 let _toastTimer = null;
 function showToast(msg) {
   let el = document.getElementById('app-toast');
