@@ -73,6 +73,7 @@ class Database:
                 proxy TEXT NOT NULL DEFAULT '',
                 remark TEXT NOT NULL DEFAULT '',
                 enabled INTEGER NOT NULL DEFAULT 1,
+                last_active_at REAL NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
             );
             CREATE TABLE IF NOT EXISTS orders (
@@ -210,6 +211,11 @@ class Database:
             self.conn.commit()
         if "remark" not in cols:
             c.execute("ALTER TABLE wallets ADD COLUMN remark TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
+        if "last_active_at" not in cols:
+            c.execute(
+                "ALTER TABLE wallets ADD COLUMN last_active_at REAL NOT NULL DEFAULT 0"
+            )
             self.conn.commit()
         c.execute("PRAGMA table_info(eligible_markets)")
         em_cols = {row[1] for row in c.fetchall()}
@@ -452,6 +458,18 @@ class Database:
         c.execute("UPDATE wallets SET remark = ? WHERE address = ?", (remark, address))
         self.conn.commit()
 
+    def touch_wallet_active(self, address: str):
+        """记下该钱包最近一次干活的时间(成功挂买单 / 抓到成交)。覆盖式,不留历史。
+
+        纯展示字段。调用点在引擎线程里,地址不存在(钱包已删)时静默无事发生。
+        """
+        c = self.conn.cursor()
+        c.execute(
+            "UPDATE wallets SET last_active_at = ? WHERE address = ?",
+            (time.time(), address),
+        )
+        self.conn.commit()
+
     def remove_wallet(self, address: str):
         c = self.conn.cursor()
         c.execute("DELETE FROM wallets WHERE address = ?", (address,))
@@ -469,7 +487,7 @@ class Database:
         c = self.conn.cursor()
         c.execute(
             "SELECT address, encrypted_key, funder, signature_type, proxy, remark, enabled, "
-            "created_at, template_id FROM wallets"
+            "last_active_at, created_at, template_id FROM wallets"
         )
         return [dict(row) for row in c.fetchall()]
 

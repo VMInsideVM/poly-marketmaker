@@ -435,6 +435,7 @@ class WalletWorker:
                             neg_risk=None,
                         )
                         placed += 1
+                        self._touch_active()
                         markets_with_open.add(mid)
                         if gap_d and gap_d.get("action") == "place":
                             self._record_place_buy_tier(
@@ -458,6 +459,13 @@ class WalletWorker:
                         logger.error("place_limit_buy failed %s: %s", token_id, ex)
                 # ② 判成不挂:记 gap_skip(按 token 去重,判断变化才记)。
                 self._maybe_record_gap_skip(mid, side, gap_explains.get(key))
+
+    def _touch_active(self):
+        """记一次「上次活跃」(纯展示)。写失败绝不能打断下单,吞掉只打 warning。"""
+        try:
+            self.db.touch_wallet_active(self.wallet_address)
+        except Exception as e:
+            logger.warning("touch_wallet_active failed %s: %s", self.wallet_address, e)
 
     def _record_place_buy_tier(
         self, market_id, side, price, shares, reason=None, price_basis=None

@@ -223,6 +223,11 @@ class OrderMonitor:
         # No trades-table write: buy "history" is the live Data API position.
         # 离场卖单由 check_exit() 的两段式逻辑(plan_exit)按 get_trades 加权成本维护。
         # Step 1 only sets the cooldown and cancels the buy's remainder.
+        # 「上次活跃」纯展示,写失败不影响成交处理。
+        try:
+            self.db.touch_wallet_active(self.wallet_address)
+        except Exception as e:
+            logger.warning("touch_wallet_active failed %s: %s", self.wallet_address, e)
         self.db.set_cooldown(
             self.wallet_address, market_id, self.db.get_settings()["cooldown_minutes"]
         )

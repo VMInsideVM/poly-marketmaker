@@ -6,6 +6,7 @@ import sys
 import hashlib
 import logging
 import sqlite3
+import threading
 from functools import wraps
 from flask import (
     Flask,
@@ -27,6 +28,7 @@ from engine.blacklist_ops import buy_order_ids_for_condition
 from engine.take_profit import effective_theta_stop
 from config import DB_PATH, HOST, PORT
 from web import update as updater
+from web.wallet_import import ImportJob, parse_import_lines
 from version import __version__
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,7 @@ db: Database = None
 manager: EngineManager = None
 encryption_key: bytes = None
 _api_cache: dict = {}  # Cache PolymarketAPI instances by address
+_import_job = ImportJob()  # 批量导入钱包的进度(单用户单进程,同时只跑一个)
 
 
 def init_app(database: Database):
@@ -521,30 +524,35 @@ def api_preview_wallet():
     return jsonify({"address": eoa, "derived_funder": derived_funder})
 
 
-@app.route("/api/wallets", methods=["POST"])
-@login_required
-def api_add_wallet():
-    data = request.get_json()
-    private_key, err = _clean_private_key(data.get("private_key", ""))
+class WalletImportError(Exception):
+    """导入钱包失败;消息直接呈现给用户。"""
+
+
+def _import_wallet(raw_key, raw_funder="", raw_proxy="", raw_remark=""):
+    """探代理协议 -> 探账户类型 -> 加密入库。成功返回结果 dict,失败抛 WalletImportError。
+
+    单个导入(/api/wallets)和批量导入(/api/wallets/import)共用同一条路,避免两边
+    走出不同的账户类型或代理判定。不依赖 request 上下文,可在后台线程里调用。
+    """
+    private_key, err = _clean_private_key(raw_key)
     if err:
-        return jsonify({"error": err}), 400
+        raise WalletImportError(err)
 
     # Optional deposit-wallet (funder) override. Normally left blank and
     # auto-derived from the private key; the user may supply one when the
     # auto-derived address doesn't match polymarket.com/settings.
-    funder, err = _clean_funder(data.get("funder", ""))
+    funder, err = _clean_funder(raw_funder)
     if err:
-        return jsonify({"error": err}), 400
+        raise WalletImportError(err)
 
     # 该钱包专属代理(明文存);此后含本次导入探测在内的所有网络活动都走它。用户不知道
     # 供应商给的是 HTTP 还是 SOCKS5 -> 先探测出协议再存,不通就当场拒(见 probe_proxy)。
-    proxy_exit_ip = None
     try:
-        proxy, proxy_exit_ip = probe_proxy((data.get("proxy") or "").strip())
+        proxy, proxy_exit_ip = probe_proxy((raw_proxy or "").strip())
     except ProxyUnreachable as e:
-        return jsonify({"error": f"代理不可用: {e}"}), 400
+        raise WalletImportError(f"代理不可用: {e}")
     # 可选备注(纯展示,截断 40 字)。
-    remark = (data.get("remark") or "").strip()[:40]
+    remark = (raw_remark or "").strip()[:40]
 
     from api.polymarket_api import (
         PolymarketAPI,
@@ -574,25 +582,87 @@ def api_add_wallet():
         detected = pick_funded_sig_type(api.balance_by_sig_types())
         sig_type = detected if detected is not None else provisional
     except Exception as e:
-        return jsonify({"error": f"私钥无效: {e}"}), 400
+        raise WalletImportError(f"私钥无效: {e}")
 
     encrypted = encrypt(private_key, encryption_key)
     try:
         db.add_wallet(address, encrypted, funder, sig_type, proxy=proxy, remark=remark)
     except Exception:
-        return jsonify({"error": "该钱包已存在"}), 400
+        raise WalletImportError("该钱包已存在")
 
     _api_cache.pop(address, None)  # 重新导入可能改了 sig/funder,清掉旧缓存
-    return jsonify(
-        {
-            "ok": True,
-            "address": address,
-            "funder": funder,
-            "signature_type": sig_type,
-            "proxy_protocol": _proxy_protocol(proxy),
-            "proxy_exit_ip": proxy_exit_ip,
-        }
-    )
+    return {
+        "address": address,
+        "funder": funder,
+        "signature_type": sig_type,
+        "remark": remark,
+        "proxy_protocol": _proxy_protocol(proxy),
+        "proxy_exit_ip": proxy_exit_ip,
+    }
+
+
+@app.route("/api/wallets", methods=["POST"])
+@login_required
+def api_add_wallet():
+    data = request.get_json() or {}
+    try:
+        result = _import_wallet(
+            data.get("private_key", ""),
+            data.get("funder", ""),
+            data.get("proxy", ""),
+            data.get("remark", ""),
+        )
+    except WalletImportError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/api/wallets/import", methods=["POST"])
+@login_required
+def api_import_wallets():
+    """批量导入:解析粘贴文本,起后台线程串行逐个导入,立刻返回。
+
+    单个钱包要探代理(最多两次握手)+ 4 次余额查询,5~15 秒;十几个串行跑几分钟,
+    同步请求撑不住,故走后台线程 + /api/wallets/import-status 轮询(与扫描进度同款)。
+    """
+    rows = parse_import_lines((request.get_json() or {}).get("text", ""))
+    if not rows:
+        return jsonify({"error": "没有可导入的内容"}), 400
+    if not _import_job.start(len(rows)):
+        return jsonify({"error": "已有批量导入正在进行中"}), 409
+    threading.Thread(
+        target=_run_import, args=(rows,), daemon=True, name="wallet-import"
+    ).start()
+    return jsonify({"ok": True, "total": len(rows)})
+
+
+def _run_import(rows):
+    """后台逐行导入。一行失败只记该行,其余照常——绝不因一个坏私钥整批回滚。"""
+    try:
+        for row in rows:
+            base = {"line_no": row["line_no"], "remark": row["remark"]}
+            if row["error"]:
+                _import_job.add({**base, "ok": False, "error": row["error"]})
+                continue
+            try:
+                res = _import_wallet(
+                    row["private_key"], "", row["proxy"], row["remark"]
+                )
+                _import_job.add({**base, "ok": True, **res})
+            except WalletImportError as e:
+                _import_job.add({**base, "ok": False, "error": str(e)})
+            except Exception as e:  # 兜底:任何意外都不能让整批线程死掉
+                app.logger.exception("批量导入第 %s 行失败", row["line_no"])
+                _import_job.add({**base, "ok": False, "error": f"导入失败: {e}"})
+    finally:
+        _import_job.finish()
+
+
+@app.route("/api/wallets/import-status", methods=["GET"])
+@login_required
+def api_import_status():
+    """批量导入进度 + 逐行结果(不含私钥)。"""
+    return jsonify(_import_job.snapshot())
 
 
 @app.route("/api/wallets/<address>", methods=["DELETE"])
@@ -629,9 +699,7 @@ def api_set_wallet_proxy(address):
             return jsonify({"error": f"代理不可用: {e}"}), 400
     db.set_wallet_proxy(address, raw)
     _api_cache.pop(address, None)
-    return jsonify(
-        {"ok": True, "protocol": _proxy_protocol(raw), "exit_ip": exit_ip}
-    )
+    return jsonify({"ok": True, "protocol": _proxy_protocol(raw), "exit_ip": exit_ip})
 
 
 @app.route("/api/wallets/<address>/remark", methods=["PUT"])
@@ -1285,6 +1353,7 @@ def api_dashboard():
             {
                 "address": w["address"],
                 "remark": w.get("remark", ""),
+                "last_active_at": w.get("last_active_at", 0),
                 "enabled": w["enabled"],
                 "running": running,
                 "balance": balance,

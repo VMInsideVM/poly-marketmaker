@@ -38,6 +38,7 @@
             <th>余额 (pUSD)</th>
             <th>挂单数</th>
             <th>持仓数</th>
+            <th>上次活跃</th>
             <th>状态</th>
             <th>操作</th>
         </tr>
@@ -72,6 +73,7 @@ function refreshDashboard() {
                 <td>${w.balance != null ? w.balance.toFixed(2) : '-'}</td>
                 <td>${w.open_orders ?? '-'}</td>
                 <td>${w.positions ?? '-'}</td>
+                <td title="${escapeHtml(absTime(w.last_active_at))}">${escapeHtml(relTime(w.last_active_at))}</td>
                 <td><span class="status ${w.running ? 'running' : 'stopped'}">${w.running ? '运行中' : '已停止'}</span></td>
                 <td>
                     ${w.running

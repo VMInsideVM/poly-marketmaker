@@ -54,6 +54,22 @@ function fillWalletSelect(sel) {
   });
 }
 
+// 相对时间(秒级时间戳)。0/空 = 从没发生过。
+function relTime(ts) {
+  const t = Number(ts) || 0;
+  if (t <= 0) return '—';
+  const d = Math.floor(Date.now() / 1000 - t);
+  if (d < 60) return '刚刚';
+  if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+  if (d < 86400) return Math.floor(d / 3600) + ' 小时前';
+  return Math.floor(d / 86400) + ' 天前';
+}
+// 配套的绝对时间,放 title 悬浮。
+function absTime(ts) {
+  const t = Number(ts) || 0;
+  return t > 0 ? new Date(t * 1000).toLocaleString('zh-CN') : '从未活跃';
+}
+
 let _toastTimer = null;
 function showToast(msg) {
   let el = document.getElementById('app-toast');

@@ -12,6 +12,23 @@
         <button class="btn btn-primary" onclick="addWallet()">添加钱包</button>
     </div>
     <p style="color:#888;font-size:12px;margin-top:4px;">一般只需输入私钥，存款钱包地址会自动识别；若自动识别的地址与 polymarket.com/settings 不一致，可在第二个框手动填写正确的存款地址。代理按 <code>host:port:账户:密码</code> 填即可，HTTP 还是 SOCKS5 会自动识别；连不通的代理不会被保存。</p>
+
+    <details class="bulk-import">
+        <summary>批量导入（一行一个钱包）</summary>
+        <div class="form-group" style="margin-top:10px">
+            <textarea id="bulk-text" rows="6" spellcheck="false"
+                placeholder="私钥,代理,备注　（代理和备注可留空）&#10;0xabc…,1.2.3.4:8080:账户:密码,主号&#10;0xdef…,,小号2&#10;0x123…"></textarea>
+        </div>
+        <button class="btn btn-primary" id="bulk-btn" onclick="startBulkImport()">开始导入</button>
+        <p style="color:#888;font-size:12px;margin-top:6px;">存款钱包地址一律自动识别（批量导入不逐个弹窗确认），导入完在下面的结果表里核对；对不上的删掉后用上面的单个导入补填正确地址。每个钱包要探测代理和账户类型，约 5~15 秒，十几个要跑几分钟，导入期间别关页面。<b>私钥在文本框里是明文</b>，点「开始导入」后会立即清空。</p>
+        <p id="bulk-progress" style="display:none;margin-top:8px"></p>
+        <div class="table-scroll" id="bulk-results-wrap" style="display:none;margin-top:8px">
+            <table class="data-table">
+                <thead><tr><th>行</th><th>备注</th><th>钱包地址</th><th>存款地址</th><th>代理</th><th>结果</th></tr></thead>
+                <tbody id="bulk-results"></tbody>
+            </table>
+        </div>
+    </details>
     <table class="data-table" id="wallet-config-table">
         <thead>
             <tr><th>地址</th><th>存款地址</th><th>代理</th><th>备注</th><th>模板</th><th>状态</th><th>操作</th></tr>
@@ -670,6 +687,84 @@ document.getElementById('wm-confirm').onclick = function() {
     finalizeImport(_pendingKey, f);
 };
 document.getElementById('wm-cancel').onclick = closeWalletModal;
+
+// --- 批量导入 ---
+// 后端起后台线程串行导入,这里每秒轮询进度。页面刷新/切走再回来也能接着看(初始化时
+// 会查一次状态),因为进度存在后端而不是这个标签页里。
+let _bulkTimer = null;
+
+function startBulkImport() {
+    const ta = document.getElementById('bulk-text');
+    const text = ta.value;
+    if (!text.trim()) { alert('请先粘贴要导入的钱包'); return; }
+    setBulkRunning(true);
+    fetch('/api/wallets/import', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: text}),
+    }).then(r => r.json()).then(d => {
+        if (d.error) { alert(d.error); setBulkRunning(false); return; }
+        ta.value = '';  // 私钥是明文,提交后立刻从页面上抹掉
+        pollBulkImport();
+    }).catch(() => { alert('提交失败'); setBulkRunning(false); });
+}
+
+function setBulkRunning(on) {
+    const btn = document.getElementById('bulk-btn');
+    btn.disabled = on;
+    btn.textContent = on ? '导入中…' : '开始导入';
+}
+
+function pollBulkImport() {
+    clearTimeout(_bulkTimer);
+    fetch('/api/wallets/import-status').then(r => r.json()).then(s => {
+        const p = document.getElementById('bulk-progress');
+        p.style.display = '';
+        p.textContent = s.running
+            ? `导入中 ${s.done}/${s.total}…`
+            : `已完成 ${s.done}/${s.total}`;
+        renderBulkResults(s.results || []);
+        if (s.running) {
+            _bulkTimer = setTimeout(pollBulkImport, 1000);
+        } else {
+            setBulkRunning(false);
+            loadWallets();
+        }
+    });
+}
+
+function renderBulkResults(rows) {
+    if (!rows.length) return;
+    document.getElementById('bulk-results-wrap').style.display = '';
+    document.getElementById('bulk-results').innerHTML = rows.map(r => {
+        const proxy = r.ok
+            ? (r.proxy_protocol
+                ? escapeHtml(r.proxy_protocol + (r.proxy_exit_ip ? ' · ' + r.proxy_exit_ip : ''))
+                : '直连')
+            : '';
+        const result = r.ok
+            ? '<span class="badge ok">✓ 已导入</span>'
+            : `<span class="badge no">✗ ${escapeHtml(r.error || '失败')}</span>`;
+        // 存款地址给全串:这一列就是让用户跟 polymarket.com 逐字比对的。
+        return `<tr>
+            <td>${r.line_no}</td>
+            <td>${escapeHtml(r.remark || '')}</td>
+            <td title="${escapeHtml(r.address || '')}">${escapeHtml(r.address ? shortAddr(r.address) : '—')}</td>
+            <td style="word-break:break-all;font-size:12px">${escapeHtml(r.funder || '—')}</td>
+            <td>${proxy}</td>
+            <td>${result}</td>
+        </tr>`;
+    }).join('');
+}
+
+// 导入要跑几分钟,期间用户可能切页;回到配置页时若后台还在跑,自动展开并接着轮询。
+fetch('/api/wallets/import-status').then(r => r.json()).then(s => {
+    if (s.running || (s.results || []).length) {
+        document.querySelector('details.bulk-import').open = true;
+        setBulkRunning(s.running);
+        pollBulkImport();
+    }
+});
 
 function removeWallet(address) {
     if (!confirm('确定删除该钱包？相关订单数据将保留在历史记录中。')) return;
