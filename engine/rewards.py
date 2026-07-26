@@ -27,3 +27,34 @@ def extract_max_spread(rewards_items: list) -> Optional[float]:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def extract_daily_rate(rewards_items: list) -> Optional[float]:
+    """Sum rate_per_day across all reward configs of /rewards/markets/{cid}.
+
+    Returns the market's total daily reward in USD, or None when the payload
+    carries no parsable rewards_config at all. 0.0 and None are different:
+    0.0 means the reward really is zero (cancel the resting buy), None means
+    we could not tell (skip safely). Callers must not collapse them into one
+    falsy check.
+
+    Same formula the discovery scan uses for market_reward
+    (engine/scanner.py _precise_reward), so the two stay on one yardstick.
+    """
+    total = 0.0
+    found = False
+    for it in rewards_items or []:
+        if not isinstance(it, dict):
+            continue
+        for rc in it.get("rewards_config") or []:
+            if not isinstance(rc, dict):
+                continue
+            v = rc.get("rate_per_day")
+            if v is None:
+                continue
+            try:
+                total += float(v)
+            except (TypeError, ValueError):
+                continue
+            found = True
+    return total if found else None
