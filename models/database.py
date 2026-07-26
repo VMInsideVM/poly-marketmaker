@@ -788,6 +788,21 @@ class Database:
             out.append(d)
         return out
 
+    def update_eligible_reward(self, condition_id: str, reward: float):
+        """把实时复查到的每日奖励写回该市场在 eligible_markets 的所有 token 行。
+
+        监控 Step3 发现在挂单市场的奖励跌破门槛时调用,让 /api/eligible 的展示值
+        与低余额清仓的 get_market_daily_reward 都跟着变准。市场不在表里是 no-op。
+        """
+        if not condition_id:
+            return
+        c = self.conn.cursor()
+        c.execute(
+            "UPDATE eligible_markets SET daily_reward = ? WHERE market_id = ?",
+            (float(reward), condition_id),
+        )
+        self.conn.commit()
+
     # --- Market Meta (condition_id -> name + slugs, persistent across scans) ---
 
     def upsert_market_meta(

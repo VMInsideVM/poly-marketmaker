@@ -476,6 +476,68 @@ class TestEligibleMarkets:
         )
         assert db.get_eligible_markets()[0]["tags"] == []
 
+    def test_update_eligible_reward_overwrites_all_tokens_of_market(self, db):
+        db.save_eligible_markets(
+            [
+                {
+                    "market_id": "0xabc",
+                    "token_id": "yes",
+                    "market_name": "M",
+                    "outcome": "Yes",
+                    "daily_reward": 300.0,
+                    "order_price": 0.30,
+                    "order_size": 100,
+                },
+                {
+                    "market_id": "0xabc",
+                    "token_id": "no",
+                    "market_name": "M",
+                    "outcome": "No",
+                    "daily_reward": 300.0,
+                    "order_price": 0.70,
+                    "order_size": 100,
+                },
+                {
+                    "market_id": "0xother",
+                    "token_id": "yes",
+                    "market_name": "N",
+                    "outcome": "Yes",
+                    "daily_reward": 300.0,
+                    "order_price": 0.30,
+                    "order_size": 100,
+                },
+            ]
+        )
+        db.update_eligible_reward("0xabc", 5.0)
+        rows = {
+            (r["market_id"], r["token_id"]): r["daily_reward"]
+            for r in db.get_eligible_markets()
+        }
+        assert rows[("0xabc", "yes")] == 5.0
+        assert rows[("0xabc", "no")] == 5.0
+        assert rows[("0xother", "yes")] == 300.0  # 别的市场不受影响
+
+    def test_update_eligible_reward_empty_id_is_noop(self, db):
+        db.save_eligible_markets(
+            [
+                {
+                    "market_id": "0xabc",
+                    "token_id": "yes",
+                    "market_name": "M",
+                    "outcome": "Yes",
+                    "daily_reward": 300.0,
+                    "order_price": 0.30,
+                    "order_size": 100,
+                }
+            ]
+        )
+        db.update_eligible_reward("", 5.0)
+        assert db.get_eligible_markets()[0]["daily_reward"] == 300.0
+
+    def test_update_eligible_reward_unknown_market_is_noop(self, db):
+        db.update_eligible_reward("0xnothere", 5.0)  # 不抛异常即可
+        assert db.get_eligible_markets() == []
+
 
 class TestMarketMeta:
     def test_upsert_and_get(self, db):
