@@ -271,6 +271,41 @@ class TestPositionsPagination:
         assert params.get("limit") == 500
 
 
+class TestGetRewardsForMarketNoPartialPayload:
+    """分页中途出错必须返回 `[]`,不能返回已取到的半份数据。
+
+    调用方把返回的项求和当成市场的每日奖励(`extract_daily_rate`),半份数据算出来的
+    是个「看着合理但偏小」的奖励额,足以让正在赚奖励的在挂买单被 Step3 判成跌破
+    `min_reward_usd` 而撤掉 —— 正是「绝不 fail-close」这条不变量禁止的结果。
+    """
+
+    def _page(self, items, next_cursor):
+        resp = MagicMock()
+        resp.json.return_value = {"data": items, "next_cursor": next_cursor}
+        return resp
+
+    @patch("api.polymarket_api.http_get")
+    def test_error_mid_pagination_returns_empty_not_partial(self, mock_get):
+        item = {"rewards_config": [{"rate_per_day": 100}]}
+        mock_get.side_effect = [
+            self._page([item], "NEXT"),  # 第一页成功
+            RuntimeError("connection reset"),  # 第二页炸
+        ]
+        assert PolymarketAPI.get_rewards_for_market("0xcid") == []
+
+    @patch("api.polymarket_api.http_get")
+    def test_error_on_first_page_returns_empty(self, mock_get):
+        mock_get.side_effect = RuntimeError("timeout")
+        assert PolymarketAPI.get_rewards_for_market("0xcid") == []
+
+    @patch("api.polymarket_api.http_get")
+    def test_full_pagination_returns_all_items(self, mock_get):
+        a = {"rewards_config": [{"rate_per_day": 100}]}
+        b = {"rewards_config": [{"rate_per_day": 20}]}
+        mock_get.side_effect = [self._page([a], "NEXT"), self._page([b], "LTE=")]
+        assert PolymarketAPI.get_rewards_for_market("0xcid") == [a, b]
+
+
 class TestPerWalletProxy:
     @patch("api.polymarket_api.ClobClient")
     @patch("api.polymarket_api.derive_deposit_address", return_value="0xS")

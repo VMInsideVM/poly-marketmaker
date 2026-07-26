@@ -731,7 +731,15 @@ class PolymarketAPI:
         """Get raw rewards for a specific market.
 
         Endpoint: GET /rewards/markets/{condition_id}
-        Returns per-token reward configs with rate_per_day.
+        Returns **one item per market** (not per token) carrying that market's
+        `rewards_config` with `rate_per_day` — verified by a 2026-07-26 census of
+        the 500 live reward markets (91 checked against this endpoint, 1 item
+        each, always 1 config entry).
+
+        分页中途出错一律返回 `[]`,**绝不返回已取到的半份数据**:调用方会把这些项
+        求和当成市场的每日奖励(`extract_daily_rate`),半份会算出一个「看着合理但
+        偏小」的奖励额,足以让正在赚奖励的在挂买单被误判跌破门槛而撤掉(fail-close)。
+        返回空列表则调用方看到的是「取不到」-> 安全跳过。
         """
         all_data = []
         next_cursor = ""
@@ -754,6 +762,7 @@ class PolymarketAPI:
                     break
         except Exception as e:
             logger.error("Failed to get rewards for market %s: %s", condition_id, e)
+            return []
         return all_data
 
 
