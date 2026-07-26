@@ -2226,6 +2226,63 @@ class TestStep3Prefetch:
         monitor._prefetch([self._buy("o1", "tokA", "cid1")], set(), 0)
         assert db.method_calls == []
 
+    def test_rewards_wave_runs_before_orderbook_wave(self):
+        # 两拨串行,先取的那拨要背上后取那拨的全部耗时。盘口驱动撤单判定,必须最新鲜;
+        # 每日奖励是小时级才变的量。所以奖励在前、盘口在后,别调回来。
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        order = []
+
+        def _rewards_recording(condition_id):
+            order.append("奖励")
+            return [
+                {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 120}]}
+            ]
+
+        def _ob_recording(token_id):
+            order.append("盘口")
+            return self._ob()
+
+        api.get_rewards_for_market.side_effect = _rewards_recording
+        api.get_orderbook.side_effect = _ob_recording
+        monitor._prefetch(
+            [self._buy("o1", "tokA", "cidA"), self._buy("o2", "tokB", "cidB")], set(), 0
+        )
+        assert order.count("奖励") == 2 and order.count("盘口") == 2
+        # 全部奖励调用都排在全部盘口调用之前(拨内顺序不定,拨间必须有序)
+        assert order == ["奖励", "奖励", "盘口", "盘口"]
+
+    def test_logs_round_summary(self, caplog):
+        # 并发化的收益(耗时)和最大风险(6 路把娇气的奖励端点打崩)只有这条汇总看得见:
+        # 逐项 WARNING 看不出面,奖励系统性取不到还会静默退化成 fail-open 跳过。
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+
+        def _ob_or_boom(token_id):
+            if token_id == "tokBad":
+                raise RuntimeError("network")
+            return self._ob()
+
+        def _rewards_or_boom(condition_id):
+            if condition_id == "cidBad":
+                raise RuntimeError("network")
+            return [
+                {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 120}]}
+            ]
+
+        api.get_orderbook.side_effect = _ob_or_boom
+        api.get_rewards_for_market.side_effect = _rewards_or_boom
+        orders = [
+            self._buy("o1", "tokBad", "cidBad"),
+            self._buy("o2", "tokOk", "cidOk"),
+        ]
+        with caplog.at_level(logging.INFO, logger="engine.monitor"):
+            monitor._prefetch(orders, set(), 0)
+        lines = [r.getMessage() for r in caplog.records if "预取完成" in r.getMessage()]
+        assert len(lines) == 1
+        assert "盘口 1/2" in lines[0] and "奖励 1/2" in lines[0]
+        assert "耗时" in lines[0]
+
 
 class TestStep3PrefetchWiring:
     """接线后的语义等价:取数失败 vs 盘口为空是两回事;DB 读收到主线程一次。"""
@@ -2308,6 +2365,31 @@ class TestStep3PrefetchWiring:
         assert db.get_blacklist_ids.call_count == 1
         assert db.get_template_for.call_count == 1
         assert db.get_settings.call_count == 1
+
+    def test_db_read_failure_does_not_escape(self, caplog):
+        # 轮级 DB 读失败(锁超时/磁盘满)必须只让 Step3 本轮降级:异常冒出
+        # check_sell_orders 会跳过 publish_status 把监控状态表冻住(manager._run 的 F4)。
+        monitor, api, db = _make_monitor({"min_reward_usd": 100.0})
+        monitor.begin_status_tick()
+        api.get_open_orders.return_value = [self._buy()]
+        db.get_blacklist_ids.side_effect = RuntimeError("database is locked")
+        with caplog.at_level(logging.ERROR, logger="engine.monitor"):
+            monitor.check_sell_orders()  # 不抛
+        api.cancel_orders.assert_not_called()
+        assert "本轮取数准备失败" in caplog.text
+
+    def test_prefetch_failure_does_not_escape(self, caplog):
+        # 预取本身抛(如交易所回了非数字 size_matched)同理:降级不冻结
+        monitor, api, db = _make_monitor({"min_reward_usd": 100.0})
+        monitor.begin_status_tick()
+        api.get_open_orders.return_value = [self._buy()]
+        with patch.object(
+            monitor, "_prefetch", side_effect=ValueError("could not convert string")
+        ):
+            with caplog.at_level(logging.ERROR, logger="engine.monitor"):
+                monitor.check_sell_orders()  # 不抛
+        api.cancel_orders.assert_not_called()
+        assert "本轮取数准备失败" in caplog.text
 
     def test_still_iterates_all_orders_for_status_rows(self):
         # 遍历必须是全量 open_orders:卖单和部分成交单的状态行不能因为预取只挑买单

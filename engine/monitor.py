@@ -915,10 +915,17 @@ class OrderMonitor:
             return
         # DB 读全部收在主线程、每轮一次:黑名单和模板原来是每单各读一遍(60 个挂单 =
         # 60 次查询),ttl 还要传进预取的 worker —— worker 绝不碰 db。
-        blacklist = self.db.get_blacklist_ids()
-        settings = self.db.get_template_for(self.wallet_address)
-        ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
-        books, rewards = self._prefetch(open_orders, blacklist, ttl)
+        # 整段包 try:这几步原来是每单一次、失败被逐单 try 吞掉(Step3 降级但循环跑完、
+        # publish_status 照常执行);提到轮级之后,一次失败就会从 check_sell_orders 抛出去、
+        # 跳过 publish_status 把监控状态表冻住(manager._run 的 F4 注释正是防这个)。
+        try:
+            blacklist = self.db.get_blacklist_ids()
+            settings = self.db.get_template_for(self.wallet_address)
+            ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
+            books, rewards = self._prefetch(open_orders, blacklist, ttl)
+        except Exception as e:
+            logger.error("[Step3] 本轮取数准备失败 %s: %s", self.wallet_address, e)
+            return
         for o in open_orders:
             price_s = f"{float(o.get('price', 0) or 0):.4f}"
             size_s = str(o.get("original_size", ""))
@@ -975,7 +982,9 @@ class OrderMonitor:
             items = self.api.get_rewards_for_market(condition_id)
             pair = (extract_max_spread(items), extract_daily_rate(items))
         except Exception as e:
-            logger.warning("get_rewards_for_market(%s) failed: %s", condition_id, e)
+            # 取数和解析都在这个 try 里:坏数据(响应字段形状不对)与接口失败都走这里,
+            # 所以别把话说成只是接口失败。
+            logger.warning("[Step3] 预取奖励失败(取数或解析)%s: %s", condition_id, e)
             return None, None
         if pair[0] is None:
             return pair  # max_spread 取不到就不写缓存,下轮重试(与旧 _market_max_spread 一致)
@@ -988,6 +997,14 @@ class OrderMonitor:
         books   = {token_id: 订单簿 dict 或 None}
         rewards = {condition_id: (max_spread, daily_rate)}
 
+        **奖励先取、盘口后取,别调回来。**两拨串行,先取的那拨等到判定时,已经陈旧了后
+        取那拨的全部耗时。盘口驱动 recheck_resting_buy——决定要不要撤一个正在吃奖励的
+        单——必须最新鲜;而每日奖励是小时级才变的量,差几秒无所谓。奖励端点又正是本项目
+        实测「娇气」的那个(烂代理约 30% 连接超时,_retry_on_connect_error 最多重试 3
+        次),几个卡住的奖励任务能把那一拨拖到几十秒,这份陈旧不该落在盘口上。
+
+        两拨保持分开、不合成一拨异构任务:分开才有天然的按 token / 按市场去重。
+
         **books 里的 None 表示取数失败**,与「取到了但买卖盘为空」不是一回事:前者该单
         本轮跳过(等价于旧的取数抛异常路径、不留状态行),后者要走「盘口为空」分支并留
         状态行。两者塌成一个会让监控状态表说谎。
@@ -996,6 +1013,7 @@ class OrderMonitor:
         就 return,都不必为它们发请求。worker 线程只发网络请求、绝不碰 db(每线程一条
         sqlite 连接且建了不回收),每个任务自带异常处理、绝不外抛。
         """
+        t0 = time.time()
         pending = [
             o
             for o in open_orders
@@ -1013,7 +1031,6 @@ class OrderMonitor:
                 logger.warning("[Step3] 预取订单簿失败 %s: %s", token_id, e)
                 return None
 
-        books = dict(zip(token_ids, parallel_map(_book, token_ids, _STEP3_MAX_WORKERS)))
         rewards = dict(
             zip(
                 cids,
@@ -1021,6 +1038,20 @@ class OrderMonitor:
                     lambda c: self._market_rewards(c, ttl), cids, _STEP3_MAX_WORKERS
                 ),
             )
+        )
+        books = dict(zip(token_ids, parallel_map(_book, token_ids, _STEP3_MAX_WORKERS)))
+        # 每轮一条汇总:这次并发化的全部理由是「36 秒降到 6 秒」、最大风险是 6 路把娇气的
+        # 奖励端点打崩,两件事都只有这条日志看得见(逐项 WARNING 看不出面),而奖励系统性
+        # 取不到会静默退化成 fail-open 跳过。
+        ok_books = sum(1 for b in books.values() if b is not None)
+        ok_rewards = sum(1 for pair in rewards.values() if pair[0] is not None)
+        logger.info(
+            "[Step3] 预取完成 盘口 %d/%d 奖励 %d/%d 耗时 %.1fs",
+            ok_books,
+            len(token_ids),
+            ok_rewards,
+            len(cids),
+            time.time() - t0,
         )
         return books, rewards
 
