@@ -7,6 +7,7 @@ py-clob-client-v2 的 HTTP 层是模块级全局 httpx.Client、不支持 per-in
 """
 
 import contextvars
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 from contextlib import contextmanager
@@ -29,6 +30,31 @@ def use_proxy(url):
         yield
     finally:
         current_proxy.reset(token)
+
+
+def parallel_map(func, items, max_workers):
+    """并发对 items 跑 func,结果按输入序返回。
+
+    关键:ThreadPoolExecutor 的 worker 线程默认 current_proxy=None(会直连、泄露真实
+    IP,违反「绝不直连」铁律)。这里捕获**调用线程**的 current_proxy,在每个 worker 里
+    设回,保住代理 IP 隔离。func 应自带异常处理(否则异常在收结果时抛出)。
+
+    max_workers 必传:各调用方的合适值不同(发现阶段 4、Step3 6),留默认值会误导。
+    """
+    items = list(items)
+    if not items:
+        return []
+    proxy = current_proxy.get()
+
+    def _task(item):
+        token = current_proxy.set(proxy)
+        try:
+            return func(item)
+        finally:
+            current_proxy.reset(token)
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as ex:
+        return list(ex.map(_task, items))
 
 
 # 仅这些「连接建立阶段」失败可安全重试:到代理的连接 / CONNECT 隧道从未建立,请求从未
@@ -202,7 +228,9 @@ def _probe_once(url, timeout):
 
 def _exit_ip(url, timeout):
     try:
-        r = requests.get(_EXIT_IP_URL, proxies={"http": url, "https": url}, timeout=timeout)
+        r = requests.get(
+            _EXIT_IP_URL, proxies={"http": url, "https": url}, timeout=timeout
+        )
         return r.json().get("ip") or None
     except Exception:
         return None
@@ -221,12 +249,16 @@ def probe_proxy(raw, *, timeout=8) -> tuple[str, str | None]:
     if not s:
         return "", None
     low = s.lower()
-    explicit = low.startswith(("http://", "https://", "socks5://", "socks5h:", "socks5:"))
+    explicit = low.startswith(
+        ("http://", "https://", "socks5://", "socks5h:", "socks5:")
+    )
     candidates = [s] if explicit else [s, "socks5:" + s]
     for cand in candidates:
         url = parse_proxy(cand)
         if not url:
-            raise ProxyUnreachable("代理格式不对(应为 host:port 或 host:port:账户:密码)")
+            raise ProxyUnreachable(
+                "代理格式不对(应为 host:port 或 host:port:账户:密码)"
+            )
         try:
             _probe_once(url, timeout)
         except Exception:

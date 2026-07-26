@@ -32,34 +32,11 @@ from engine.categories import (
 from config import CATALOG_SLUGS, CATEGORY_CATALOG, ENGINE_DEFAULTS
 from engine.strategy import reward_price_range
 from engine.tiers import enabled_sizes
-from api.proxy import use_proxy, current_proxy
+from api.proxy import use_proxy, current_proxy, parallel_map
 
 logger = logging.getLogger(__name__)
 
 _DISCOVERY_MAX_WORKERS = 4  # 发现阶段奖励端点并发上限(端点/代理娇气,降到 4 减轻挤压)
-
-
-def _parallel_map(func, items, max_workers=_DISCOVERY_MAX_WORKERS):
-    """并发对 items 跑 func,结果按输入序返回。
-
-    关键:ThreadPoolExecutor 的 worker 线程默认 current_proxy=None(会直连、泄露真实
-    IP,违反「绝不直连」铁律)。这里捕获**调用线程**的 current_proxy,在每个 worker 里
-    设回,保住代理 IP 隔离。func 应自带异常处理(否则异常在收结果时抛出)。
-    """
-    items = list(items)
-    if not items:
-        return []
-    proxy = current_proxy.get()
-
-    def _task(item):
-        token = current_proxy.set(proxy)
-        try:
-            return func(item)
-        finally:
-            current_proxy.reset(token)
-
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as ex:
-        return list(ex.map(_task, items))
 
 
 class ScanSuperseded(Exception):
@@ -183,7 +160,7 @@ class MarketScanner:
                 return slug, []
 
         # 只查 slugs_needed 各一次奖励端点,并发拉;每 slug 保留整条记录。
-        slug_rows = dict(_parallel_map(_tag_slug, slugs_needed))
+        slug_rows = dict(parallel_map(_tag_slug, slugs_needed, _DISCOVERY_MAX_WORKERS))
         category_ids = {
             slug: {m.get("condition_id", "") for m in rows}
             for slug, rows in slug_rows.items()
@@ -302,7 +279,7 @@ class MarketScanner:
         # 门控内市场:精确奖励并发拉,as_completed **增量**出结果——每完成一个就报进度 +
         # on_found,让进度条/候选列表随扫描逐渐增长,而不是跑完后一次性蹦出(2026-07-05
         # 用户反馈「一直卡在 0、然后突然 100 多个」)。返回序=完成序(池后续按
-        # market_competitiveness 重排,不依赖此序);代理隔离同 _parallel_map。
+        # market_competitiveness 重排,不依赖此序);代理隔离同 parallel_map。
         total = len(priced)
         if on_progress:
             on_progress(0, total, "核对各市场精确奖励…")
@@ -342,10 +319,12 @@ class MarketScanner:
 
         **并发**拉:串行拉整池(~180 市场 × 每市场 4 次网络)过代理要几十分钟、下单轮
         基本跑不完,filter 拿不到簿 -> eligible 空 -> 不挂单(2026-07-04 实盘)。_fetch_
-        orderbooks 自带 per-token 容错、不抛,_parallel_map 保序 + 带 current_proxy。"""
+        orderbooks 自带 per-token 容错、不抛,parallel_map 保序 + 带 current_proxy。"""
         if cancel and cancel():
             raise ScanSuperseded()
-        results = _parallel_map(lambda m: self._fetch_orderbooks(m), pool)
+        results = parallel_map(
+            lambda m: self._fetch_orderbooks(m), pool, _DISCOVERY_MAX_WORKERS
+        )
         for market, books in zip(pool, results):
             market["_orderbooks"] = books
 

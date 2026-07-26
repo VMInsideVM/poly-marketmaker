@@ -724,34 +724,6 @@ class TestCategoryCounts:
         assert checks[-1] == 2 and 1 in checks  # 逐步到 2、中间有 1(非一次性跳到 2)
 
 
-class TestParallelMap:
-    def test_preserves_order(self):
-        from engine.scanner import _parallel_map
-
-        assert _parallel_map(lambda x: x * 2, [1, 2, 3, 4]) == [2, 4, 6, 8]
-
-    def test_empty_items(self):
-        from engine.scanner import _parallel_map
-
-        assert _parallel_map(lambda x: x, []) == []
-
-    def test_propagates_current_proxy_into_workers(self):
-        # 关键:新线程默认 current_proxy=None(会直连、泄露真实 IP);助手必须把调用
-        # 线程的代理带进每个 worker,否则并行化就破了 IP 隔离铁律。
-        from engine.scanner import _parallel_map
-        from api.proxy import current_proxy, use_proxy
-
-        with use_proxy("http://user:pass@host:9999"):
-            seen = _parallel_map(lambda x: current_proxy.get(), list(range(8)))
-        assert seen == ["http://user:pass@host:9999"] * 8
-
-    def test_no_proxy_stays_none(self):
-        from engine.scanner import _parallel_map
-        from api.proxy import current_proxy
-
-        assert _parallel_map(lambda x: current_proxy.get(), [1, 2]) == [None, None]
-
-
 class TestDiscoverNeededSlugsOnly:
     def _api_db(self, fake_rewards):
         api = MagicMock()

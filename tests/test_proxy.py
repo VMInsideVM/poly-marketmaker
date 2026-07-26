@@ -227,3 +227,37 @@ def test_proxied_client_none_proxy_runs_direct():
 
     _ProxiedClient(Target(), None).do()
     assert seen["proxy"] is None
+
+
+class TestParallelMap:
+    def test_preserves_order(self):
+        from api.proxy import parallel_map
+
+        assert parallel_map(lambda x: x * 2, [1, 2, 3, 4], 4) == [2, 4, 6, 8]
+
+    def test_empty_items(self):
+        from api.proxy import parallel_map
+
+        assert parallel_map(lambda x: x, [], 4) == []
+
+    def test_propagates_current_proxy_into_workers(self):
+        # 关键:新线程默认 current_proxy=None(会直连、泄露真实 IP);助手必须把调用
+        # 线程的代理带进每个 worker,否则并行化就破了 IP 隔离铁律。
+        from api.proxy import parallel_map, current_proxy, use_proxy
+
+        with use_proxy("http://user:pass@host:9999"):
+            seen = parallel_map(lambda x: current_proxy.get(), list(range(8)), 4)
+        assert seen == ["http://user:pass@host:9999"] * 8
+
+    def test_no_proxy_stays_none(self):
+        from api.proxy import parallel_map, current_proxy
+
+        assert parallel_map(lambda x: current_proxy.get(), [1, 2], 4) == [None, None]
+
+    def test_max_workers_is_required(self):
+        # 必传:发现阶段要 4、Step3 要 6,留默认值会让调用方拿到不合适的并发度。
+        import pytest
+        from api.proxy import parallel_map
+
+        with pytest.raises(TypeError):
+            parallel_map(lambda x: x, [1])
