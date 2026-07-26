@@ -19,12 +19,18 @@ from engine.liquidation import plan_liquidation
 from engine.strategy import reward_price_range
 from engine.rewards import extract_max_spread, extract_daily_rate
 from engine import monitor_status
+from api.proxy import parallel_map
 
 logger = logging.getLogger(__name__)
 
 # 低余额清仓成功后的冷却秒数:市价卖的到手余额链上结算有滞后,冷却内不再清仓,
 # 防下个 tick(默认 5s)读到未结算的旧低余额而重扫、过卖不该卖的仓。
 LIQUIDATE_COOLDOWN_SEC = 60
+
+# Step3 预取并发上限。发现阶段用 4(实测奖励端点/代理娇气);Step3 只打盘口和奖励两个
+# 轻接口、不跑分页,略高一档。5 钱包各开各的,单个代理承受的并发就是这个数。要回退
+# 并发化只改这一个常量。
+_STEP3_MAX_WORKERS = 6
 
 
 class OrderMonitor:
@@ -975,6 +981,48 @@ class OrderMonitor:
             return pair  # max_spread 取不到就不写缓存,下轮重试(与旧 _market_max_spread 一致)
         self._rewards_cache[condition_id] = (pair, now)
         return pair
+
+    def _prefetch(self, open_orders, blacklist, ttl):
+        """Step3 本轮的盘口 / 奖励并发预取,返回 (books, rewards) 两张表。
+
+        books   = {token_id: 订单簿 dict 或 None}
+        rewards = {condition_id: (max_spread, daily_rate)}
+
+        **books 里的 None 表示取数失败**,与「取到了但买卖盘为空」不是一回事:前者该单
+        本轮跳过(等价于旧的取数抛异常路径、不留状态行),后者要走「盘口为空」分支并留
+        状态行。两者塌成一个会让监控状态表说谎。
+
+        只为「真要判定的买单」取数:卖单和部分成交单不进判定,黑名单市场的单在取数之前
+        就 return,都不必为它们发请求。worker 线程只发网络请求、绝不碰 db(每线程一条
+        sqlite 连接且建了不回收),每个任务自带异常处理、绝不外抛。
+        """
+        pending = [
+            o
+            for o in open_orders
+            if o.get("side") == "BUY"
+            and float(o.get("size_matched", 0) or 0) <= 0
+            and o.get("market", "") not in blacklist
+        ]
+        token_ids = [t for t in {o.get("asset_id", "") for o in pending} if t]
+        cids = [c for c in {o.get("market", "") for o in pending} if c]
+
+        def _book(token_id):
+            try:
+                return self.api.get_orderbook(token_id)
+            except Exception as e:
+                logger.warning("[Step3] 预取订单簿失败 %s: %s", token_id, e)
+                return None
+
+        books = dict(zip(token_ids, parallel_map(_book, token_ids, _STEP3_MAX_WORKERS)))
+        rewards = dict(
+            zip(
+                cids,
+                parallel_map(
+                    lambda c: self._market_rewards(c, ttl), cids, _STEP3_MAX_WORKERS
+                ),
+            )
+        )
+        return books, rewards
 
     def _round_market_rewards(self, condition_id: str):
         """本轮 Step3 的取数备忘:同一 condition_id 一轮只取一次。

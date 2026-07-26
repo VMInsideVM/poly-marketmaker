@@ -2050,4 +2050,147 @@ class TestStep3RewardDrop:
         api.get_rewards_for_market.side_effect = RuntimeError("network")
         monitor.check_sell_orders()
         assert api.get_rewards_for_market.call_count == 1
+
+
+class TestStep3Prefetch:
+    """Step3 本轮盘口/奖励的并发预取:按 token/市场去重、逐项容错、带钱包代理。"""
+
+    def _buy(self, oid, token, cid, matched="0"):
+        return {
+            "id": oid,
+            "side": "BUY",
+            "asset_id": token,
+            "market": cid,
+            "size_matched": matched,
+            "price": "0.30",
+            "original_size": "500",
+        }
+
+    def _ob(self):
+        return {
+            "bids": [{"price": "0.30", "size": "1000"}],
+            "asks": [{"price": "0.31", "size": "1000"}],
+            "tick_size": "0.01",
+        }
+
+    def _ready(self, monitor, api):
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 120}]}
+        ]
+
+    def test_dedups_orderbook_by_token(self):
+        # 同一 token 上两笔买单只取一次盘口
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        orders = [self._buy("o1", "tokA", "cid1"), self._buy("o2", "tokA", "cid1")]
+        books, rewards = monitor._prefetch(orders, set(), 0)
+        assert api.get_orderbook.call_count == 1
+        assert set(books) == {"tokA"}
+        assert books["tokA"] == self._ob()
+
+    def test_dedups_rewards_by_market(self):
+        # 同市场 YES/NO 两侧:盘口按 token 取两次,奖励按市场只取一次
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        orders = [self._buy("o1", "tokYes", "cid1"), self._buy("o2", "tokNo", "cid1")]
+        books, rewards = monitor._prefetch(orders, set(), 0)
+        assert api.get_orderbook.call_count == 2
+        assert api.get_rewards_for_market.call_count == 1
+        assert rewards == {"cid1": (3.0, 120.0)}
+
+    def test_orderbook_failure_becomes_none(self):
+        # 取数失败记 None(调用方据此跳过该单),绝不外抛、绝不拖垮其它单
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        api.get_orderbook.side_effect = RuntimeError("network")
+        books, rewards = monitor._prefetch([self._buy("o1", "tokA", "cid1")], set(), 0)
+        assert books == {"tokA": None}
+
+    def test_one_failure_does_not_affect_others(self):
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+
+        def _ob_or_boom(token_id):
+            if token_id == "tokBad":
+                raise RuntimeError("network")
+            return self._ob()
+
+        api.get_orderbook.side_effect = _ob_or_boom
+        orders = [self._buy("o1", "tokBad", "cid1"), self._buy("o2", "tokOk", "cid2")]
+        books, rewards = monitor._prefetch(orders, set(), 0)
+        assert books["tokBad"] is None
+        assert books["tokOk"] == self._ob()
+
+    def test_rewards_failure_becomes_none_pair(self):
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        api.get_rewards_for_market.side_effect = RuntimeError("network")
+        books, rewards = monitor._prefetch([self._buy("o1", "tokA", "cid1")], set(), 0)
+        assert rewards == {"cid1": (None, None)}
+
+    def test_skips_blacklisted_market(self):
+        # 黑名单单在判定里于取数之前就 return,不必为它发请求
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        books, rewards = monitor._prefetch(
+            [self._buy("o1", "tokA", "cid1")], {"cid1"}, 0
+        )
+        api.get_orderbook.assert_not_called()
+        api.get_rewards_for_market.assert_not_called()
+        assert (books, rewards) == ({}, {})
+
+    def test_skips_sell_orders_and_partially_filled(self):
+        # 卖单和部分成交单不进判定,不为它们取数
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        orders = [
+            {
+                "id": "s1",
+                "side": "SELL",
+                "asset_id": "tokS",
+                "market": "cidS",
+                "size_matched": "0",
+                "price": "0.40",
+                "original_size": "500",
+            },
+            self._buy("o2", "tokP", "cidP", matched="100"),
+        ]
+        books, rewards = monitor._prefetch(orders, set(), 0)
+        api.get_orderbook.assert_not_called()
+        assert (books, rewards) == ({}, {})
+
+    def test_no_orders_makes_no_requests(self):
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        books, rewards = monitor._prefetch([], set(), 0)
+        assert (books, rewards) == ({}, {})
+        api.get_orderbook.assert_not_called()
+        api.get_rewards_for_market.assert_not_called()
+
+    def test_carries_wallet_proxy_into_workers(self):
+        # worker 线程默认 current_proxy=None 会直连、泄露真实 IP;预取必须把调用线程
+        # 的代理带进去,否则并发化就破了 IP 隔离铁律。
+        from api.proxy import current_proxy, use_proxy
+
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        seen = []
+
+        def _ob_recording(token_id):
+            seen.append(current_proxy.get())
+            return self._ob()
+
+        api.get_orderbook.side_effect = _ob_recording
+        with use_proxy("http://user:pass@host:9999"):
+            monitor._prefetch([self._buy("o1", "tokA", "cid1")], set(), 0)
+        assert seen == ["http://user:pass@host:9999"]
+
+    def test_does_not_touch_db(self):
+        # 硬约束:worker 碰 db 会让每 5 秒一轮的 Step3 无限泄漏 sqlite 连接
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        db.reset_mock()
+        monitor._prefetch([self._buy("o1", "tokA", "cid1")], set(), 0)
+        assert db.method_calls == []
         api.cancel_orders.assert_not_called()
