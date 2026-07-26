@@ -946,8 +946,14 @@ class OrderMonitor:
             except Exception as e:
                 logger.error("Compliance error on %s: %s", o.get("id"), e)
 
-    def _market_rewards(self, condition_id: str) -> tuple[float | None, float | None]:
+    def _market_rewards(
+        self, condition_id: str, ttl: float
+    ) -> tuple[float | None, float | None]:
         """(rewards_max_spread 美分, 每日奖励美元),同一次响应解析,TTL 缓存。
+
+        ttl 由调用方(主线程)读好传入,**本方法绝不碰 db**:Step3 的并发预取会在 worker
+        线程里调它,而每线程一条 sqlite 连接、建了从不回收(models/database.py),worker
+        里访问 db 就是每 5 秒一轮地泄漏连接。
 
         任一项为 None = 该项取不到(接口失败/字段缺失),调用方各自安全跳过。
         每日奖励的 0.0 与 None 含义不同:0.0=奖励真归零(要撤单),None=取不到(跳过)。
@@ -955,7 +961,6 @@ class OrderMonitor:
         """
         if not condition_id:
             return None, None
-        ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
         now = time.time()
         hit = self._rewards_cache.get(condition_id)
         if hit and (now - hit[1]) < ttl:
@@ -982,7 +987,8 @@ class OrderMonitor:
         """
         if condition_id in self._round_rewards:
             return self._round_rewards[condition_id]
-        pair = self._market_rewards(condition_id)
+        ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
+        pair = self._market_rewards(condition_id, ttl)
         self._round_rewards[condition_id] = pair
         return pair
 

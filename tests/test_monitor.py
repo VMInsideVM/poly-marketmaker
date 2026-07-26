@@ -1644,15 +1644,26 @@ class TestResolutionExit:
 
 
 class TestLowBalance:
-    def _mon(self, balance, positions, daily_rewards, costs, bids,
-             threshold=4, target_usd=4, mode="balance"):
-        monitor, api, db = _make_monitor(settings={
-            "low_balance_threshold_usd": threshold,
-            "low_reward_threshold_usd": 30,
-            "small_position_shares": 20,
-            "liquidate_target_mode": mode,
-            "liquidate_target_usd": target_usd,
-        })
+    def _mon(
+        self,
+        balance,
+        positions,
+        daily_rewards,
+        costs,
+        bids,
+        threshold=4,
+        target_usd=4,
+        mode="balance",
+    ):
+        monitor, api, db = _make_monitor(
+            settings={
+                "low_balance_threshold_usd": threshold,
+                "low_reward_threshold_usd": 30,
+                "small_position_shares": 20,
+                "liquidate_target_mode": mode,
+                "liquidate_target_usd": target_usd,
+            }
+        )
         api.get_balance.return_value = balance
         api.get_user_positions.return_value = positions
         api.get_open_orders.return_value = []
@@ -1663,7 +1674,10 @@ class TestLowBalance:
             [{"price": costs.get(a) or 0, "take": s, "ts": 0, "trade_id": "t"}],
         )
         monitor._sell_book = lambda a: (
-            0.01, "0.01", bids.get(a), (bids.get(a) or 0) + 0.02
+            0.01,
+            "0.01",
+            bids.get(a),
+            (bids.get(a) or 0) + 0.02,
         )
         return monitor, api, db
 
@@ -1671,8 +1685,9 @@ class TestLowBalance:
         return {"asset": asset, "size": size, "conditionId": cid, "curPrice": cur}
 
     def test_no_action_when_balance_ok(self):
-        m, api, db = self._mon(10, [self._pos("A", 100, "cA")], {"cA": 10},
-                               {"A": 0.1}, {"A": 0.1})
+        m, api, db = self._mon(
+            10, [self._pos("A", 100, "cA")], {"cA": 10}, {"A": 0.1}, {"A": 0.1}
+        )
         m.check_low_balance()
         api.place_market_sell.assert_not_called()
 
@@ -1689,22 +1704,30 @@ class TestLowBalance:
         api.place_market_sell.assert_called_once_with("A", 100)
 
     def test_skips_no_bid(self):
-        m, api, db = self._mon(2, [self._pos("A", 100, "cA")], {"cA": 10},
-                               {"A": 0.1}, {"A": None})
+        m, api, db = self._mon(
+            2, [self._pos("A", 100, "cA")], {"cA": 10}, {"A": 0.1}, {"A": None}
+        )
         m.check_low_balance()
         api.place_market_sell.assert_not_called()
 
     def test_disabled_when_threshold_zero(self):
-        m, api, db = self._mon(1, [self._pos("A", 100, "cA")], {"cA": 10},
-                               {"A": 0.1}, {"A": 0.05}, threshold=0)
+        m, api, db = self._mon(
+            1,
+            [self._pos("A", 100, "cA")],
+            {"cA": 10},
+            {"A": 0.1},
+            {"A": 0.05},
+            threshold=0,
+        )
         m.check_low_balance()
         api.get_balance.assert_not_called()  # 阈值0秒退,连余额都不查
         api.place_market_sell.assert_not_called()
 
     def test_skips_cost_unknown(self):
         # 成本没重建出(_cost_lots 返回 None):推迟,不盲目清仓
-        m, api, db = self._mon(2, [self._pos("A", 100, "cA")], {"cA": 10},
-                               {"A": None}, {"A": 0.05})
+        m, api, db = self._mon(
+            2, [self._pos("A", 100, "cA")], {"cA": 10}, {"A": None}, {"A": 0.05}
+        )
         m.check_low_balance()
         api.place_market_sell.assert_not_called()
 
@@ -1725,22 +1748,31 @@ class TestLowBalance:
 
     def test_early_return_when_balance_already_at_target(self):
         # target<threshold 时余额在 [target,threshold):触发但已达目标 -> 不拉持仓、不卖
-        m, api, db = self._mon(3, [self._pos("A", 100, "cA")], {"cA": 10},
-                               {"A": 0.1}, {"A": 0.05}, threshold=4, target_usd=2)
+        m, api, db = self._mon(
+            3,
+            [self._pos("A", 100, "cA")],
+            {"cA": 10},
+            {"A": 0.1},
+            {"A": 0.05},
+            threshold=4,
+            target_usd=2,
+        )
         m.check_low_balance()
         api.get_user_positions.assert_not_called()
         api.place_market_sell.assert_not_called()
 
     def test_dumped_recorded_for_check_exit_skip(self):
-        m, api, db = self._mon(2, [self._pos("A", 100, "cA")], {"cA": 10},
-                               {"A": 0.1}, {"A": 0.05})
+        m, api, db = self._mon(
+            2, [self._pos("A", 100, "cA")], {"cA": 10}, {"A": 0.1}, {"A": 0.05}
+        )
         m.check_low_balance()
         assert "A" in m._just_dumped  # 供 check_exit 同 tick 跳过
 
     def test_check_exit_skips_just_dumped(self):
         # check_exit 同 tick 跳过刚被低余额清仓的仓(否则对已卖仓挂卖被拒、报假裸奔)
-        m, api, db = self._mon(2, [self._pos("A", 100, "cA")], {"cA": 10},
-                               {"A": 0.3}, {"A": 0.05})
+        m, api, db = self._mon(
+            2, [self._pos("A", 100, "cA")], {"cA": 10}, {"A": 0.3}, {"A": 0.05}
+        )
         m._just_dumped = {"A"}
         m.check_exit()
         api.place_limit_sell.assert_not_called()
@@ -1760,55 +1792,63 @@ class TestMarketRewards:
     def test_returns_max_spread_and_daily_rate(self):
         monitor, api, db = _make_monitor()
         api.get_rewards_for_market.return_value = self._payload()
-        assert monitor._market_rewards("cid1") == (3.0, 120.0)
+        assert monitor._market_rewards("cid1", 0) == (3.0, 120.0)
 
     def test_empty_condition_id_returns_none_pair(self):
         monitor, api, db = _make_monitor()
-        assert monitor._market_rewards("") == (None, None)
+        assert monitor._market_rewards("", 0) == (None, None)
         api.get_rewards_for_market.assert_not_called()
 
     def test_api_failure_returns_none_pair(self):
         monitor, api, db = _make_monitor()
         api.get_rewards_for_market.side_effect = RuntimeError("network")
-        assert monitor._market_rewards("cid1") == (None, None)
+        assert monitor._market_rewards("cid1", 0) == (None, None)
 
     def test_missing_rewards_config_gives_none_rate(self):
         monitor, api, db = _make_monitor()
         api.get_rewards_for_market.return_value = [{"rewards_max_spread": 4}]
-        assert monitor._market_rewards("cid1") == (4.0, None)
+        assert monitor._market_rewards("cid1", 0) == (4.0, None)
 
     def test_cached_within_ttl_fetches_once(self):
-        monitor, api, db = _make_monitor({"rewards_cache_ttl_sec": 600})
+        monitor, api, db = _make_monitor()
         api.get_rewards_for_market.return_value = self._payload()
-        monitor._market_rewards("cid1")
-        monitor._market_rewards("cid1")
+        monitor._market_rewards("cid1", 600)
+        monitor._market_rewards("cid1", 600)
         assert api.get_rewards_for_market.call_count == 1
 
     def test_ttl_zero_refetches_every_call(self):
-        monitor, api, db = _make_monitor({"rewards_cache_ttl_sec": 0})
+        monitor, api, db = _make_monitor()
         api.get_rewards_for_market.return_value = self._payload()
-        monitor._market_rewards("cid1")
-        monitor._market_rewards("cid1")
+        monitor._market_rewards("cid1", 0)
+        monitor._market_rewards("cid1", 0)
         assert api.get_rewards_for_market.call_count == 2
 
     def test_nothing_parsable_is_not_cached(self):
         # 一无所获不写缓存,下轮重试(沿用旧 _market_max_spread 的语义)
-        monitor, api, db = _make_monitor({"rewards_cache_ttl_sec": 600})
+        monitor, api, db = _make_monitor()
         api.get_rewards_for_market.return_value = [{"condition_id": "cid1"}]
-        monitor._market_rewards("cid1")
-        monitor._market_rewards("cid1")
+        monitor._market_rewards("cid1", 600)
+        monitor._market_rewards("cid1", 600)
         assert api.get_rewards_for_market.call_count == 2
 
     def test_rate_present_but_max_spread_missing_not_cached(self):
-        # 有 rate 但取不到 max_spread:仍不写缓存,下轮重试(与旧 _market_max_spread
-        # 只认 max_spread 一致;避免 rate 存在就把 (None, rate) 误缓存整个 TTL)
-        monitor, api, db = _make_monitor({"rewards_cache_ttl_sec": 600})
+        # max_spread 取不到就不写缓存(与旧 _market_max_spread 一致);rate 有值也不例外。
+        monitor, api, db = _make_monitor()
         api.get_rewards_for_market.return_value = [
             {"rewards_config": [{"rate_per_day": 120}]}
         ]
-        monitor._market_rewards("cid1")
-        monitor._market_rewards("cid1")
+        monitor._market_rewards("cid1", 600)
+        monitor._market_rewards("cid1", 600)
         assert api.get_rewards_for_market.call_count == 2
+
+    def test_does_not_touch_db(self):
+        # worker 线程会调它,而每线程一条 sqlite 连接且建了不回收 —— 碰 db 就是
+        # 每 5 秒一轮地泄漏连接。
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.return_value = self._payload()
+        db.reset_mock()
+        monitor._market_rewards("cid1", 0)
+        assert db.method_calls == []
 
 
 class TestStep3RewardDrop:
