@@ -28,6 +28,14 @@ sum(rc.get("rate_per_day", 0) for rd in raw for rc in rd.get("rewards_config", [
 
 实时复查用同一个接口、同一个公式，算出来的值与候选池里的值同源同口径，可以直接写回，不会出现两套标准。也因此这个功能不需要新的接口调用形态，只是不再缓存、多解析一个字段。
 
+**求和不看时间段这件事已实测过**（2026-07-26 线上普查，报告：`.superpowers/sdd/2026-07-26-realtime-reward-recheck/probe-reward-config-periods.md`）。评审提过一种失效可能：`rewards_config` 的每项都带 `start_date`/`end_date`，如果 Polymarket 是「把旧项截止 + 追加一条新项」来降奖励，那么不分时间段地求和就会把过期项的额度也算进去，降奖励永远检测不出来。实测结论是这种情形在线上不存在：
+
+- 全量 500 个在跑奖励的市场，**每个市场的 `rewards_config` 都恰好只有 1 项**（0 个例外），该项的 `end_date` 一律是 `2500-12-31` 这种远期哨兵值，即「无截止」。
+- `/rewards/markets/{condition_id}` 返回的是**每个市场一项**，不是每个 token 一项（91 个市场抽查，无例外）。`api/polymarket_api.py` 原来的注释写的是 per-token，已改正。
+- 也就是说 Polymarket 是**原地改**那一条奖励配置，不是追加历史。所以不看时间段的求和与「只算当前生效项」的求和在实测中恒等，降奖励能被检测到。
+
+局限：这是某一时点的普查，没有守到一次真实的降奖励事件发生。
+
 ## 方案
 
 ### 1. 纯函数：解析每日奖励
@@ -51,21 +59,26 @@ def extract_daily_rate(rewards_items: list) -> Optional[float]:
 
 `OrderMonitor._market_max_spread` 改为 `_market_rewards(condition_id) -> tuple[Optional[float], Optional[float]]`，返回 `(max_spread_cents, daily_rate_usd)`，同一次 HTTP 响应解析出两个值。TTL 缓存的代码结构保留（缓存值变成两元组），只是默认 TTL 变成 0。
 
-`_check_compliance` 的判定顺序只插入一处，其余全部不动：
+`_check_compliance` 的判定顺序只插入一处，其余判定的相对顺序全部不动：
 
 ```
 黑名单撤单
-  → get_orderbook
+  → get_orderbook（bids/asks/买一/卖一/价差）
   → recheck_resting_buy（盘口价差）
-  → 空盘口跳过
   → _market_rewards（一次取数）
   → 【新增】daily_rate 低于 min_reward_usd → 撤单 + 写回 + return
+  → 空盘口跳过
   → max_spread 取不到 → 本轮跳过
   → 单价区间护栏
   → 奖励价差区间判定
 ```
 
-新分支排在「max_spread 取不到就跳过」**之前**：两个值来自同一次响应，万一响应里 `rewards_max_spread` 缺失而 `rewards_config` 正常，奖励判定不该被一起跳过。其余判定的相对顺序不变。
+新分支排在「空盘口跳过」和「max_spread 取不到就跳过」两道**之前**，两个理由：
+
+- 奖励判定根本用不到盘口。薄奖励市场经常缺卖单一侧，而没有卖单的在挂买单照样会被别人的市价卖单吃掉。闸门要是排在空盘口跳过之后，这类市场奖励归零时买单会一直挂着，还会连带不写回候选池、下单轮继续拿旧快照重挂——这个功能要堵的 4 小时窗口对这批市场原封不动地开着。
+- `max_spread` 与奖励来自同一次响应，万一响应里 `rewards_max_spread` 缺失而 `rewards_config` 正常，奖励判定不该被一起跳过。
+
+`midpoint` 必须留在空盘口守卫之后（它要解 `best_bid`/`best_ask`）。
 
 新增分支的行为：
 
@@ -129,6 +142,8 @@ def update_eligible_reward(self, condition_id: str, reward: float):
 
 绝不 fail-close。取奖励失败、响应为空、解析不出奖励配置，一律本轮跳过，不撤不重挂，记 WARNING。接口抖一下就把正在赚奖励的单撤光是最坏结果。
 
+为此 `get_rewards_for_market` 分页中途出错必须返回 `[]`，**不能返回已取到的半份数据**（它原来吞掉异常后 `return all_data`）：半份数据求出来的奖励额偏小，是个「看着合理但是错的」数字，足以让正在赚奖励的单被判成跌破门槛而撤掉——正是这条不变量禁止的 fail-close。返回空列表则调用方看到的是「取不到」→ `(None, None)` → 跳过。`engine/scanner.py` 那个调用方同样受益：它判的是 `if raw:`，空列表会退回批量值。
+
 0 与 None 必须分开。`0.0` 是奖励真的归零，要撤单；`None` 是取不到，要跳过。禁止用 `if not daily_rate` 这类假值判断把两者合并。
 
 撤单失败不写回。`cancel_orders` 抛错时 WARNING + return，与现有黑名单、价差分支的处理一致；因为不再缓存，5 秒后下一 tick 会重新判定重试。
@@ -140,6 +155,12 @@ def update_eligible_reward(self, condition_id: str, reward: float):
 ## 请求量
 
 Step3 每个在挂买单每 tick 从 1 个请求（orderbook）变成 2 个（orderbook + rewards）。按默认 `max_concurrent_markets=10`、`fill_check_interval_sec=5` 估算，单钱包约 120 涨到 240 请求/分钟，全部走该钱包自己的代理。
+
+奖励请求是**按市场**而不是按单去重的：`check_sell_orders` 开头重置一个 `condition_id → (max_spread, daily_rate)` 的本轮备忘（`_round_market_rewards`），同一市场 YES/NO 两侧都有在挂买单时一轮只发一次请求。TTL 默认已是 0（每次实时取），挡不住这种同轮重复。失败结果 `(None, None)` 也进备忘，保证同一轮里两侧得到同一个判定（否则可能一侧撤、一侧不撤）；下个 tick 只隔 5 秒，重试不吃亏。新鲜度不变：每市场每 tick 仍是一次实时取数。
+
+备忘放在遍历这一层、不放进 `_market_rewards`：后者的职责是「按 TTL 取数」，一次遍历内的去重是遍历自己的事；放进去还会把 `TestMarketRewards` 那几个直接连调两次、断言请求次数的缓存用例悄悄弄成永真。
+
+这件事对止损延迟有意义：Step3 排在 `_tick` 最后，每笔单 2 个串行 HTTP（各 10 秒超时），10 笔单的最坏耗时翻倍会推迟**下一** tick 的成交检测和止损。这个项目有代理间歇性抽风拖垮整轮的前史，能省的请求就省。
 
 ## 测试
 
