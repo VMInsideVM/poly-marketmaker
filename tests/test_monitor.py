@@ -1744,3 +1744,57 @@ class TestLowBalance:
         m._just_dumped = {"A"}
         m.check_exit()
         api.place_limit_sell.assert_not_called()
+
+
+class TestMarketRewards:
+    """一次取数拿到 rewards_max_spread 与每日奖励;TTL=0 时每次都重新联网。"""
+
+    def _payload(self, max_spread=3, rate=120):
+        return [
+            {
+                "rewards_max_spread": max_spread,
+                "rewards_config": [{"rate_per_day": rate}],
+            }
+        ]
+
+    def test_returns_max_spread_and_daily_rate(self):
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.return_value = self._payload()
+        assert monitor._market_rewards("cid1") == (3.0, 120.0)
+
+    def test_empty_condition_id_returns_none_pair(self):
+        monitor, api, db = _make_monitor()
+        assert monitor._market_rewards("") == (None, None)
+        api.get_rewards_for_market.assert_not_called()
+
+    def test_api_failure_returns_none_pair(self):
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.side_effect = RuntimeError("network")
+        assert monitor._market_rewards("cid1") == (None, None)
+
+    def test_missing_rewards_config_gives_none_rate(self):
+        monitor, api, db = _make_monitor()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 4}]
+        assert monitor._market_rewards("cid1") == (4.0, None)
+
+    def test_cached_within_ttl_fetches_once(self):
+        monitor, api, db = _make_monitor({"rewards_cache_ttl_sec": 600})
+        api.get_rewards_for_market.return_value = self._payload()
+        monitor._market_rewards("cid1")
+        monitor._market_rewards("cid1")
+        assert api.get_rewards_for_market.call_count == 1
+
+    def test_ttl_zero_refetches_every_call(self):
+        monitor, api, db = _make_monitor({"rewards_cache_ttl_sec": 0})
+        api.get_rewards_for_market.return_value = self._payload()
+        monitor._market_rewards("cid1")
+        monitor._market_rewards("cid1")
+        assert api.get_rewards_for_market.call_count == 2
+
+    def test_nothing_parsable_is_not_cached(self):
+        # 一无所获不写缓存,下轮重试(沿用旧 _market_max_spread 的语义)
+        monitor, api, db = _make_monitor({"rewards_cache_ttl_sec": 600})
+        api.get_rewards_for_market.return_value = [{"condition_id": "cid1"}]
+        monitor._market_rewards("cid1")
+        monitor._market_rewards("cid1")
+        assert api.get_rewards_for_market.call_count == 2

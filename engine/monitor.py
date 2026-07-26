@@ -17,7 +17,7 @@ from engine.eligibility import recheck_resting_buy
 from engine.resolution import in_resolution
 from engine.liquidation import plan_liquidation
 from engine.strategy import reward_price_range
-from engine.rewards import extract_max_spread
+from engine.rewards import extract_max_spread, extract_daily_rate
 from engine import monitor_status
 
 logger = logging.getLogger(__name__)
@@ -40,8 +40,8 @@ class OrderMonitor:
         # init_watermark priming 失败(启动瞬间网络抖)时置 True:check_buy_orders 每轮
         # 重试 priming,建好去重集前不处理成交,避免重放整批历史成交。
         self._prime_pending: bool = False
-        # condition_id -> (max_spread, fetched_at) TTL cache for Step 3.
-        self._max_spread_cache: dict = {}
+        # condition_id -> ((max_spread, daily_rate), fetched_at) TTL cache for Step 3.
+        self._rewards_cache: dict = {}
         self._status_rows: list = []
         self._tick_ts: float = 0.0
         self._cost_cache: dict = {}  # asset_id -> 加权成本 or None(每 tick 重置)
@@ -929,29 +929,30 @@ class OrderMonitor:
             except Exception as e:
                 logger.error("Compliance error on %s: %s", o.get("id"), e)
 
-    def _market_max_spread(self, condition_id: str) -> float | None:
-        """Real rewards_max_spread (in cents) for a market, TTL-cached.
+    def _market_rewards(self, condition_id: str) -> tuple[float | None, float | None]:
+        """(rewards_max_spread 美分, 每日奖励美元),同一次响应解析,TTL 缓存。
 
-        None if unknown. Kept as a float — fractional cents (e.g. 4.5) must
-        survive so the reward band isn't narrowed.
+        任一项为 None = 该项取不到(接口失败/字段缺失),调用方各自安全跳过。
+        每日奖励的 0.0 与 None 含义不同:0.0=奖励真归零(要撤单),None=取不到(跳过)。
+        max_spread 保持 float(不 int 化):实盘存在 3.5/4.5 美分,截断会缩窄奖励区间。
         """
         if not condition_id:
-            return None
+            return None, None
         ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
         now = time.time()
-        hit = self._max_spread_cache.get(condition_id)
+        hit = self._rewards_cache.get(condition_id)
         if hit and (now - hit[1]) < ttl:
             return hit[0]
         try:
             items = self.api.get_rewards_for_market(condition_id)
         except Exception as e:
             logger.warning("get_rewards_for_market(%s) failed: %s", condition_id, e)
-            return None
-        ms = extract_max_spread(items)
-        if ms is None:
-            return None
-        self._max_spread_cache[condition_id] = (ms, now)
-        return ms
+            return None, None
+        pair = (extract_max_spread(items), extract_daily_rate(items))
+        if pair == (None, None):
+            return pair  # 一无所获不写缓存,下轮重试
+        self._rewards_cache[condition_id] = (pair, now)
+        return pair
 
     def _check_compliance(self, o: dict):
         """Decide what to do with a resting buy this tick: first re-check the
@@ -1056,7 +1057,7 @@ class OrderMonitor:
             )
             return
         midpoint = (best_bid + best_ask) / 2
-        max_spread = self._market_max_spread(cid)
+        max_spread, daily_rate = self._market_rewards(cid)
         if max_spread is None:
             logger.info(
                 "[Step3] 单 %s 市场 %s 现价 %.4f | 取不到 rewards_max_spread，"
