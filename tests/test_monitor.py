@@ -1809,3 +1809,119 @@ class TestMarketRewards:
         monitor._market_rewards("cid1")
         monitor._market_rewards("cid1")
         assert api.get_rewards_for_market.call_count == 2
+
+
+class TestStep3RewardDrop:
+    """在挂单市场的每日奖励跌破 min_reward_usd → 立即撤买单不重挂 + 写回候选池。"""
+
+    SETTINGS = {"min_reward_usd": 100.0}
+
+    def _ob(self, best_bid="0.30", best_ask="0.31", tick="0.01"):
+        return {
+            "bids": [{"price": best_bid, "size": "1000"}],
+            "asks": [{"price": best_ask, "size": "1000"}],
+            "tick_size": tick,
+        }
+
+    def _order(self):
+        return {
+            "id": "o1",
+            "side": "BUY",
+            "asset_id": "tok1",
+            "market": "cid1",
+            "size_matched": "0",
+            "price": "0.30",
+            "original_size": "500",
+        }
+
+    def _rewards(self, rate, max_spread=3):
+        return [
+            {
+                "rewards_max_spread": max_spread,
+                "rewards_config": [{"rate_per_day": rate}],
+            }
+        ]
+
+    def _run(self, rate, settings=None, cb=None):
+        monitor, api, db = _make_monitor(settings or self.SETTINGS)
+        if cb is not None:
+            monitor.on_reward_update = cb
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = self._ob()
+        if isinstance(rate, Exception):
+            api.get_rewards_for_market.side_effect = rate
+        else:
+            api.get_rewards_for_market.return_value = rate
+        monitor.check_sell_orders()
+        return monitor, api, db
+
+    def test_cancels_when_reward_below_threshold(self):
+        monitor, api, db = self._run(self._rewards(5))
+        api.cancel_orders.assert_called_once_with(["o1"])
+        api.place_limit_buy.assert_not_called()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["reward_drop_cancel"]
+        kw = db.record_action.call_args_list[0].kwargs
+        assert kw["side"] == "-"
+        assert kw["price"] == -1
+        assert kw["size"] == 500
+        assert "5.00" in kw["reason"] and "100.00" in kw["reason"]
+
+    def test_cancels_when_reward_is_zero(self):
+        # 0 是「奖励真归零」,必须撤单——不能被当成「取不到」跳过。
+        monitor, api, db = self._run(self._rewards(0))
+        api.cancel_orders.assert_called_once_with(["o1"])
+
+    def test_keeps_when_reward_equals_threshold(self):
+        # 门槛是「低于才撤」,与扫描阶段 prefilter 的 < 口径一致。
+        monitor, api, db = self._run(self._rewards(100))
+        api.cancel_orders.assert_not_called()
+
+    def test_keeps_when_reward_above_threshold(self):
+        monitor, api, db = self._run(self._rewards(300))
+        api.cancel_orders.assert_not_called()
+        db.record_action.assert_not_called()
+
+    def test_fetch_failure_does_not_cancel(self):
+        # 接口抖一下就撤光正在赚奖励的单是最坏结果:取不到一律跳过。
+        monitor, api, db = self._run(RuntimeError("network"))
+        api.cancel_orders.assert_not_called()
+        db.record_action.assert_not_called()
+
+    def test_missing_rewards_config_does_not_cancel(self):
+        monitor, api, db = self._run([{"rewards_max_spread": 3}])
+        api.cancel_orders.assert_not_called()
+
+    def test_writes_back_realtime_reward(self):
+        cb = MagicMock()
+        monitor, api, db = self._run(self._rewards(5), cb=cb)
+        cb.assert_called_once_with("cid1", 5.0)
+
+    def test_cancel_failure_skips_writeback_and_action(self):
+        cb = MagicMock()
+        monitor, api, db = _make_monitor(self.SETTINGS)
+        monitor.on_reward_update = cb
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = self._rewards(5)
+        api.cancel_orders.side_effect = RuntimeError("network")
+        monitor.check_sell_orders()  # must not raise
+        cb.assert_not_called()
+        db.record_action.assert_not_called()
+
+    def test_writeback_failure_does_not_break_cancel(self):
+        cb = MagicMock(side_effect=RuntimeError("db down"))
+        monitor, api, db = self._run(self._rewards(5), cb=cb)
+        api.cancel_orders.assert_called_once_with(["o1"])
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["reward_drop_cancel"]
+
+    def test_status_row_published(self):
+        monitor, api, db = _make_monitor(self.SETTINGS)
+        monitor.begin_status_tick()
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = self._rewards(5)
+        monitor.check_sell_orders()
+        rows = [r for r in monitor._status_rows if r.get("stage") == "Step3"]
+        assert rows and rows[0]["action"] == "撤单(奖励下降)"

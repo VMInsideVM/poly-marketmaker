@@ -1068,7 +1068,52 @@ class OrderMonitor:
             )
             return
         midpoint = (best_bid + best_ask) / 2
+        cur_price = float(o.get("price", 0) or 0)
+        osize = int(float(o.get("original_size", 0) or 0))
         max_spread, daily_rate = self._market_rewards(cid)
+
+        # 奖励金额实时复查:市场每日奖励跌破门槛 -> 撤买单不重挂,并把实时值写回候选池
+        # (不写回的话,30 秒后的下单轮会拿最长 4 小时前的快照把单挂回来,来回打架)。
+        # daily_rate 的 0.0 与 None 含义不同:0.0=奖励真归零(撤),None=取不到(跳过)。
+        # 排在「max_spread 取不到就跳过」之前:两个值来自同一次响应,万一响应里
+        # rewards_max_spread 缺失而 rewards_config 正常,奖励判定不该被一起跳过。
+        min_reward = float(settings.get("min_reward_usd", 0) or 0)
+        if daily_rate is not None and daily_rate < min_reward:
+            reason = (
+                f"实时每日奖励 ${daily_rate:.2f} < 门槛 ${min_reward:.2f}，撤买单不重挂"
+            )
+            try:
+                self.api.cancel_orders([o.get("id")])
+            except Exception as e:
+                logger.warning("Reward-drop cancel %s failed: %s", o.get("id"), e)
+                return
+            self._record_action(
+                market_id=cid,
+                action_type="reward_drop_cancel",
+                side="-",
+                price=-1,
+                size=osize,
+                reason=reason,
+                price_basis=(
+                    f"实时每日奖励=${daily_rate:.2f}；门槛=${min_reward:.2f}；"
+                    f"来源：CLOB /rewards/markets/{cid} 实时取数"
+                ),
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price=f"{cur_price:.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="撤单(奖励下降)",
+                detail=reason,
+            )
+            self._notify_reward_update(cid, daily_rate)
+            logger.info(
+                "[Step3] reward-drop cancel %s market %s: %s", o.get("id"), cid, reason
+            )
+            return
         if max_spread is None:
             logger.info(
                 "[Step3] 单 %s 市场 %s 现价 %.4f | 取不到 rewards_max_spread，"
@@ -1091,8 +1136,6 @@ class OrderMonitor:
         # Reward band is max_spread CENTS around the midpoint, NOT max_spread
         # ticks (the tick form is ~10x too narrow on 0.1-cent markets).
         rmin, rmax = reward_price_range(midpoint, max_spread)
-        cur_price = float(o.get("price", 0) or 0)
-        osize = int(float(o.get("original_size", 0) or 0))
 
         # 价格区间护栏：挂单价若超出配置「单价区间」[min,max]美分，撤该买单不重挂。
         # 缺失阈值时安全默认 0/100，使该闸门成为 no-op。
