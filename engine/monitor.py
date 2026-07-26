@@ -59,11 +59,6 @@ class OrderMonitor:
         # 本 tick 刚被 check_low_balance 市价清掉的 asset:check_exit 同 tick 跳过它们
         # (Data API /positions 滞后仍显示满仓,否则会对已卖仓挂卖单被拒、报假「裸奔」)。
         self._just_dumped: set = set()
-        # 本轮 Step3 已取过奖励的市场:condition_id -> (max_spread, daily_rate)
-        # (每轮 check_sell_orders 开头重置)。同一市场 YES/NO 两侧都有在挂买单时,
-        # 一轮只发一次 /rewards/markets 请求;失败结果 (None, None) 也记,保证同一轮
-        # 两侧判定一致(下个 tick 只隔 5 秒,重试不吃亏)。
-        self._round_rewards: dict = {}
 
     def begin_status_tick(self) -> None:
         self._status_rows = []
@@ -913,12 +908,17 @@ class OrderMonitor:
     # --- Step 3: strategy compliance on resting buy orders ---
     def check_sell_orders(self):
         """Reused tick name kept for the manager loop; runs strategy compliance."""
-        self._round_rewards = {}
         try:
             open_orders = self.api.get_open_orders()
         except Exception as e:
             logger.error("get_open_orders failed for %s: %s", self.wallet_address, e)
             return
+        # DB 读全部收在主线程、每轮一次:黑名单和模板原来是每单各读一遍(60 个挂单 =
+        # 60 次查询),ttl 还要传进预取的 worker —— worker 绝不碰 db。
+        blacklist = self.db.get_blacklist_ids()
+        settings = self.db.get_template_for(self.wallet_address)
+        ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
+        books, rewards = self._prefetch(open_orders, blacklist, ttl)
         for o in open_orders:
             price_s = f"{float(o.get('price', 0) or 0):.4f}"
             size_s = str(o.get("original_size", ""))
@@ -948,7 +948,7 @@ class OrderMonitor:
                 )
                 continue
             try:
-                self._check_compliance(o)
+                self._check_compliance(o, blacklist, settings, books, rewards)
             except Exception as e:
                 logger.error("Compliance error on %s: %s", o.get("id"), e)
 
@@ -1024,30 +1024,18 @@ class OrderMonitor:
         )
         return books, rewards
 
-    def _round_market_rewards(self, condition_id: str):
-        """本轮 Step3 的取数备忘:同一 condition_id 一轮只取一次。
-
-        同一市场的 YES/NO 两侧可能各有一笔在挂买单,遍历会对同一个 condition_id
-        问两遍;TTL 默认 0(每次实时取)时 `_market_rewards` 不挡这个重复。备忘放在
-        遍历这一层而不是 `_market_rewards` 里:后者的职责是「按 TTL 取数」,去重是
-        遍历自己的事。**失败结果 `(None, None)` 也记**,让同一轮里两侧得到同一个
-        判定(否则可能一侧撤、一侧不撤)。新鲜度不变:每市场每 tick 仍是一次实时取数。
-        """
-        if condition_id in self._round_rewards:
-            return self._round_rewards[condition_id]
-        ttl = self.db.get_settings()["rewards_cache_ttl_sec"]
-        pair = self._market_rewards(condition_id, ttl)
-        self._round_rewards[condition_id] = pair
-        return pair
-
-    def _check_compliance(self, o: dict):
+    def _check_compliance(self, o: dict, blacklist, settings, books, rewards):
         """Decide what to do with a resting buy this tick: first re-check the
         bid-ask spread (cancel if it widened past the threshold), else price
-        compliance."""
+        compliance.
+
+        盘口与奖励由 check_sell_orders 并发预取好传入,本方法只判定、不发取数请求;
+        撤单、记账、状态行仍在主线程串行。判定逻辑与顺序与预取化之前完全一致。
+        """
         token_id = o.get("asset_id", "")
         cid = o.get("market", "")
         # 黑名单:该市场不应再有在挂买单——撤掉,绝不重挂(覆盖 Step3 重挂这条路径)。
-        if cid in self.db.get_blacklist_ids():
+        if cid in blacklist:
             old_price = float(o.get("price", 0) or 0)
             osize = int(float(o.get("original_size", 0) or 0))
             try:
@@ -1076,8 +1064,15 @@ class OrderMonitor:
             )
             logger.info("[Step3] blacklist cancel %s market %s", o.get("id"), cid)
             return
-        settings = self.db.get_template_for(self.wallet_address)
-        ob = self.api.get_orderbook(token_id)
+        ob = books.get(token_id)
+        if ob is None:
+            # 预取取不到盘口。等价于旧版 get_orderbook 抛异常被外层吞掉的路径:本轮
+            # 跳过该单、不留状态行。「取到了但买卖盘为空」是另一回事,走下面的
+            # 「跳过(盘口为空)」分支并留状态行,两者不可混为一谈。
+            logger.warning(
+                "[Step3] 单 %s 市场 %s | 订单簿取不到,本轮跳过", o.get("id"), cid
+            )
+            return
         bids = sorted(ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True)
         asks = sorted(ob.get("asks", []), key=lambda x: float(x["price"]))
         best_bid = float(bids[0]["price"]) if bids else None
@@ -1126,7 +1121,7 @@ class OrderMonitor:
 
         cur_price = float(o.get("price", 0) or 0)
         osize = int(float(o.get("original_size", 0) or 0))
-        max_spread, daily_rate = self._round_market_rewards(cid)
+        max_spread, daily_rate = rewards.get(cid, (None, None))
 
         # 奖励金额实时复查:市场每日奖励跌破门槛 -> 撤买单不重挂,并把实时值写回候选池
         # (不写回的话,30 秒后的下单轮会拿最长 4 小时前的快照把单挂回来,来回打架)。

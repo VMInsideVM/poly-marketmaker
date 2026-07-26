@@ -1117,7 +1117,7 @@ class TestStep3Blacklist:
             "original_size": "100",
             "size_matched": "0",
         }
-        monitor._check_compliance(o)
+        monitor._check_compliance(o, {"cid1"}, {}, {}, {})
         api.cancel_orders.assert_called_once_with(["o1"])
         api.place_limit_buy.assert_not_called()
         api.get_orderbook.assert_not_called()  # 命中黑名单提前返回,不取盘口
@@ -2225,3 +2225,117 @@ class TestStep3Prefetch:
         db.reset_mock()
         monitor._prefetch([self._buy("o1", "tokA", "cid1")], set(), 0)
         assert db.method_calls == []
+
+
+class TestStep3PrefetchWiring:
+    """接线后的语义等价:取数失败 vs 盘口为空是两回事;DB 读收到主线程一次。"""
+
+    def _buy(self, oid="o1", token="tokA", cid="cid1"):
+        return {
+            "id": oid,
+            "side": "BUY",
+            "asset_id": token,
+            "market": cid,
+            "size_matched": "0",
+            "price": "0.30",
+            "original_size": "500",
+        }
+
+    def _rewards(self):
+        return [{"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 300}]}]
+
+    def test_orderbook_failure_skips_order_without_status_row(self):
+        # 等价于旧版 get_orderbook 抛异常被外层吞掉:跳过该单、不留状态行、不撤单
+        monitor, api, db = _make_monitor({"min_reward_usd": 100.0})
+        monitor.begin_status_tick()
+        api.get_open_orders.return_value = [self._buy()]
+        api.get_orderbook.side_effect = RuntimeError("network")
+        api.get_rewards_for_market.return_value = self._rewards()
+        monitor.check_sell_orders()
+        api.cancel_orders.assert_not_called()
+        assert [r for r in monitor._status_rows if r.get("stage") == "Step3"] == []
+
+    def test_empty_book_still_records_status_row(self):
+        # 「取到了但买卖盘为空」是另一回事:走原分支并留状态行
+        monitor, api, db = _make_monitor({"min_reward_usd": 100.0})
+        monitor.begin_status_tick()
+        api.get_open_orders.return_value = [self._buy()]
+        api.get_orderbook.return_value = {"bids": [], "asks": [], "tick_size": "0.01"}
+        api.get_rewards_for_market.return_value = self._rewards()
+        monitor.check_sell_orders()
+        rows = [r for r in monitor._status_rows if r.get("stage") == "Step3"]
+        assert rows and rows[0]["action"] == "跳过(盘口为空)"
+
+    def test_failed_order_does_not_block_the_next_one(self):
+        monitor, api, db = _make_monitor({"min_reward_usd": 100.0})
+        monitor.begin_status_tick()
+        api.get_open_orders.return_value = [
+            self._buy("o1", "tokBad", "cid1"),
+            self._buy("o2", "tokOk", "cid2"),
+        ]
+
+        def _ob_or_boom(token_id):
+            if token_id == "tokBad":
+                raise RuntimeError("network")
+            return {
+                "bids": [{"price": "0.30", "size": "1000"}],
+                "asks": [{"price": "0.31", "size": "1000"}],
+                "tick_size": "0.01",
+            }
+
+        api.get_orderbook.side_effect = _ob_or_boom
+        api.get_rewards_for_market.return_value = self._rewards()
+        monitor.check_sell_orders()
+        rows = [r for r in monitor._status_rows if r.get("stage") == "Step3"]
+        assert len(rows) == 1 and rows[0]["market"] == "cid2"
+
+    def test_db_reads_are_once_per_round_not_per_order(self):
+        # 黑名单和模板原来是每单各读一遍;60 个挂单就是 60 次查询
+        monitor, api, db = _make_monitor({"min_reward_usd": 100.0})
+        api.get_open_orders.return_value = [
+            self._buy("o1", "tokA", "cid1"),
+            self._buy("o2", "tokB", "cid2"),
+            self._buy("o3", "tokC", "cid3"),
+        ]
+        api.get_orderbook.return_value = {
+            "bids": [{"price": "0.30", "size": "1000"}],
+            "asks": [{"price": "0.31", "size": "1000"}],
+            "tick_size": "0.01",
+        }
+        api.get_rewards_for_market.return_value = self._rewards()
+        db.reset_mock()
+        monitor.check_sell_orders()
+        assert db.get_blacklist_ids.call_count == 1
+        assert db.get_template_for.call_count == 1
+        assert db.get_settings.call_count == 1
+
+    def test_still_iterates_all_orders_for_status_rows(self):
+        # 遍历必须是全量 open_orders:卖单和部分成交单的状态行不能因为预取只挑买单
+        # 而凭空消失。
+        monitor, api, db = _make_monitor({"min_reward_usd": 100.0})
+        monitor.begin_status_tick()
+        api.get_open_orders.return_value = [
+            {
+                "id": "s1",
+                "side": "SELL",
+                "asset_id": "tokS",
+                "market": "cidS",
+                "size_matched": "0",
+                "price": "0.40",
+                "original_size": "500",
+            },
+            {
+                "id": "p1",
+                "side": "BUY",
+                "asset_id": "tokP",
+                "market": "cidP",
+                "size_matched": "100",
+                "price": "0.30",
+                "original_size": "500",
+            },
+        ]
+        api.get_orderbook.return_value = {"bids": [], "asks": [], "tick_size": "0.01"}
+        api.get_rewards_for_market.return_value = self._rewards()
+        monitor.check_sell_orders()
+        stages = [r.get("stage") for r in monitor._status_rows]
+        assert "止盈卖单" in stages and "Step1" in stages
