@@ -949,8 +949,8 @@ class OrderMonitor:
             logger.warning("get_rewards_for_market(%s) failed: %s", condition_id, e)
             return None, None
         pair = (extract_max_spread(items), extract_daily_rate(items))
-        if pair == (None, None):
-            return pair  # 一无所获不写缓存,下轮重试
+        if pair[0] is None:
+            return pair  # max_spread 取不到就不写缓存,下轮重试(与旧 _market_max_spread 一致)
         self._rewards_cache[condition_id] = (pair, now)
         return pair
 

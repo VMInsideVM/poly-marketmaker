@@ -1798,3 +1798,14 @@ class TestMarketRewards:
         monitor._market_rewards("cid1")
         monitor._market_rewards("cid1")
         assert api.get_rewards_for_market.call_count == 2
+
+    def test_rate_present_but_max_spread_missing_not_cached(self):
+        # 有 rate 但取不到 max_spread:仍不写缓存,下轮重试(与旧 _market_max_spread
+        # 只认 max_spread 一致;避免 rate 存在就把 (None, rate) 误缓存整个 TTL)
+        monitor, api, db = _make_monitor({"rewards_cache_ttl_sec": 600})
+        api.get_rewards_for_market.return_value = [
+            {"rewards_config": [{"rate_per_day": 120}]}
+        ]
+        monitor._market_rewards("cid1")
+        monitor._market_rewards("cid1")
+        assert api.get_rewards_for_market.call_count == 2
