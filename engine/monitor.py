@@ -32,7 +32,7 @@ class OrderMonitor:
         self.api = api
         self.db = db
         self.wallet_address = wallet_address
-        # 实时奖励写回候选池的回调(manager 注入):None=不写回(测试/临时下单 worker)。
+        # 实时奖励写回候选池的回调(manager 注入);None=不写回(测试/临时下单 worker)。
         self.on_reward_update = on_reward_update
         # Dedup processed buy fills by (trade_id, order_id).
         self._seen_fill_keys: set = set()
