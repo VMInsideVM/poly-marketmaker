@@ -2130,6 +2130,37 @@ class TestStep3Prefetch:
         books, rewards = monitor._prefetch([self._buy("o1", "tokA", "cid1")], set(), 0)
         assert rewards == {"cid1": (None, None)}
 
+    def test_rewards_parse_error_becomes_none_pair(self):
+        # rewards_config 字段形状不对(真值但不可迭代)时解析会抛 TypeError,这段异常
+        # 必须也被吞掉,不能从 worker 里外抛拖垮整轮 Step3。
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        api.get_rewards_for_market.return_value = [
+            {"rewards_max_spread": 3, "rewards_config": 7}
+        ]
+        books, rewards = monitor._prefetch([self._buy("o1", "tokA", "cid1")], set(), 0)
+        assert rewards == {"cid1": (None, None)}
+
+    def test_rewards_parse_error_does_not_affect_other_markets(self):
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+
+        def _rewards_or_boom(condition_id):
+            if condition_id == "cidBad":
+                return [{"rewards_max_spread": 3, "rewards_config": 7}]
+            return [
+                {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 120}]}
+            ]
+
+        api.get_rewards_for_market.side_effect = _rewards_or_boom
+        orders = [
+            self._buy("o1", "tokBad", "cidBad"),
+            self._buy("o2", "tokOk", "cidOk"),
+        ]
+        books, rewards = monitor._prefetch(orders, set(), 0)
+        assert rewards["cidBad"] == (None, None)
+        assert rewards["cidOk"] == (3.0, 120.0)
+
     def test_skips_blacklisted_market(self):
         # 黑名单单在判定里于取数之前就 return,不必为它发请求
         monitor, api, db = _make_monitor()

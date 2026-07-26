@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 LIQUIDATE_COOLDOWN_SEC = 60
 
 # Step3 预取并发上限。发现阶段用 4(实测奖励端点/代理娇气);Step3 只打盘口和奖励两个
-# 轻接口、不跑分页,略高一档。5 钱包各开各的,单个代理承受的并发就是这个数。要回退
-# 并发化只改这一个常量。
+# 轻接口、不跑分页,略高一档。⚠️这不是"单个代理只扛这个数":兼发现的钱包会在同一个
+# 代理上同时背发现的 4 路 + Step3 的 6 路,峰值约 10 路并发。要回退并发化只改这一个常量。
 _STEP3_MAX_WORKERS = 6
 
 
@@ -973,10 +973,10 @@ class OrderMonitor:
             return hit[0]
         try:
             items = self.api.get_rewards_for_market(condition_id)
+            pair = (extract_max_spread(items), extract_daily_rate(items))
         except Exception as e:
             logger.warning("get_rewards_for_market(%s) failed: %s", condition_id, e)
             return None, None
-        pair = (extract_max_spread(items), extract_daily_rate(items))
         if pair[0] is None:
             return pair  # max_spread 取不到就不写缓存,下轮重试(与旧 _market_max_spread 一致)
         self._rewards_cache[condition_id] = (pair, now)
