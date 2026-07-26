@@ -2283,6 +2283,40 @@ class TestStep3Prefetch:
         assert "盘口 1/2" in lines[0] and "奖励 1/2" in lines[0]
         assert "耗时" in lines[0]
 
+    def test_no_work_round_logs_nothing(self, caplog):
+        # 没东西要取的轮一声不响:5 个钱包空闲过夜每分钟 60 条 0/0,这条汇总本身就废了。
+        # 门槛是「本轮有没有要取的东西」,不是「两张表是否都空」——见下一个测试。
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        orders = [
+            {
+                "id": "s1",
+                "side": "SELL",
+                "asset_id": "tokS",
+                "market": "cidS",
+                "size_matched": "0",
+                "price": "0.40",
+                "original_size": "500",
+            },
+            self._buy("o2", "tokP", "cidP", matched="100"),
+            self._buy("o3", "tokB", "cidBlack"),
+        ]
+        with caplog.at_level(logging.INFO, logger="engine.monitor"):
+            monitor._prefetch(orders, {"cidBlack"}, 0)
+        assert "预取完成" not in caplog.text
+
+    def test_all_fetches_failing_still_logs(self, caplog):
+        # 问了却一个都没取回来 —— 正是最该看见的那种轮,不能被静音门槛顺手吞掉
+        monitor, api, db = _make_monitor()
+        self._ready(monitor, api)
+        api.get_orderbook.side_effect = RuntimeError("network")
+        api.get_rewards_for_market.side_effect = RuntimeError("network")
+        with caplog.at_level(logging.INFO, logger="engine.monitor"):
+            monitor._prefetch([self._buy("o1", "tokA", "cidA")], set(), 0)
+        lines = [r.getMessage() for r in caplog.records if "预取完成" in r.getMessage()]
+        assert len(lines) == 1
+        assert "盘口 0/1" in lines[0] and "奖励 0/1" in lines[0]
+
 
 class TestStep3PrefetchWiring:
     """接线后的语义等价:取数失败 vs 盘口为空是两回事;DB 读收到主线程一次。"""

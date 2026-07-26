@@ -1040,19 +1040,23 @@ class OrderMonitor:
             )
         )
         books = dict(zip(token_ids, parallel_map(_book, token_ids, _STEP3_MAX_WORKERS)))
-        # 每轮一条汇总:这次并发化的全部理由是「36 秒降到 6 秒」、最大风险是 6 路把娇气的
-        # 奖励端点打崩,两件事都只有这条日志看得见(逐项 WARNING 看不出面),而奖励系统性
-        # 取不到会静默退化成 fail-open 跳过。
-        ok_books = sum(1 for b in books.values() if b is not None)
-        ok_rewards = sum(1 for pair in rewards.values() if pair[0] is not None)
-        logger.info(
-            "[Step3] 预取完成 盘口 %d/%d 奖励 %d/%d 耗时 %.1fs",
-            ok_books,
-            len(token_ids),
-            ok_rewards,
-            len(cids),
-            time.time() - t0,
-        )
+        # 干过活的轮才记一条汇总:这次并发化的全部理由是「36 秒降到 6 秒」、最大风险是
+        # 6 路把娇气的奖励端点打崩,两件事都只有这条日志看得见(逐项 WARNING 看不出面),
+        # 而奖励系统性取不到会静默退化成 fail-open 跳过。
+        # 门槛按「本轮有没有要取的东西」,不是「两张表是否都空」:问了却一个都没取回来的轮
+        # 恰恰最该看见。本轮无可判定的买单(全是卖单/部分成交/黑名单)则一声不响 —— 否则
+        # 5 个钱包空闲过夜就是每分钟 60 条 0/0,这条日志本身就废了。
+        if token_ids or cids:
+            ok_books = sum(1 for b in books.values() if b is not None)
+            ok_rewards = sum(1 for pair in rewards.values() if pair[0] is not None)
+            logger.info(
+                "[Step3] 预取完成 盘口 %d/%d 奖励 %d/%d 耗时 %.1fs",
+                ok_books,
+                len(token_ids),
+                ok_rewards,
+                len(cids),
+                time.time() - t0,
+            )
         return books, rewards
 
     def _check_compliance(self, o: dict, blacklist, settings, books, rewards):
