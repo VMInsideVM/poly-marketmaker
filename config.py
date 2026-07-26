@@ -34,7 +34,8 @@ ENGINE_DEFAULTS = {
     "scan_interval_sec": 30,
     "fill_check_interval_sec": 5,
     "cooldown_minutes": 20,
-    "rewards_cache_ttl_sec": 600,
+    # 0=每次实时取(在挂单市场的奖励复查要求实时);代理吃紧时可调回 600 恢复缓存。
+    "rewards_cache_ttl_sec": 0,
     "discovery_interval_sec": 14400,
     # 每品类奖励抓取页数上限(每页 100)。默认 20=2000/品类,覆盖天气等大品类;
     # 扫描级全局,由 manager 透传给 scanner。

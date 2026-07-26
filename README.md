@@ -170,7 +170,7 @@ pytest tests/test_strategy.py     # 单个文件
 | `scan_interval_sec` | 30 | 自动模式下单轮间隔（秒） |
 | `fill_check_interval_sec` | 5 | 成交 / 监控检查间隔（秒） |
 | `cooldown_minutes` | 20 | 同市场成交后冷却（分钟） |
-| `rewards_cache_ttl_sec` | 600 | 奖励参数缓存 TTL（秒） |
+| `rewards_cache_ttl_sec` | 0 | 奖励参数复查缓存 TTL（秒），0=每次实时取 |
 | `discovery_interval_sec` | 14400 | 市场发现间隔（秒，默认 4 小时） |
 | `reward_scan_max_pages` | 20 | 每品类奖励市场抓取页数上限（每页 100） |
 
