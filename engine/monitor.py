@@ -53,6 +53,11 @@ class OrderMonitor:
         # 本 tick 刚被 check_low_balance 市价清掉的 asset:check_exit 同 tick 跳过它们
         # (Data API /positions 滞后仍显示满仓,否则会对已卖仓挂卖单被拒、报假「裸奔」)。
         self._just_dumped: set = set()
+        # 本轮 Step3 已取过奖励的市场:condition_id -> (max_spread, daily_rate)
+        # (每轮 check_sell_orders 开头重置)。同一市场 YES/NO 两侧都有在挂买单时,
+        # 一轮只发一次 /rewards/markets 请求;失败结果 (None, None) 也记,保证同一轮
+        # 两侧判定一致(下个 tick 只隔 5 秒,重试不吃亏)。
+        self._round_rewards: dict = {}
 
     def begin_status_tick(self) -> None:
         self._status_rows = []
@@ -902,6 +907,7 @@ class OrderMonitor:
     # --- Step 3: strategy compliance on resting buy orders ---
     def check_sell_orders(self):
         """Reused tick name kept for the manager loop; runs strategy compliance."""
+        self._round_rewards = {}
         try:
             open_orders = self.api.get_open_orders()
         except Exception as e:
@@ -963,6 +969,21 @@ class OrderMonitor:
         if pair[0] is None:
             return pair  # max_spread 取不到就不写缓存,下轮重试(与旧 _market_max_spread 一致)
         self._rewards_cache[condition_id] = (pair, now)
+        return pair
+
+    def _round_market_rewards(self, condition_id: str):
+        """本轮 Step3 的取数备忘:同一 condition_id 一轮只取一次。
+
+        同一市场的 YES/NO 两侧可能各有一笔在挂买单,遍历会对同一个 condition_id
+        问两遍;TTL 默认 0(每次实时取)时 `_market_rewards` 不挡这个重复。备忘放在
+        遍历这一层而不是 `_market_rewards` 里:后者的职责是「按 TTL 取数」,去重是
+        遍历自己的事。**失败结果 `(None, None)` 也记**,让同一轮里两侧得到同一个
+        判定(否则可能一侧撤、一侧不撤)。新鲜度不变:每市场每 tick 仍是一次实时取数。
+        """
+        if condition_id in self._round_rewards:
+            return self._round_rewards[condition_id]
+        pair = self._market_rewards(condition_id)
+        self._round_rewards[condition_id] = pair
         return pair
 
     def _check_compliance(self, o: dict):
@@ -1049,34 +1070,18 @@ class OrderMonitor:
             )
             return
 
-        # --- 奖励区间合规检查（不重挂，下单引擎在下次下单周期重挂）---
-        if not bids or not asks:
-            logger.info(
-                "[Step3] 单 %s 市场 %s | 盘口为空，本轮跳过",
-                o.get("id"),
-                cid,
-            )
-            self._status_add(
-                market=cid,
-                side="买入",
-                price=f"{float(o.get('price', 0) or 0):.4f}",
-                size=str(o.get("original_size", "")),
-                matched=str(o.get("size_matched", "0")),
-                stage="Step3",
-                action="跳过(盘口为空)",
-                detail="盘口为空",
-            )
-            return
-        midpoint = (best_bid + best_ask) / 2
         cur_price = float(o.get("price", 0) or 0)
         osize = int(float(o.get("original_size", 0) or 0))
-        max_spread, daily_rate = self._market_rewards(cid)
+        max_spread, daily_rate = self._round_market_rewards(cid)
 
         # 奖励金额实时复查:市场每日奖励跌破门槛 -> 撤买单不重挂,并把实时值写回候选池
         # (不写回的话,30 秒后的下单轮会拿最长 4 小时前的快照把单挂回来,来回打架)。
         # daily_rate 的 0.0 与 None 含义不同:0.0=奖励真归零(撤),None=取不到(跳过)。
-        # 排在「max_spread 取不到就跳过」之前:两个值来自同一次响应,万一响应里
-        # rewards_max_spread 缺失而 rewards_config 正常,奖励判定不该被一起跳过。
+        # 排在「盘口为空跳过」和「max_spread 取不到跳过」两道之前:奖励判定根本用不到盘口
+        # (薄奖励市场常缺卖单一侧,但没有卖单的在挂买单照样会被别人的市价卖单吃掉,奖励归零
+        # 就该撤),而 max_spread 与奖励来自同一次响应,响应里 rewards_max_spread 缺失时
+        # 奖励判定也不该被一起跳过。跳过奖励闸门还会连带不写回候选池,下单轮就继续拿旧
+        # 快照把单挂回来——这个功能要堵的 4 小时窗口正好又开了。
         min_reward = float(settings.get("min_reward_usd", 0) or 0)
         if daily_rate is not None and daily_rate < min_reward:
             reason = (
@@ -1114,6 +1119,26 @@ class OrderMonitor:
                 "[Step3] reward-drop cancel %s market %s: %s", o.get("id"), cid, reason
             )
             return
+
+        # --- 奖励区间合规检查（不重挂，下单引擎在下次下单周期重挂）---
+        if not bids or not asks:
+            logger.info(
+                "[Step3] 单 %s 市场 %s | 盘口为空，本轮跳过",
+                o.get("id"),
+                cid,
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price=f"{float(o.get('price', 0) or 0):.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="跳过(盘口为空)",
+                detail="盘口为空",
+            )
+            return
+        midpoint = (best_bid + best_ask) / 2
         if max_spread is None:
             logger.info(
                 "[Step3] 单 %s 市场 %s 现价 %.4f | 取不到 rewards_max_spread，"

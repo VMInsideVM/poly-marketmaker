@@ -1925,3 +1925,89 @@ class TestStep3RewardDrop:
         monitor.check_sell_orders()
         rows = [r for r in monitor._status_rows if r.get("stage") == "Step3"]
         assert rows and rows[0]["action"] == "撤单(奖励下降)"
+
+    # --- 闸门位置:奖励判定不看盘口、也不依赖 max_spread ---
+
+    def test_cancels_when_max_spread_missing(self):
+        # 奖励闸门必须排在「取不到 max_spread 就跳过」之前:两个值来自同一次响应,
+        # 响应里缺 rewards_max_spread 时,奖励判定不该被一起跳过。
+        monitor, api, db = self._run([{"rewards_config": [{"rate_per_day": 5}]}])
+        api.cancel_orders.assert_called_once_with(["o1"])
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["reward_drop_cancel"]
+
+    def test_cancels_when_orderbook_empty(self):
+        # 奖励闸门必须排在「盘口为空就跳过」之前:薄奖励市场常缺卖单一侧,那些在挂
+        # 买单照样会被别人的市价卖单吃掉;闸门若在守卫之后,这类市场奖励归零时买单
+        # 一直挂着、还不写回候选池,下单轮继续拿旧快照重挂 —— 4 小时窗口原样敞开。
+        cb = MagicMock()
+        monitor, api, db = _make_monitor(self.SETTINGS)
+        monitor.on_reward_update = cb
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = {"bids": [], "asks": [], "tick_size": "0.01"}
+        api.get_rewards_for_market.return_value = self._rewards(5)
+        monitor.check_sell_orders()
+        api.cancel_orders.assert_called_once_with(["o1"])
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["reward_drop_cancel"]
+        cb.assert_called_once_with("cid1", 5.0)  # 写回照做,下单轮不会重挂
+
+    def test_cancels_when_only_asks_missing(self):
+        # 只缺卖单一侧(买单侧健在)——最贴近实盘的薄市场形态,同样要撤。
+        monitor, api, db = _make_monitor(self.SETTINGS)
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = {
+            "bids": [{"price": "0.30", "size": "1000"}],
+            "asks": [],
+            "tick_size": "0.01",
+        }
+        api.get_rewards_for_market.return_value = self._rewards(5)
+        monitor.check_sell_orders()
+        api.cancel_orders.assert_called_once_with(["o1"])
+
+    def test_empty_book_still_skips_when_reward_ok(self):
+        # 闸门前移不能让空盘口的原有语义丢掉:奖励达标时仍是「本轮跳过」,不撤。
+        monitor, api, db = _make_monitor(self.SETTINGS)
+        monitor.begin_status_tick()
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = {"bids": [], "asks": [], "tick_size": "0.01"}
+        api.get_rewards_for_market.return_value = self._rewards(300)
+        monitor.check_sell_orders()
+        api.cancel_orders.assert_not_called()
+        rows = [r for r in monitor._status_rows if r.get("stage") == "Step3"]
+        assert rows and rows[0]["action"] == "跳过(盘口为空)"
+
+    # --- 本轮取数备忘:同一市场一轮只取一次 ---
+
+    def test_both_sides_of_market_fetch_rewards_once(self):
+        # 同一 condition_id 的 YES/NO 两侧各有一笔在挂买单时,一轮只发一次
+        # /rewards/markets 请求(TTL=0 挡不住同轮重复)。
+        monitor, api, db = _make_monitor({**self.SETTINGS, "rewards_cache_ttl_sec": 0})
+        yes = self._order()
+        no = {**self._order(), "id": "o2", "asset_id": "tok2"}
+        api.get_open_orders.return_value = [yes, no]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = self._rewards(300)
+        monitor.check_sell_orders()
+        assert api.get_rewards_for_market.call_count == 1
+
+    def test_memo_is_reset_between_rounds(self):
+        # 备忘只活一轮:下一轮必须重新联网,否则奖励变化再也看不到。
+        monitor, api, db = _make_monitor({**self.SETTINGS, "rewards_cache_ttl_sec": 0})
+        api.get_open_orders.return_value = [self._order()]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.return_value = self._rewards(300)
+        monitor.check_sell_orders()
+        monitor.check_sell_orders()
+        assert api.get_rewards_for_market.call_count == 2
+
+    def test_memo_caches_failure_so_both_sides_agree(self):
+        # 取数失败也进备忘:同一轮里两侧得到同一个判定(都跳过),不会一侧撤一侧不撤。
+        monitor, api, db = _make_monitor({**self.SETTINGS, "rewards_cache_ttl_sec": 0})
+        no = {**self._order(), "id": "o2", "asset_id": "tok2"}
+        api.get_open_orders.return_value = [self._order(), no]
+        api.get_orderbook.return_value = self._ob()
+        api.get_rewards_for_market.side_effect = RuntimeError("network")
+        monitor.check_sell_orders()
+        assert api.get_rewards_for_market.call_count == 1
+        api.cancel_orders.assert_not_called()
