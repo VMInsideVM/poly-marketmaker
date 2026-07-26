@@ -28,7 +28,7 @@ sum(rc.get("rate_per_day", 0) for rd in raw for rc in rd.get("rewards_config", [
 
 实时复查用同一个接口、同一个公式，算出来的值与候选池里的值同源同口径，可以直接写回，不会出现两套标准。也因此这个功能不需要新的接口调用形态，只是不再缓存、多解析一个字段。
 
-**求和不看时间段这件事已实测过**（2026-07-26 线上普查，报告：`.superpowers/sdd/2026-07-26-realtime-reward-recheck/probe-reward-config-periods.md`）。评审提过一种失效可能：`rewards_config` 的每项都带 `start_date`/`end_date`，如果 Polymarket 是「把旧项截止 + 追加一条新项」来降奖励，那么不分时间段地求和就会把过期项的额度也算进去，降奖励永远检测不出来。实测结论是这种情形在线上不存在：
+**求和不看时间段这件事已实测过**（2026-07-26 线上普查，数据如下）。评审提过一种失效可能：`rewards_config` 的每项都带 `start_date`/`end_date`，如果 Polymarket 是「把旧项截止 + 追加一条新项」来降奖励，那么不分时间段地求和就会把过期项的额度也算进去，降奖励永远检测不出来。实测结论是这种情形在线上不存在：
 
 - 全量 500 个在跑奖励的市场，**每个市场的 `rewards_config` 都恰好只有 1 项**（0 个例外），该项的 `end_date` 一律是 `2500-12-31` 这种远期哨兵值，即「无截止」。
 - `/rewards/markets/{condition_id}` 返回的是**每个市场一项**，不是每个 token 一项（91 个市场抽查，无例外）。`api/polymarket_api.py` 原来的注释写的是 per-token，已改正。
@@ -65,7 +65,7 @@ def extract_daily_rate(rewards_items: list) -> Optional[float]:
 黑名单撤单
   → get_orderbook（bids/asks/买一/卖一/价差）
   → recheck_resting_buy（盘口价差）
-  → _market_rewards（一次取数）
+  → _round_market_rewards（一次取数，按市场记本轮备忘）
   → 【新增】daily_rate 低于 min_reward_usd → 撤单 + 写回 + return
   → 空盘口跳过
   → max_spread 取不到 → 本轮跳过
