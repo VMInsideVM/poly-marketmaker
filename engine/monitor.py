@@ -28,10 +28,12 @@ LIQUIDATE_COOLDOWN_SEC = 60
 
 
 class OrderMonitor:
-    def __init__(self, api, db, wallet_address: str):
+    def __init__(self, api, db, wallet_address: str, on_reward_update=None):
         self.api = api
         self.db = db
         self.wallet_address = wallet_address
+        # 实时奖励写回候选池的回调(manager 注入):None=不写回(测试/临时下单 worker)。
+        self.on_reward_update = on_reward_update
         # Dedup processed buy fills by (trade_id, order_id).
         self._seen_fill_keys: set = set()
         # Watermark: lower bound for get_trades(after=) — bounds fetch size;
@@ -91,6 +93,15 @@ class OrderMonitor:
             )
         except Exception as e:
             logger.warning("record_action failed: %s", e)
+
+    def _notify_reward_update(self, condition_id: str, reward: float) -> None:
+        """把实时每日奖励写回候选池。纯筛选/展示用,绝不能中断撤单流程。"""
+        if not self.on_reward_update:
+            return
+        try:
+            self.on_reward_update(condition_id, reward)
+        except Exception as e:
+            logger.warning("奖励写回失败 %s: %s", condition_id, e)
 
     def init_watermark(self):
         """Seed watermark AND prime the seen-fill-keys set on startup recovery.

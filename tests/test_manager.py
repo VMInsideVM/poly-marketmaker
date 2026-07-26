@@ -847,3 +847,67 @@ class TestActiveTemplatesDedupKey:
             return self._base()
 
         assert len(self._mgr_with(tmpl_for)._active_templates()) == 1
+
+
+class TestUpdateMarketReward:
+    """实时奖励写回候选池:内存池条目就地改写 + DB 同步,失败不外抛。"""
+
+    def _mgr(self, pool):
+        db = MagicMock()
+        manager = EngineManager(db, encryption_key=b"x" * 32)
+        manager.eligible_markets = pool
+        return manager, db
+
+    def test_rewrites_pool_entry_and_syncs_db(self):
+        pool = [
+            {"condition_id": "0xabc", "market_reward": 300.0, "daily_reward": 300.0},
+            {"condition_id": "0xother", "market_reward": 300.0, "daily_reward": 300.0},
+        ]
+        manager, db = self._mgr(pool)
+        manager.update_market_reward("0xabc", 5.0)
+        # 命中的市场两个键都改写(prefilter 判 market_reward,前端显示 daily_reward)
+        assert pool[0]["market_reward"] == 5.0
+        assert pool[0]["daily_reward"] == 5.0
+        # 其它市场不受影响
+        assert pool[1]["market_reward"] == 300.0
+        db.update_eligible_reward.assert_called_once_with("0xabc", 5.0)
+
+    def test_market_not_in_pool_still_syncs_db(self):
+        manager, db = self._mgr([])
+        manager.update_market_reward("0xabc", 5.0)
+        db.update_eligible_reward.assert_called_once_with("0xabc", 5.0)
+
+
+class TestRewardUpdateCallbackWiring:
+    """回调一路从 manager 注入到 monitor;monitor 侧调用永不外抛。"""
+
+    def test_worker_passes_callback_to_monitor(self):
+        cb = MagicMock()
+        worker = WalletWorker(
+            MagicMock(),
+            MagicMock(),
+            "0xW",
+            {"fill_check_interval_sec": 5},
+            on_reward_update=cb,
+        )
+        assert worker.monitor.on_reward_update is cb
+
+    def test_worker_without_callback_defaults_to_none(self):
+        worker = WalletWorker(
+            MagicMock(), MagicMock(), "0xW", {"fill_check_interval_sec": 5}
+        )
+        assert worker.monitor.on_reward_update is None
+
+    def test_notify_is_noop_without_callback(self):
+        from engine.monitor import OrderMonitor
+
+        monitor = OrderMonitor(MagicMock(), MagicMock(), "0xW")
+        monitor._notify_reward_update("0xabc", 5.0)  # 不抛异常即可
+
+    def test_notify_swallows_callback_failure(self):
+        from engine.monitor import OrderMonitor
+
+        cb = MagicMock(side_effect=RuntimeError("db down"))
+        monitor = OrderMonitor(MagicMock(), MagicMock(), "0xW", on_reward_update=cb)
+        monitor._notify_reward_update("0xabc", 5.0)  # 写回失败绝不能中断交易流程
+        cb.assert_called_once_with("0xabc", 5.0)

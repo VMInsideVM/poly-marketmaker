@@ -46,12 +46,21 @@ def _worker_proxied(method):
 class WalletWorker:
     """Per-wallet worker: places orders from shared eligible list, monitors fills."""
 
-    def __init__(self, api: PolymarketAPI, db, wallet_address: str, settings: dict):
+    def __init__(
+        self,
+        api: PolymarketAPI,
+        db,
+        wallet_address: str,
+        settings: dict,
+        on_reward_update=None,
+    ):
         self.api = api
         self.db = db
         self.wallet_address = wallet_address
         self.settings = settings
-        self.monitor = OrderMonitor(api, db, wallet_address)
+        self.monitor = OrderMonitor(
+            api, db, wallet_address, on_reward_update=on_reward_update
+        )
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self.running = False
@@ -839,7 +848,13 @@ class EngineManager:
             proxy=wallet.get("proxy") or None,
         )
         settings = self.db.get_settings()
-        worker = WalletWorker(api, self.db, address, settings)
+        worker = WalletWorker(
+            api,
+            self.db,
+            address,
+            settings,
+            on_reward_update=self.update_market_reward,
+        )
         self.engines[address] = worker
         worker.start()
 
@@ -1046,6 +1061,20 @@ class EngineManager:
         if catalog:
             self._persist_catalog(catalog)
         return candidate_pool
+
+    def update_market_reward(self, condition_id: str, reward: float):
+        """实时复查到的每日奖励写回候选池(内存+DB),下单轮 prefilter 立刻用新值。
+
+        监控 Step3 撤掉「奖励跌破门槛」的买单后调用。不写回的话,30 秒后的下单轮会
+        拿最长 4 小时前的快照把单挂回来、5 秒后监控再撤,来回打架。只写 market_reward
+        就足以让市场跌出 eligible(prefilter 判的是 or 条件),daily_reward 是展示键。
+        """
+        pool = self.eligible_markets  # 先取本地引用:扫描会整体重绑该属性
+        for m in pool:
+            if m.get("condition_id") == condition_id:
+                m["market_reward"] = reward
+                m["daily_reward"] = reward
+        self.db.update_eligible_reward(condition_id, reward)
 
     def _should_discover(self, now: float) -> bool:
         """无缓存池、或距上次发现 >= discovery_interval -> 该重新发现。"""
