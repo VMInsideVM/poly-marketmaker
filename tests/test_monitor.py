@@ -2050,6 +2050,7 @@ class TestStep3RewardDrop:
         api.get_rewards_for_market.side_effect = RuntimeError("network")
         monitor.check_sell_orders()
         assert api.get_rewards_for_market.call_count == 1
+        api.cancel_orders.assert_not_called()
 
 
 class TestStep3Prefetch:
@@ -2193,4 +2194,3 @@ class TestStep3Prefetch:
         db.reset_mock()
         monitor._prefetch([self._buy("o1", "tokA", "cid1")], set(), 0)
         assert db.method_calls == []
-        api.cancel_orders.assert_not_called()
