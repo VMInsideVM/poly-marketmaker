@@ -842,6 +842,21 @@ class TestActiveTemplatesDedupKey:
 
         assert len(self._mgr_with(tmpl_for)._active_templates()) == 2
 
+    def test_skip_new_markets_variants_not_deduped(self):
+        def tmpl_for(addr):
+            return self._base(skip_new_markets=(addr == "0xA"))
+
+        assert len(self._mgr_with(tmpl_for)._active_templates()) == 2
+
+    def test_new_market_hours_variants_not_deduped(self):
+        def tmpl_for(addr):
+            return self._base(
+                skip_new_markets=True,
+                new_market_hours=24 if addr == "0xA" else 72,
+            )
+
+        assert len(self._mgr_with(tmpl_for)._active_templates()) == 2
+
     def test_identical_templates_still_deduped(self):
         def tmpl_for(addr):
             return self._base()

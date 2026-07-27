@@ -861,3 +861,11 @@ class TestLastPushWeek:
     def test_not_polluting_engine_settings(self, db):
         db.set_last_push_week("2026-07-13")
         assert "last_push_week" not in db.get_settings()  # 不进 ENGINE_DEFAULTS 白名单
+
+
+def test_skip_new_markets_defaults():
+    """跳过新建市场：默认关闭（升级零行为变化），保护期默认 24 小时。"""
+    from config import TEMPLATE_DEFAULTS
+
+    assert TEMPLATE_DEFAULTS["skip_new_markets"] is False
+    assert TEMPLATE_DEFAULTS["new_market_hours"] == 24.0

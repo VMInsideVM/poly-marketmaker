@@ -59,6 +59,10 @@ TEMPLATE_DEFAULTS = {
     # 结算窗口上限(整天,0=今天/1=明天…):None=不限。与 min_settlement_days 合成
     # 窗口 [min, max];留空即沿用旧的「只有下限、无上限」行为。
     "max_settlement_days": None,
+    # 跳过新建市场:创建不足 new_market_hours 小时的市场不做。默认关(升级零行为变化);
+    # new_market_hours=0 视同不筛。判定在 scanner 的发现阶段与 prefilter 各做一次。
+    "skip_new_markets": False,
+    "new_market_hours": 24.0,
     "theta_loss_cents": 2,
     # 强平止损阈值:可按比例(占成本%)或按固定金额(美分)。默认按比例 20%。
     "stop_loss_mode": "percent",  # "percent" | "fixed"
