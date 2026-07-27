@@ -137,7 +137,7 @@ def market_age_hours(created_at: str, now: float):
     datetime.fromisoformat 只认 3 位或 6 位微秒的限制（实测存在 2 位的样本）。
     非 Z 结尾的时区偏移不处理、一律按 UTC：实测样本 100% 带 Z，真出现别的格式时正则
     仍匹配得上，误差最大一个时区。
-    形状合法但取值越界的串(月 13、日 45、"0000-00-00" 这类零值哨兵)一律按解析不出处理,
+    形状合法但取值越界的串（月 13、日 45、"0000-00-00" 这类零值哨兵）一律按解析不出处理，
     返回 None —— 绝不让一条畸形 created_at 掀翻整轮扫描。
     """
     m = _CREATED_RE.match((created_at or "").strip())
@@ -234,6 +234,11 @@ class MarketScanner:
         pool = tag_pool(list(by_cid.values()), category_ids, slugs_needed)
         blacklist = self.db.get_blacklist_ids()
 
+        # 「新市场」门槛:发现阶段只能用最宽松值(全模板都开才生效),各模板自己的 N 由
+        # prefilter_for_template 精筛。created_at 由奖励端点白拿,判定不发网络请求。
+        min_age_hours = loosest_new_market_hours(templates)
+        now = time.time()
+
         # 并集档位 sizes + 各模板结算窗口:精确奖励拉取(每市场一次网络、~0.78s)是发现
         # 阶段的大头。档位/窗口这两个门槛既不需要订单簿也不需要精确奖励就能判——用它们
         # 决定「要不要对该市场拉精确奖励」,而不是决定「进不进候选池」:品类匹配的市场都进
@@ -273,6 +278,10 @@ class MarketScanner:
                 continue  # 没被任何模板 include(且非其他)
             if _batch_rate(market) < min_floor:
                 continue  # 比最宽松模板还低,任何模板都不会要
+            if min_age_hours:
+                age = market_age_hours(market.get("created_at", ""), now)
+                if age is not None and age < min_age_hours:
+                    continue  # 太新;created_at 取不到 -> fail-open 保留
             (priced if _should_price(market) else extra).append(market)
 
         def _precise_reward(market):

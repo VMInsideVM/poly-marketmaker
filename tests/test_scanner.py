@@ -1261,3 +1261,88 @@ class TestLoosestNewMarketHours:
 
     def test_missing_keys_treated_as_off(self):
         assert loosest_new_market_hours([{}]) == 0
+
+
+class TestDiscoverySkipNewMarkets:
+    """发现阶段跳过新建市场：模板全开时按最宽松门槛排除；任一模板没开则一个都不排。
+
+    发现阶段是钱包无关的共享阶段，排早了会把别的模板要的市场也剔掉（与奖励地板用
+    min_floor 兜底同一模式）。created_at 由奖励端点白拿，判定不发任何网络请求。
+    """
+
+    def _api(self, markets):
+        api = MagicMock()
+
+        def fake_rewards(tag_slug=None, **kw):
+            return list(markets) if tag_slug is None else []
+
+        api.get_rewards_markets.side_effect = fake_rewards
+        api.get_rewards_for_market.return_value = []
+        return api
+
+    def _mkt(self, cid, age_hours):
+        return {
+            "condition_id": cid,
+            "question": cid,
+            "tokens": [{"token_id": cid + "-y"}],
+            "rewards_config": [{"rate_per_day": 50}],
+            "rewards_min_size": 100,
+            "end_date": (date.today() + timedelta(days=10)).strftime("%Y-%m-%d"),
+            "created_at": _created_hours_ago(age_hours),
+        }
+
+    def _tmpl(self, **over):
+        t = {
+            "included_categories": [],
+            "include_other": True,
+            "min_reward_usd": 0,
+            "size_tiers": [_tier(100)],
+            "min_settlement_days": 0,
+            "max_settlement_days": None,
+            "skip_new_markets": True,
+            "new_market_hours": 24,
+        }
+        t.update(over)
+        return t
+
+    def _db(self):
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        return db
+
+    def _pool_ids(self, api, templates):
+        sc = MarketScanner(api, self._db(), "")
+        return {m["condition_id"] for m in sc.discover_candidates(templates)}
+
+    def test_new_market_excluded_from_pool(self):
+        api = self._api([self._mkt("NEW", 5), self._mkt("OLD", 100)])
+        assert self._pool_ids(api, [self._tmpl()]) == {"OLD"}
+
+    def test_exactly_at_threshold_kept(self):
+        # 门槛是「不足 N 小时才跳」，刚满 N 小时要留下
+        api = self._api([self._mkt("AT", 24.01)])
+        assert self._pool_ids(api, [self._tmpl()]) == {"AT"}
+
+    def test_any_template_off_keeps_new_market(self):
+        api = self._api([self._mkt("NEW", 5), self._mkt("OLD", 100)])
+        tmpls = [self._tmpl(), self._tmpl(skip_new_markets=False)]
+        assert self._pool_ids(api, tmpls) == {"NEW", "OLD"}
+
+    def test_loosest_hours_used(self):
+        # A 要 24h、B 要 72h -> 共享阶段只能按 24h 排，48h 龄的市场得留给 A
+        api = self._api([self._mkt("M48", 48)])
+        tmpls = [self._tmpl(new_market_hours=24), self._tmpl(new_market_hours=72)]
+        assert self._pool_ids(api, tmpls) == {"M48"}
+
+    def test_missing_created_at_kept(self):
+        m = self._mkt("A", 1)
+        del m["created_at"]
+        assert self._pool_ids(self._api([m]), [self._tmpl()]) == {"A"}
+
+    def test_switch_off_keeps_everything(self):
+        api = self._api([self._mkt("NEW", 1)])
+        assert self._pool_ids(api, [self._tmpl(skip_new_markets=False)]) == {"NEW"}
+
+    def test_zero_hours_keeps_everything(self):
+        api = self._api([self._mkt("NEW", 0.1)])
+        assert self._pool_ids(api, [self._tmpl(new_market_hours=0)]) == {"NEW"}
