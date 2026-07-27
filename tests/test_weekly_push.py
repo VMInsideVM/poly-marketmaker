@@ -119,12 +119,22 @@ def test_push_once_per_week_recent7_and_persists():
     m.db.set_last_push_week.assert_called_once_with("2026-07-13")  # 持久化本周周一
 
 
-def test_send_failure_no_persist_and_retries():
+def test_send_failure_no_persist_and_backs_off():
+    """失败不持久化(下次仍会推),但先退避 1 小时——急停期间 30 秒一轮会把日志刷爆。"""
+    import time as _time
+
     m = _mgr()
-    with patch("engine.manager.send_report", side_effect=RuntimeError("net")), patch(
-        "engine.manager.beijing_hour", return_value=10
-    ), patch("engine.manager.beijing_day", return_value="2026-07-17"):
+    with patch(
+        "engine.manager.send_report", side_effect=RuntimeError("net")
+    ) as st, patch("engine.manager.beijing_hour", return_value=10), patch(
+        "engine.manager.beijing_day", return_value="2026-07-17"
+    ):
         m._maybe_push_weekly()
         _join(m)
-    m.db.set_last_push_week.assert_not_called()  # 失败不持久化 -> 下轮重试
+        assert st.call_count == 1
+        assert m._push_retry_after > _time.time()  # 置了退避
+        m._maybe_push_weekly()  # 退避期内再调 -> 直接返回,不再发
+        _join(m)
+        assert st.call_count == 1  # 仍是 1,没有第二次
+    m.db.set_last_push_week.assert_not_called()  # 失败不持久化 -> 退避过后重试
     assert m._pushing is False

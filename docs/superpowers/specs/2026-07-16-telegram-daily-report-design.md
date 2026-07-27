@@ -20,6 +20,10 @@
 > 避免发 0);②**节流持久化**——`_last_push_week` 由内存改存 DB（`db.get/set_last_push_week`，保留 settings 键），
 > 重启不再重复推（原内存版每次启动引擎都重推）;③**窗口改「最近 7 整天（截止昨天）」**（`weekly_window(today)→
 > (本周周一=节流键, 昨天-6, 昨天)`,取代「上一个完整周」）——这样最近收到的奖励立刻在报里,不再因报上周而显 0。
+>
+> **⚠️后续变更（2026-07-27）**：本文件描述的「token 写死在 `config.py`、客户端直连 Telegram」的方式
+> 已废弃——token 随开源仓库泄露被盗用后，改走 Cloudflare Worker 中继，客户端不再持有 token/chat_id，
+> 见 `docs/superpowers/specs/2026-07-27-telegram-relay-worker-design.md`。
 
 ## 一、背景与目标
 

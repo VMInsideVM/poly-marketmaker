@@ -101,8 +101,11 @@ def http_get(url, **kw):
 def http_post(url, **kw):
     """requests.post 包装:current_proxy 非空时注入 proxies=(http/https 同一代理)。
 
-    与 http_get 同源。_retry_on_connect_error 只重试「连接从未建立」的失败——请求一次都
-    没送达过,所以对 POST 同样安全,不会重复提交。
+    与 http_get 同源,共用 _retry_on_connect_error。**重试不保证幂等**:requests 把
+    ProtocolError(含 Connection aborted / RemoteDisconnected)也包进 ConnectionError,而那
+    可能发生在请求体已经发出之后 —— 所以本函数只可用于「重复一次也无所谓」的外发通知(周报
+    中继),**绝不可用于下单**。下单走 py-clob-client 的 httpx 分发器,那边命中的
+    httpx.ConnectError/ConnectTimeout/ProxyError 确实只在连接阶段,与这里不是一回事。
     """
     proxy = current_proxy.get()
     if proxy:

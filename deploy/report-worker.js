@@ -8,7 +8,8 @@
  *   TG_TOKEN     Secret 类型。Telegram bot token。
  *   TG_CHAT_ID   接收周报的 chat id。
  *   CLIENT_KEY   与客户端 config.py 的 REPORT_KEY 相同。不是鉴权凭证，只挡随机扫描。
- *   ENABLED      止损开关。设成 "0" 立即全局停止转发；不设或非 "0" 即为开启。
+ *   ENABLED      止损开关。设成 "0" 全局停止转发（几十秒传播延迟，按下后要发一次测试请求、
+ *                收到 503 才算停住）；不设或非 "0" 即为开启。
  *   ALLOW        钱包地址白名单，逗号分隔、小写。**可选，默认留空 = 不检查**。
  *
  * 安全要点：周报文本在这里拼，客户端只传数字。凡是会原样进入消息的字符串都必须先过关卡 ——
@@ -18,6 +19,10 @@
  */
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// 急停认这些写法(大小写不敏感、去空白)。只认字面 "0" 太脆:出事时在手机上凭直觉填
+// false / off 的人不会得到任何报错,却以为已经停了 —— 这是唯一的应急手段,宁可判宽。
+const OFF_VALUES = new Set(["0", "false", "off", "no", "stop", "disabled"]);
 
 function num(v) {
   const n = Number(v);
@@ -29,10 +34,16 @@ function money(v) {
   return (n >= 0 ? "+" : "") + n.toFixed(2);
 }
 
+// 剥控制字符:C0 + DEL + C1(含 U+0085 NEL) + 零宽/方向标记 + U+2028/2029 行段分隔符 +
+// 双向控制符(U+202A-202E 的 RTL override 能让后续文字倒序显示)+ 不可见操作符 + BOM。
+// 只剥 C0 是不够的 —— 实测 U+2028 在按 Unicode 规则渲染的客户端上就是一个强制换行。
+const CTRL_RE =
+  /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/g;
+
 function label(v) {
-  return String(v ?? "")
-    .replace(/[\u0000-\u001f\u007f]/g, "")
-    .slice(0, 20);
+  // 用 [...s] 按码点切,不用 slice:后者会把 emoji 这类代理对从中间劈开,产出孤立代理,
+  // 轻则乱码、重则 Telegram 400 -> 502 -> 客户端整周重试。
+  return [...String(v ?? "").replace(CTRL_RE, "")].slice(0, 20).join("");
 }
 
 function buildText(p) {
@@ -41,7 +52,8 @@ function buildText(p) {
     "",
     "【每日净利润】",
   ];
-  for (const row of (p.daily_nets || []).slice(0, 7)) {
+  const rows = Array.isArray(p.daily_nets) ? p.daily_nets.slice(0, 7) : [];
+  for (const row of rows) {
     if (!Array.isArray(row) || !DATE_RE.test(String(row[0]))) continue;
     lines.push(`${String(row[0]).slice(5)}  ${money(row[1])}`);
   }
@@ -58,7 +70,7 @@ function buildText(p) {
     "",
     `【累计净利润】(自 ${p.since_date})  ${money(p.cumulative_net)}`
   );
-  const pw = (p.per_wallet || []).slice(0, 50);
+  const pw = Array.isArray(p.per_wallet) ? p.per_wallet.slice(0, 50) : [];
   if (pw.length) {
     lines.push("", "【各钱包本周净利润】");
     for (const w of pw) {
@@ -70,11 +82,11 @@ function buildText(p) {
 
 export default {
   async fetch(req, env) {
-    // 止损总开关,放在一切处理之前:出事时把 ENABLED 设成 "0",转发全停(Cloudflare 变量有
-    // 几十秒传播延迟,不是瞬时的)。部署时不必配这个变量,未设即为开启。
-    // 用 String().trim() 而不是 === "0" 直比:填成 "0 "(多一个空格,手机上很容易)会让急停
-    // **静默失效**,而按下的人以为已经停了——这种失败模式的代价太高,宁可判宽一点。
-    if (String(env.ENABLED ?? "").trim() === "0") {
+    // 止损总开关,放在一切处理之前:出事时把 ENABLED 设成 "0"(或 false/off/no/stop/disabled),
+    // 转发全停。Cloudflare 变量有**几十秒**传播延迟,不是瞬时的 —— 按下之后要发一次测试请求、
+    // 确认收到 503 才算停住(2026-07-27 验收时第一次按下返回 200,就是被这个骗的)。
+    // 部署时不必配这个变量,未设即为开启。
+    if (OFF_VALUES.has(String(env.ENABLED ?? "").trim().toLowerCase())) {
       return new Response("no", { status: 503 });
     }
     if (req.method !== "POST") return new Response("no", { status: 405 });
@@ -121,7 +133,11 @@ export default {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text }),
+          body: JSON.stringify({
+            chat_id: env.TG_CHAT_ID,
+            text,
+            disable_web_page_preview: true,
+          }),
         }
       );
     } catch {

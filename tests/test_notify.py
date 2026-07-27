@@ -67,7 +67,7 @@ def test_empty_wallets_yields_empty_list():
     assert _payload(per_wallet=[])["per_wallet"] == []
 
 
-def test_label_not_sanitised_client_side():
+def test_label_passed_through_verbatim():
     """客户端**不**做清洗:改过客户端的人绕得过去,清洗只在 Worker 侧才有意义。
     这条测试钉住这个分工,免得有人「顺手」在这里加截断而误以为安全。"""
     p = _payload(per_wallet=[{"label": "a" * 50 + "\n<script>", "net": 1}])

@@ -6,7 +6,7 @@
 
 **Architecture:** 客户端只知道一个 Worker URL 和一个非秘密的 `REPORT_KEY`；周报文本在 Worker 侧拼装，客户端只传数字，所以扒出凭证的人最多往模板里塞假数字，无法让 bot 发任意内容。出事时把 Worker 的 `ENABLED` 设成 `0` 即可全局止损，不需要给使用者发新版本。
 
-> **执行中的设计变更（2026-07-27，用户提出）**：`ALLOW` 钱包地址白名单由必填改为**可选、默认留空**，另加 `ENABLED` 止损开关。原因是作者并不知道使用者有哪些钱包地址、而使用者会随时增删，逐个登记维护不起，还会在朋友加了新钱包时让周报无声无息地断掉。Task 2 的代码块与 Task 3 Step 1 的部署清单保留了变更前的形态（本文件是执行记录）；**以 spec 5.1/5.2/5.4 与 `deploy/report-worker.js` 的当前内容为准**。
+> **执行中的设计变更（2026-07-27，用户提出）**：`ALLOW` 钱包地址白名单由必填改为**可选、默认留空**，另加 `ENABLED` 止损开关。原因是作者并不知道使用者有哪些钱包地址、而使用者会随时增删，逐个登记维护不起，还会在朋友加了新钱包时让周报无声无息地断掉。Task 1 Step 4 和 Task 3 Step 4 保留了变更前的形态（本文件是执行记录）；**以 spec 5.1/5.2/5.4 与 `deploy/report-worker.js` 的当前内容为准**。
 
 **Tech Stack:** Python 3.11 / requests / pytest；Cloudflare Workers（原生 JS，无构建步骤、无依赖）。
 
@@ -208,6 +208,7 @@ def http_post(url, **kw):
 #   REPORT_URL  Worker 地址,公开可见
 #   REPORT_KEY  只用来把随机扫描 workers.dev 的爬虫挡在门外,不是鉴权凭证
 # 真正的防线是 Worker 侧的钱包地址白名单(ALLOW),以及「改 Worker 不用发版」这件事本身。
+# ⚠️ 已变更,见顶部说明:ALLOW 后来改为可选、默认留空,真正的止损开关是 ENABLED。
 # 历史:上一版把 bot token 写死在这里,被人从公开仓库扒走盗用(2026-07-27),已 revoke。
 REPORT_URL = "https://REPLACE-ME.workers.dev"
 REPORT_KEY = "REPLACE-ME"
@@ -439,6 +440,8 @@ git commit -m "feat(notify): 周报改走中继 Worker,客户端不再持有 Tel
  *   TG_CHAT_ID   接收周报的 chat id。
  *   CLIENT_KEY   与客户端 config.py 的 REPORT_KEY 相同。不是鉴权凭证，只挡随机扫描。
  *   ALLOW        允许的钱包地址，逗号分隔，小写。清空它即可全局止损（30 秒生效，不用发版）。
+ *   ⚠️ 已变更，见本文件顶部「执行中的设计变更」说明：ALLOW 后来改为可选、默认留空，
+ *      真正的止损开关是 ENABLED。
  *
  * 安全要点：周报文本在这里拼，客户端只传数字。凡是会原样进入消息的字符串都必须先过关卡 ——
  * 三个日期字段用正则校验（不匹配整条拒绝），label 来自使用者可编辑的钱包备注、是自由文本，
@@ -633,6 +636,10 @@ print("sent")
 - [ ] **Step 4: 更新 `CLAUDE.md`**
 
 在 Architecture 段落里（`**Per-wallet HTTP proxy (api/proxy.py).**` 那一段之后）插入新的一段：
+
+⚠️ 已变更，见本文件顶部「执行中的设计变更」说明：下面这段是当时写入 CLAUDE.md 的原文，
+`allowlist (ALLOW, clearing it stops everything within seconds)` 那句已过时——ALLOW 后来
+改为可选、默认留空，真正的止损开关是 ENABLED；以 CLAUDE.md 当前内容为准。
 
 ```
 **Weekly report push goes through a relay, never Telegram directly.** `engine/notify.py`

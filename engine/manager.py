@@ -900,6 +900,8 @@ class EngineManager:
         try:
             if self._pushing:
                 return
+            if time.time() < getattr(self, "_push_retry_after", 0):
+                return  # 上次推送失败,退避期内不重试(见 _send_report)
             now = time.time()
             if beijing_hour(now) < PUSH_HOUR:
                 return
@@ -965,7 +967,11 @@ class EngineManager:
             send_report(payload, proxy)
             self.db.set_last_push_week(week_key)
         except Exception as e:
-            logger.warning("周报推送失败: %s", e)
+            # 退避 1 小时再试。这个循环 30 秒一轮,而「持续失败一整周」是设计内的正常状态
+            # (作者按下 Worker 的 ENABLED 急停时就是如此):不退避的话日志会被刷爆(日志文件
+            # 正是用户反馈时发给作者的那个),还会和攻击者一起烧同一份 Cloudflare 免费额度。
+            self._push_retry_after = time.time() + 3600
+            logger.warning("周报推送失败(1 小时内不再重试): %s", e)
         finally:
             self._pushing = False
 

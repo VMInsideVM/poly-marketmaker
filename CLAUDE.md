@@ -56,7 +56,7 @@ and renders the message text itself. The client never sees the token or the chat
 earlier version hardcoded the token in `config.py`, it was scraped from the public repo and
 abused (2026-07-27, token since revoked). `REPORT_URL` / `REPORT_KEY` in `config.py` ship
 with the source and are **not secrets**: the real control is the Worker's `ENABLED` kill
-switch (set it to `0` and forwarding stops within seconds, no client release needed). The
+switch (set it to `0`; propagation takes tens of seconds, not instant — after flipping it, send one test request and confirm you get a 503 before considering it stopped; no client release needed). The
 wallet-address allowlist (`ALLOW`) is **optional and empty by default** — the author does
 not know which wallets the users run and they add and remove them freely, so requiring a
 registry would be unmaintainable and would silently break the report whenever someone adds
