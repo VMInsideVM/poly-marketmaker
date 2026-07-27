@@ -2,9 +2,14 @@
 
 import time
 import pytest
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from unittest.mock import MagicMock
-from engine.scanner import MarketScanner, ScanSuperseded
+from engine.scanner import (
+    MarketScanner,
+    ScanSuperseded,
+    market_age_hours,
+    loosest_new_market_hours,
+)
 
 
 def _tier(size, shares=None, **over):
@@ -20,6 +25,13 @@ def _tier(size, shares=None, **over):
     }
     t.update(over)
     return t
+
+
+def _created_hours_ago(hours: float) -> str:
+    """构造「hours 小时前创建」的 created_at（UTC，奖励端点的格式）。"""
+    return datetime.fromtimestamp(time.time() - hours * 3600, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
 
 
 def _future_date(days=10):
@@ -1183,3 +1195,62 @@ class TestPrefilterNullPrice:
         pool = [self._candidate("A", 0.30), self._candidate("B", None)]
         out = scanner.prefilter_for_template(pool, self._template(), "0xW")
         assert {m["condition_id"] for m in out} == {"A"}  # B 的 null 价按 0 落带外,不崩
+
+
+class TestMarketAgeHours:
+    """市场创建至今的小时数。created_at 是真正的 UTC 时刻，解析口径与 end_date（日历日）不同。"""
+
+    def _utc(self, y, mo, d, h=0, mi=0, s=0):
+        return datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc).timestamp()
+
+    def test_six_digit_fraction(self):
+        now = self._utc(2026, 7, 23, 23, 10, 3)
+        assert market_age_hours("2026-07-22T23:10:03.086269Z", now) == pytest.approx(
+            24.0
+        )
+
+    def test_two_digit_fraction(self):
+        # fromisoformat 只认 3/6 位微秒，实测存在 2 位的样本 -> 必须靠正则丢掉小数秒
+        now = self._utc(2026, 7, 23, 23, 10, 3)
+        assert market_age_hours("2026-07-22T23:10:03.08Z", now) == pytest.approx(24.0)
+
+    def test_no_fraction(self):
+        now = self._utc(2026, 7, 23, 23, 10, 3)
+        assert market_age_hours("2026-07-22T23:10:03Z", now) == pytest.approx(24.0)
+
+    def test_missing_or_malformed_returns_none(self):
+        now = self._utc(2026, 7, 23)
+        assert market_age_hours("", now) is None
+        assert market_age_hours(None, now) is None
+        assert market_age_hours("not-a-date", now) is None
+
+    def test_parsed_as_utc_not_local(self):
+        """按 UTC 解析。套 _parse_end_date（naive 本地还原）会在北京机器上差 8 小时。"""
+        now = self._utc(2026, 7, 23, 0, 0, 0)
+        assert market_age_hours("2026-07-23T00:00:00Z", now) == pytest.approx(0.0)
+
+    def test_space_separator(self):
+        now = self._utc(2026, 7, 23, 0, 0, 0)
+        assert market_age_hours("2026-07-22 00:00:00Z", now) == pytest.approx(24.0)
+
+
+class TestLoosestNewMarketHours:
+    """发现阶段是钱包无关的共享阶段，只能用「所有模板都开了」的最宽松门槛排除。"""
+
+    def _t(self, on, hrs):
+        return {"skip_new_markets": on, "new_market_hours": hrs}
+
+    def test_all_on_takes_min(self):
+        assert loosest_new_market_hours([self._t(True, 48), self._t(True, 24)]) == 24
+
+    def test_any_off_returns_zero(self):
+        assert loosest_new_market_hours([self._t(True, 48), self._t(False, 24)]) == 0
+
+    def test_empty_returns_zero(self):
+        assert loosest_new_market_hours([]) == 0
+
+    def test_hours_none_treated_as_zero(self):
+        assert loosest_new_market_hours([self._t(True, None)]) == 0
+
+    def test_missing_keys_treated_as_off(self):
+        assert loosest_new_market_hours([{}]) == 0

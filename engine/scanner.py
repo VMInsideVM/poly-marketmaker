@@ -20,7 +20,7 @@ candidate during fetch_candidates.
 import re
 import time
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from engine.categories import (
     included_union,
@@ -122,6 +122,42 @@ def _in_settlement_window(end_ts: float, min_days, max_days) -> bool:
     if max_days is not None and d > max_days:
         return False
     return True
+
+
+_CREATED_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})")
+
+
+def market_age_hours(created_at: str, now: float):
+    """市场创建至今的小时数；created_at 缺失/解析不出返回 None（调用方 fail-open 保留）。
+
+    created_at 是真正的 UTC 时刻（奖励端点给的形如 '2026-07-22T23:10:03.086269Z'），
+    **不能**套 _parse_end_date —— 那个是刻意按 naive 本地时区还原的（end_date 的语义是
+    「日历日」，一去一回时区抵消），拿来解析这里会平白差一个时区，把「25 小时前创建」
+    算成「17 小时前」。小数秒直接丢掉（最多差 1 秒，无意义），顺带绕开
+    datetime.fromisoformat 只认 3 位或 6 位微秒的限制（实测存在 2 位的样本）。
+    非 Z 结尾的时区偏移不处理、一律按 UTC：实测样本 100% 带 Z，真出现别的格式时正则
+    仍匹配得上，误差最大一个时区。
+    """
+    m = _CREATED_RE.match((created_at or "").strip())
+    if not m:
+        return None
+    ts = datetime(*map(int, m.groups()), tzinfo=timezone.utc).timestamp()
+    return (now - ts) / 3600.0
+
+
+def loosest_new_market_hours(templates) -> float:
+    """发现阶段可安全排除的「新市场」门槛（小时）。
+
+    发现阶段是钱包无关的共享阶段，只有**每个**模板都开了 skip_new_markets 才能在这里
+    排除（否则会把没开该开关的模板要的市场也一起剔掉）；此时取各模板 N 的最小值（最
+    宽松）。任一模板没开 -> 0（不排除任何市场）；空列表 -> 0。
+    """
+    hours = []
+    for t in templates:
+        if not t.get("skip_new_markets"):
+            return 0.0
+        hours.append(float(t.get("new_market_hours") or 0))
+    return min(hours) if hours else 0.0
 
 
 class MarketScanner:
