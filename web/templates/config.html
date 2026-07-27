@@ -80,6 +80,15 @@
                 <span class="hint">与上项合成结算窗口：只做今天填 0/0，今天+明天填 0/1，只做明天填 1/1，两天以后填 2/空</span>
             </div>
             <div class="form-group">
+                <label><input type="checkbox" id="skip-new-markets"> 跳过新建市场</label>
+                <span class="hint">勾选后，创建时间不足下方小时数的市场不做市</span>
+            </div>
+            <div class="form-group">
+                <label>新市场保护期（小时）</label>
+                <input type="number" name="new_market_hours" step="1" min="0">
+                <span class="hint">市场创建满这么多小时之后才做；0=不筛。市场发现每 4 小时一轮，实际生效可能晚最多 4 小时</span>
+            </div>
+            <div class="form-group">
                 <label>止损方式</label>
                 <select name="stop_loss_mode" id="stop-loss-mode" onchange="updateStopMode()">
                     <option value="percent">按比例（占成本 %）</option>
@@ -318,6 +327,9 @@ function loadStrategy(tid) {
             if (input) input.value = data[key];
         });
         renderTiers(data.size_tiers || []);
+        // checkbox 不能靠上面的 input.value 回填（那只会设 value 属性，不动 checked）
+        const skipNew = document.getElementById('skip-new-markets');
+        if (skipNew) skipNew.checked = !!data.skip_new_markets;
         updateStopMode();
     });
 
@@ -497,6 +509,10 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     data.stop_loss_mode = (document.getElementById('stop-loss-mode') || {}).value || 'percent';
     data.take_profit_mode = (document.getElementById('take-profit-mode') || {}).value || 'maker';
     data.liquidate_target_mode = (document.getElementById('liquidate-target-mode') || {}).value || 'balance';
+    // checkbox 同 select，不在 input[type=number] 里，单独收。
+    data.skip_new_markets = !!(document.getElementById('skip-new-markets') || {}).checked;
+    // 小时数留空 -> parseFloat('')=NaN，归 0（= 不筛），别让 NaN 变成 JSON null。
+    if (isNaN(data.new_market_hours)) data.new_market_hours = 0;
     const st = serializeTiers();
     if (st.error) { alert(st.error); return; }
     data.size_tiers = st.tiers;
