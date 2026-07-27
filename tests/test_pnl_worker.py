@@ -26,7 +26,7 @@ def test_first_call_backfills_from_start_date():
     ):
         w._maybe_rebuild_pnl()
         _join(w)
-    rb.assert_called_once_with(api, db, "0xW", "2026-07-01", "2026-07-16")
+    rb.assert_called_once_with(api, db, "0xW", "2026-05-17", "2026-07-16")
 
 
 def test_same_day_second_call_skips():

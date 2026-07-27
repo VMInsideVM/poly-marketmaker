@@ -926,3 +926,14 @@ class TestRewardUpdateCallbackWiring:
         monitor = OrderMonitor(MagicMock(), MagicMock(), "0xW", on_reward_update=cb)
         monitor._notify_reward_update("0xabc", 5.0)  # 写回失败绝不能中断交易流程
         cb.assert_called_once_with("0xabc", 5.0)
+
+
+def test_pnl_start_date_is_project_start():
+    """台账补漏起点 = 项目首次提交日（27cc9bc，2026-05-17），不是当初的 2026-07-01。
+
+    rebuild_wallet_pnl 本来就拉全量 activity/trades、不带时间过滤，_date_range 只决定
+    往 daily_pnl 写哪些天 —— 前移没有网络代价，只是多写几十行本地记录。
+    """
+    from engine.manager import PNL_START_DATE
+
+    assert PNL_START_DATE == "2026-05-17"
