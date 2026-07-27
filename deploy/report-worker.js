@@ -80,6 +80,7 @@ export default {
     } catch {
       return new Response("no", { status: 400 });
     }
+    if (!p || typeof p !== "object") return new Response("no", { status: 400 });
 
     // 白名单:senders 里任意一个地址在 ALLOW 中即放行(使用者增删钱包不该让推送失效)。
     const allow = new Set(
@@ -98,14 +99,21 @@ export default {
       if (!DATE_RE.test(String(d))) return new Response("no", { status: 400 });
     }
 
-    const resp = await fetch(
-      `https://api.telegram.org/bot${env.TG_TOKEN}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text: buildText(p) }),
-      }
-    );
+    const text = buildText(p);
+    let resp;
+    try {
+      resp = await fetch(
+        `https://api.telegram.org/bot${env.TG_TOKEN}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text }),
+        }
+      );
+    } catch {
+      // 网络层失败(DNS/连接):按转发失败处理,绝不把异常抛给 Cloudflare 默认处理。
+      return new Response("no", { status: 502 });
+    }
     // 只回状态,不回显 Telegram 的响应体(可能含 token 相关描述)。
     return new Response(resp.ok ? "ok" : "no", { status: resp.ok ? 200 : 502 });
   },
