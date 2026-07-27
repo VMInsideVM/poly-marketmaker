@@ -172,8 +172,18 @@ force push，代价大），但既已 revoke，留着无害。
 
 `tests/test_weekly_push.py` 里对 `format_weekly_report` / `send_telegram` 的引用改成新函数。
 
-**Worker 的 JS 排版没有单元测试覆盖**（跨语言，为它搭 JS 测试环境不值得）。验收方式是部署后由作者
-手工触发一次真实周报，肉眼确认排版、数字、中文都对。这一步写进实施计划，不能省。
+Worker 侧有 `deploy/report-worker.test.mjs`（`node --test "deploy/*.test.mjs"`，用 node 内置的
+`node:test` + `node:assert`，stub 掉全局 `fetch`，零依赖、无构建步骤），覆盖急停的多种写法、
+方法/鉴权、畸形 body、日期格式、`ALLOW` 空与不空、label 的控制字符剥离与按码点截断、`chat_id`
+不可被 payload 覆盖。
+
+> 这一节最初写的是「为它搭 JS 测试环境不值得，靠人工验收」。那个判断是在**没试过**的前提下做的：
+> 实际成本就是一个文件，而它能把 label 清洗漏字符、急停只认 `"0"` 这类回归挡在「粘进 Cloudflare
+> 控制台」之前——两者都是 2026-07-27 整分支审查真找出来的。判断已推翻，记录在此。
+
+人工验收仍然不能省，但换了内容：部署后由作者触发一次真实周报，肉眼确认排版、数字、中文都对；
+再验一次急停（`ENABLED=0` → 收到 503 且 Telegram 收不到 → 解除后恢复）。自动化测试跑不到
+「Cloudflare 环境变量是否真配对了」和「Telegram 那侧渲染成什么样」这两件事。
 
 ## 八、不改的东西
 

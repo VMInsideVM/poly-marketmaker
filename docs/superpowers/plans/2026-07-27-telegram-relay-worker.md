@@ -6,7 +6,7 @@
 
 **Architecture:** 客户端只知道一个 Worker URL 和一个非秘密的 `REPORT_KEY`；周报文本在 Worker 侧拼装，客户端只传数字，所以扒出凭证的人最多往模板里塞假数字，无法让 bot 发任意内容。出事时把 Worker 的 `ENABLED` 设成 `0` 即可全局止损，不需要给使用者发新版本。
 
-> **执行中的设计变更（2026-07-27，用户提出）**：`ALLOW` 钱包地址白名单由必填改为**可选、默认留空**，另加 `ENABLED` 止损开关。原因是作者并不知道使用者有哪些钱包地址、而使用者会随时增删，逐个登记维护不起，还会在朋友加了新钱包时让周报无声无息地断掉。Task 1 Step 4 和 Task 3 Step 4 保留了变更前的形态（本文件是执行记录）；**以 spec 5.1/5.2/5.4 与 `deploy/report-worker.js` 的当前内容为准**。
+> **执行中的设计变更（2026-07-27，用户提出）**：`ALLOW` 钱包地址白名单由必填改为**可选、默认留空**，另加 `ENABLED` 止损开关。原因是作者并不知道使用者有哪些钱包地址、而使用者会随时增删，逐个登记维护不起，还会在朋友加了新钱包时让周报无声无息地断掉。Task 1 Step 4、Task 2 Step 1、Task 3 Step 4 三处保留了变更前的形态（本文件是执行记录，各处已就地标注 ⚠️ 已变更）；**以 spec 5.1/5.2/5.4 与 `deploy/report-worker.js` 的当前内容为准**。另有一处判断被推翻：Task 2 原写「不为 Worker 搭 JS 测试环境」，现已新增 `deploy/report-worker.test.mjs`，见 spec 第七节。
 
 **Tech Stack:** Python 3.11 / requests / pytest；Cloudflare Workers（原生 JS，无构建步骤、无依赖）。
 
@@ -423,6 +423,8 @@ git commit -m "feat(notify): 周报改走中继 Worker,客户端不再持有 Tel
 - Produces: 一个可直接粘进 Cloudflare 控制台的 Worker；Task 3 部署它
 
 这个文件没有 Python 测试覆盖（跨语言，为它搭 JS 测试环境不值得）。验收在 Task 3 用一次真实推送做，所以这一步只需把代码写对并确认语法。
+
+> ⚠️ **已变更**：这个判断后来被推翻了。整分支审查实测「零依赖的 `node:test` harness 就能覆盖整条校验链，成本就是一个文件」，且它当场挡下了 label 清洗漏字符、急停只认 `"0"` 两个真实回归。现已新增 `deploy/report-worker.test.mjs`（20 个用例，`node --test "deploy/*.test.mjs"`）。见 spec 第七节。
 
 - [ ] **Step 1: 建目录与文件**
 
