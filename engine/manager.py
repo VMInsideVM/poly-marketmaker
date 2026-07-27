@@ -893,7 +893,7 @@ class EngineManager:
 
     def _maybe_push_weekly(self):
         """每周 PUSH_HOUR 点后推「最近 7 整天(截止昨天)」盈亏周报到 Telegram(全局一周一次)。
-        目标(token/chat)写死 config、始终开启。组装(本地 DB 读,快)在 loop 线程,**发送放后台线程**。
+        目标(token/chat)只在中继 Worker 侧、客户端不持有;始终开启。组装(本地 DB 读,快)在 loop 线程,**发送放后台线程**。
         节流键=本周周一日期,**持久化在 DB**(`_last_push_week` 内存曾致每次重启重推);过了 PUSH_HOUR、
         本周还没推、**且台账已爬好(daily_pnl 非空,先统计完再播报)**才推;`_pushing` 防重入。
         纯外发,不改交易逻辑。整体 try/except、绝不抛进 loop。"""

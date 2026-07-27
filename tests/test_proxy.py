@@ -2,7 +2,14 @@
 
 import pytest
 from unittest.mock import patch
-from api.proxy import ProxyUnreachable, parse_proxy, http_get, probe_proxy, use_proxy
+from api.proxy import (
+    ProxyUnreachable,
+    parse_proxy,
+    http_get,
+    http_post,
+    probe_proxy,
+    use_proxy,
+)
 
 
 def test_blank_returns_none():
@@ -145,6 +152,20 @@ def test_http_get_none_proxy_no_injection():
     with patch("api.proxy.requests.get") as g:
         with use_proxy(None):
             http_get("http://x")
+    assert "proxies" not in g.call_args.kwargs
+
+
+def test_http_post_injects_proxies_inside_use_proxy():
+    p = "http://p:1"
+    with patch("api.proxy.requests.post") as g:
+        with use_proxy(p):
+            http_post("http://x")
+    assert g.call_args.kwargs["proxies"] == {"http": p, "https": p}
+
+
+def test_http_post_no_proxy_outside_context():
+    with patch("api.proxy.requests.post") as g:
+        http_post("http://x")
     assert "proxies" not in g.call_args.kwargs
 
 
