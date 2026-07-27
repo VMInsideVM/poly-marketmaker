@@ -989,6 +989,43 @@ class TestPrefilterForTemplate:
         pool = [self._candidate("A"), self._candidate("B", price=0.95)]
         assert self._ids(scanner, pool, self._template()) == {"A"}
 
+    def _aged(self, cid, hours, **over):
+        m = self._candidate(cid, **over)
+        m["created_at"] = _created_hours_ago(hours)
+        return m
+
+    def test_drops_new_market(self):
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5), self._aged("OLD", 100)]
+        tmpl = self._template(skip_new_markets=True, new_market_hours=24)
+        assert self._ids(scanner, pool, tmpl) == {"OLD"}
+
+    def test_keeps_new_market_when_switch_off(self):
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5)]
+        tmpl = self._template(skip_new_markets=False, new_market_hours=24)
+        assert self._ids(scanner, pool, tmpl) == {"NEW"}
+
+    def test_keeps_new_market_when_hours_zero(self):
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 0.1)]
+        tmpl = self._template(skip_new_markets=True, new_market_hours=0)
+        assert self._ids(scanner, pool, tmpl) == {"NEW"}
+
+    def test_keeps_market_without_created_at(self):
+        # fail-open:created_at 取不到就保留（与结算日解析不出即保留同口径）
+        scanner = self._scanner()
+        tmpl = self._template(skip_new_markets=True, new_market_hours=24)
+        assert self._ids(scanner, [self._candidate("A")], tmpl) == {"A"}
+
+    def test_each_template_uses_own_hours(self):
+        scanner = self._scanner()
+        pool = [self._aged("M48", 48)]
+        strict = self._template(skip_new_markets=True, new_market_hours=72)
+        loose = self._template(skip_new_markets=True, new_market_hours=24)
+        assert self._ids(scanner, pool, strict) == set()
+        assert self._ids(scanner, pool, loose) == {"M48"}
+
 
 class TestDiscoveryTierWindowGating:
     """发现阶段:拉「精确奖励」(每市场一次网络、0.78s/次)前,先用不需要订单簿也不需要

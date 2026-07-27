@@ -488,6 +488,9 @@ class MarketScanner:
         included = set(template.get("included_categories", []) or [])
         include_other = bool(template.get("include_other", False))
         tier_sizes = enabled_sizes(template.get("size_tiers") or [])
+        skip_new = bool(template.get("skip_new_markets"))
+        new_hours = float(template.get("new_market_hours") or 0)
+        now = time.time()
 
         survivors = []
         for market in candidate_pool:
@@ -501,6 +504,11 @@ class MarketScanner:
             # 结算窗口 [min_days, max_days](整天)。无法解析结算日 -> 保留(fail-open)。
             if end_ts and not _in_settlement_window(end_ts, min_days, max_days):
                 continue
+            if skip_new and new_hours:
+                # 创建不足 new_hours 小时的市场不做;created_at 取不到 -> fail-open 保留。
+                age = market_age_hours(market.get("created_at", ""), now)
+                if age is not None and age < new_hours:
+                    continue
             if self.db.is_in_cooldown(wallet_address, market.get("condition_id", "")):
                 continue  # 该钱包对此市场仍在冷却(与旧 scan 口径一致)
             # 档位模块精确匹配:最低份额必须等于某个已启用模块的档位值,否则不做。
