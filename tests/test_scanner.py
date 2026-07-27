@@ -1224,6 +1224,13 @@ class TestMarketAgeHours:
         assert market_age_hours(None, now) is None
         assert market_age_hours("not-a-date", now) is None
 
+    def test_out_of_range_values_return_none(self):
+        """形状合法但取值越界 -> 同样 fail-open 返回 None，绝不抛。"""
+        now = self._utc(2026, 7, 23)
+        assert market_age_hours("0000-00-00T00:00:00Z", now) is None
+        assert market_age_hours("2026-13-45T00:00:00Z", now) is None
+        assert market_age_hours("2026-07-23T99:00:00Z", now) is None
+
     def test_parsed_as_utc_not_local(self):
         """按 UTC 解析。套 _parse_end_date（naive 本地还原）会在北京机器上差 8 小时。"""
         now = self._utc(2026, 7, 23, 0, 0, 0)

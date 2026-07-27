@@ -137,11 +137,16 @@ def market_age_hours(created_at: str, now: float):
     datetime.fromisoformat 只认 3 位或 6 位微秒的限制（实测存在 2 位的样本）。
     非 Z 结尾的时区偏移不处理、一律按 UTC：实测样本 100% 带 Z，真出现别的格式时正则
     仍匹配得上，误差最大一个时区。
+    形状合法但取值越界的串(月 13、日 45、"0000-00-00" 这类零值哨兵)一律按解析不出处理,
+    返回 None —— 绝不让一条畸形 created_at 掀翻整轮扫描。
     """
     m = _CREATED_RE.match((created_at or "").strip())
     if not m:
         return None
-    ts = datetime(*map(int, m.groups()), tzinfo=timezone.utc).timestamp()
+    try:
+        ts = datetime(*map(int, m.groups()), tzinfo=timezone.utc).timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None  # 形状合法但取值越界(月 13、日 45、零值哨兵…):同样按不可知处理
     return (now - ts) / 3600.0
 
 
