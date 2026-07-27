@@ -55,9 +55,12 @@ POSTs a structured payload (numbers only, no prose) to a Cloudflare Worker
 and renders the message text itself. The client never sees the token or the chat id — an
 earlier version hardcoded the token in `config.py`, it was scraped from the public repo and
 abused (2026-07-27, token since revoked). `REPORT_URL` / `REPORT_KEY` in `config.py` ship
-with the source and are **not secrets**: the real controls are the Worker's wallet-address
-allowlist (`ALLOW`, clearing it stops everything within seconds) and the fact that changing
-the Worker needs no client release. Two invariants the Worker must keep: every string that
+with the source and are **not secrets**: the real control is the Worker's `ENABLED` kill
+switch (set it to `0` and forwarding stops within seconds, no client release needed). The
+wallet-address allowlist (`ALLOW`) is **optional and empty by default** — the author does
+not know which wallets the users run and they add and remove them freely, so requiring a
+registry would be unmaintainable and would silently break the report whenever someone adds
+a wallet; fill it only when tightening after an incident. Two invariants the Worker must keep: every string that
 reaches the message is either a date matched against `^\d{4}-\d{2}-\d{2}$` (whole request
 rejected otherwise) or a `label` stripped of control characters and truncated to 20 chars —
 `label` is a user-editable wallet remark, i.e. free text, and skipping that step hands back

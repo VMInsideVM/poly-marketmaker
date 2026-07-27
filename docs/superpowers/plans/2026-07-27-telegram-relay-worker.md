@@ -4,7 +4,9 @@
 
 **Goal:** 把每周盈亏周报的推送链路从「客户端直连 Telegram（token 写死在源码里）」改成「客户端 POST 结构化数据给 Cloudflare Worker，由 Worker 用只存在它环境变量里的 token 转发」，使 Telegram token 一次都不出现在分发出去的程序里。
 
-**Architecture:** 客户端只知道一个 Worker URL 和一个非秘密的 `REPORT_KEY`；周报文本在 Worker 侧拼装，客户端只传数字，所以扒出凭证的人最多往模板里塞假数字，无法让 bot 发任意内容。Worker 侧用钱包地址白名单挡住陌生流量，出事时清空白名单即可止损，不需要给使用者发新版本。
+**Architecture:** 客户端只知道一个 Worker URL 和一个非秘密的 `REPORT_KEY`；周报文本在 Worker 侧拼装，客户端只传数字，所以扒出凭证的人最多往模板里塞假数字，无法让 bot 发任意内容。出事时把 Worker 的 `ENABLED` 设成 `0` 即可全局止损，不需要给使用者发新版本。
+
+> **执行中的设计变更（2026-07-27，用户提出）**：`ALLOW` 钱包地址白名单由必填改为**可选、默认留空**，另加 `ENABLED` 止损开关。原因是作者并不知道使用者有哪些钱包地址、而使用者会随时增删，逐个登记维护不起，还会在朋友加了新钱包时让周报无声无息地断掉。Task 2 的代码块与 Task 3 Step 1 的部署清单保留了变更前的形态（本文件是执行记录）；**以 spec 5.1/5.2/5.4 与 `deploy/report-worker.js` 的当前内容为准**。
 
 **Tech Stack:** Python 3.11 / requests / pytest；Cloudflare Workers（原生 JS，无构建步骤、无依赖）。
 
@@ -578,11 +580,13 @@ git commit -m "feat(deploy): 周报中继 Worker(token 只存环境变量,白名
 
 1. dash.cloudflare.com → Workers & Pages → Create → Create Worker → 起个名字 → Deploy（先部署默认模板）。
 2. Edit code → 全选删掉 → 粘贴 `deploy/report-worker.js` 的内容 → Deploy。
-3. Settings → Variables and Secrets，加四个：
+3. Settings → Variables and Secrets，加**三个**：
    - `TG_TOKEN`：类型选 **Secret**。值是 BotFather 现在**新生成**的 token（不要用任何贴过、发过、进过仓库的 token）。
    - `TG_CHAT_ID`：接收周报的 chat id。
    - `CLIENT_KEY`：随机字符串，比如 `python -c "import secrets;print(secrets.token_hex(16))"` 生成的 32 位十六进制。
-   - `ALLOW`：所有要放行的钱包地址，逗号分隔，全小写。
+
+   另两个变量平时不配：`ENABLED`（止损开关，出事时才加、设成 `0`）、`ALLOW`（钱包地址白名单，
+   留空即不检查——作者并不知道使用者有哪些钱包地址，而且他们会随时增删，见 spec 5.1）。
 4. 记下 Worker 的 URL（形如 `https://<名字>.<子域>.workers.dev`）。
 
 - [ ] **Step 2: 填进 `config.py`**
@@ -620,7 +624,9 @@ print("sent")
 4. `【累计净利润】(自 2026-05-17)  +123.45`。
 5. 各钱包两行，中文备注「主号」没有乱码。
 
-再验一次白名单确实生效：把 `senders` 换成一个不在 `ALLOW` 里的地址重跑，应该报 `HTTP 403` 且 Telegram 收不到任何东西。
+再验一次**止损开关**确实管用（这是出事时唯一的手段，没验过等于没有）：到 Cloudflare 加一个变量
+`ENABLED = 0` 并 Deploy，重跑上面的脚本，应该报 `HTTP 503` 且 Telegram 收不到任何东西；然后把
+`ENABLED` 删掉或改成 `1`，再跑一次确认恢复正常。
 
 删掉临时脚本。**它含真实钱包地址，不要留在仓库里，也不要提交。**
 

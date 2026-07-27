@@ -4,11 +4,12 @@
  * 客户端 POST 结构化周报数据到这里，本 Worker 用只存在环境变量里的 Telegram token 转发。
  * 客户端一概不持有 token / chat_id，所以扒源码或反编译 exe 都拿不到它们。
  *
- * 环境变量（Cloudflare 控制台 Settings → Variables）：
+ * 环境变量（Cloudflare 控制台 Settings → Variables）。前三个必填，后两个平时不用配：
  *   TG_TOKEN     Secret 类型。Telegram bot token。
  *   TG_CHAT_ID   接收周报的 chat id。
  *   CLIENT_KEY   与客户端 config.py 的 REPORT_KEY 相同。不是鉴权凭证，只挡随机扫描。
- *   ALLOW        允许的钱包地址，逗号分隔，小写。清空它即可全局止损（30 秒生效，不用发版）。
+ *   ENABLED      止损开关。设成 "0" 立即全局停止转发；不设或非 "0" 即为开启。
+ *   ALLOW        钱包地址白名单，逗号分隔、小写。**可选，默认留空 = 不检查**。
  *
  * 安全要点：周报文本在这里拼，客户端只传数字。凡是会原样进入消息的字符串都必须先过关卡 ——
  * 三个日期字段用正则校验（不匹配整条拒绝），label 来自使用者可编辑的钱包备注、是自由文本，
@@ -69,6 +70,9 @@ function buildText(p) {
 
 export default {
   async fetch(req, env) {
+    // 止损总开关,放在一切处理之前:出事时把 ENABLED 设成 "0",转发立刻全停(30 秒生效、
+    // 不用发版、不影响任何人的交易)。部署时不必配这个变量,未设即为开启。
+    if (env.ENABLED === "0") return new Response("no", { status: 503 });
     if (req.method !== "POST") return new Response("no", { status: 405 });
     if (req.headers.get("x-mm-key") !== env.CLIENT_KEY) {
       return new Response("no", { status: 403 });
@@ -82,16 +86,22 @@ export default {
     }
     if (!p || typeof p !== "object") return new Response("no", { status: 400 });
 
-    // 白名单:senders 里任意一个地址在 ALLOW 中即放行(使用者增删钱包不该让推送失效)。
-    const allow = new Set(
-      String(env.ALLOW || "")
-        .split(",")
-        .map((a) => a.trim().toLowerCase())
-        .filter(Boolean)
-    );
-    const senders = Array.isArray(p.senders) ? p.senders : [];
-    if (!senders.some((a) => allow.has(String(a).toLowerCase()))) {
-      return new Response("no", { status: 403 });
+    // 白名单**可选**:留空(默认)= 不做地址检查,只认 CLIENT_KEY。作者并不知道使用者有哪些
+    // 钱包地址,而且他们会随时导入/删除,要求逐个登记等于派一个维护不起的活,还会在朋友加了
+    // 新钱包时让周报无声无息地断掉。填了才逐个校验(senders 里任意一个命中即放行),留给
+    // 「出事之后想收紧」时用——那时从正常收到的周报里就能看出合法地址长什么样。
+    const allowRaw = String(env.ALLOW || "").trim();
+    if (allowRaw) {
+      const allow = new Set(
+        allowRaw
+          .split(",")
+          .map((a) => a.trim().toLowerCase())
+          .filter(Boolean)
+      );
+      const senders = Array.isArray(p.senders) ? p.senders : [];
+      if (!senders.some((a) => allow.has(String(a).toLowerCase()))) {
+        return new Response("no", { status: 403 });
+      }
     }
 
     // 三个会原样进消息的日期字段:不合格式整条拒绝(否则等于任意文本注入)。

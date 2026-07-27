@@ -104,12 +104,20 @@ PUSH_HOUR = 9  # 保留:客户端决定几点后推
 | `TG_TOKEN` | Secret | Telegram bot token，部署时新生成，全程不经过仓库 |
 | `TG_CHAT_ID` | 普通 | 作者的 chat id |
 | `CLIENT_KEY` | 普通 | 与客户端 `REPORT_KEY` 相同；随机生成即可（如 32 位十六进制） |
-| `ALLOW` | 普通 | 允许的钱包地址，逗号分隔，小写 |
+| `ENABLED` | 普通 | 止损开关：设成 `0` 立即全局停止转发。不设即为开启，**部署时不必配** |
+| `ALLOW` | 普通 | 钱包地址白名单，逗号分隔、小写。**可选，默认留空 = 不检查** |
+
+前三个必填，后两个平时不用配。
+
+`ALLOW` 之所以不是必填：作者并不知道使用者有哪些钱包地址，而使用者会随时导入新钱包、删除旧钱包。
+要求逐个登记等于派一个维护不起的活，还会在朋友加了新钱包时让周报无声无息地断掉。这道防线的价值
+撑不起它的维护成本。它留给「出事之后想收紧」时用——那时从正常收到的周报里就能看出合法地址长什么样。
 
 ### 5.2 校验链
 
-必须 POST → `X-MM-Key` 与 `CLIENT_KEY` 相等 → `senders` 与 `ALLOW` 有交集 → payload 结构合法
-→ 清洗字段 → 拼文本 → 调 Telegram `sendMessage`。任何一步不过就返回 4xx 且不转发。
+`ENABLED != "0"` → 必须 POST → `X-MM-Key` 与 `CLIENT_KEY` 相等 → payload 是对象 →
+（`ALLOW` 非空时）`senders` 与 `ALLOW` 有交集 → 三个日期字段格式合法 → 清洗字段 → 拼文本
+→ 调 Telegram `sendMessage`。任何一步不过就返回 4xx/5xx 且不转发。
 
 响应体只回 `ok` / `no`，不回显任何环境变量内容。
 
@@ -125,16 +133,21 @@ PUSH_HOUR = 9  # 保留:客户端决定几点后推
 
 ### 5.4 限流：v1 不做
 
-限流要额外挂 Cloudflare KV，多一步配置。白名单已经挡住随机流量；能灌进来的人得同时扒出 URL、
-`REPORT_KEY`，还得知道某个白名单钱包地址（链上公开，所以不算难）。
+限流要额外挂 Cloudflare KV，多一步配置。默认配置（`ALLOW` 留空）下，能灌进来的人只需扒出
+`REPORT_URL` 和 `REPORT_KEY`，而这两样都在公开源码里——所以这里必须把最坏情况说清楚：
 
-真被灌了，止损手段是清空 `ALLOW`：30 秒生效、不用发版、不影响任何人的交易。这就是中继相比
-「token 写死在客户端」的核心差别，也是不急着上限流的理由。将来觉得需要再加。
+他能做的极限是**让作者的 bot 给作者自己发一条格式受限的假周报**（只有数字，加上最多 20 字符、
+剥掉了控制字符的备注）。塞不了任意文字，发不到别的 chat，读不到任何东西。这是骚扰，不是泄露。
+
+止损手段是把 `ENABLED` 设成 `0`：30 秒生效、不用发版、不影响任何人的交易。要恢复就换一个
+`CLIENT_KEY` 发版，或者到那时再填 `ALLOW`。这就是中继相比「token 写死在客户端」的核心差别
+（最坏情况从「别人完全控制你的 bot」降到「别人能发假数字而你一键能停」），也是不急着上限流的
+理由。将来真被反复骚扰再加。
 
 ## 六、部署与发版
 
 1. Cloudflare → Workers & Pages → Create Worker → 粘贴 `deploy/report-worker.js` → Deploy。
-2. Settings → Variables 加上面四个（`TG_TOKEN` 选 Secret 类型）。
+2. Settings → Variables 加**前三个**（`TG_TOKEN` 选 Secret 类型）；`ENABLED` 与 `ALLOW` 不必配。
 3. BotFather 生成**全新** token，直接填进 Cloudflare，不要经过仓库、聊天记录或截图。
 4. 把 Worker URL 和 `REPORT_KEY` 填进 `config.py`，发版。
 
