@@ -127,6 +127,15 @@ def _in_settlement_window(end_ts: float, min_days, max_days) -> bool:
 _CREATED_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})")
 
 
+def _new_market_hours(template) -> float:
+    """模板的新市场保护期(小时)。非数字/负数/缺失一律归 0(= 不筛)——DB 里的值可能被手改,
+    绝不让一个畸形配置抛进整轮扫描。"""
+    try:
+        return max(0.0, float(template.get("new_market_hours") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def market_age_hours(created_at: str, now: float):
     """市场创建至今的小时数；created_at 缺失/解析不出返回 None（调用方 fail-open 保留）。
 
@@ -140,7 +149,7 @@ def market_age_hours(created_at: str, now: float):
     形状合法但取值越界的串（月 13、日 45、"0000-00-00" 这类零值哨兵）一律按解析不出处理，
     返回 None —— 绝不让一条畸形 created_at 掀翻整轮扫描。
     """
-    m = _CREATED_RE.match((created_at or "").strip())
+    m = _CREATED_RE.match(str(created_at or "").strip())
     if not m:
         return None
     try:
@@ -161,7 +170,7 @@ def loosest_new_market_hours(templates) -> float:
     for t in templates:
         if not t.get("skip_new_markets"):
             return 0.0
-        hours.append(float(t.get("new_market_hours") or 0))
+        hours.append(_new_market_hours(t))
     return min(hours) if hours else 0.0
 
 
@@ -489,7 +498,7 @@ class MarketScanner:
         include_other = bool(template.get("include_other", False))
         tier_sizes = enabled_sizes(template.get("size_tiers") or [])
         skip_new = bool(template.get("skip_new_markets"))
-        new_hours = float(template.get("new_market_hours") or 0)
+        new_hours = _new_market_hours(template)
         now = time.time()
 
         survivors = []

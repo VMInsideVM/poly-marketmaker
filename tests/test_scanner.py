@@ -1255,11 +1255,24 @@ class TestMarketAgeHours:
         now = self._utc(2026, 7, 23, 23, 10, 3)
         assert market_age_hours("2026-07-22T23:10:03Z", now) == pytest.approx(24.0)
 
+    def test_age_exactly_at_threshold(self):
+        """恰好满 N 小时算「不新」：两处判定都是 age < 门槛 才排除，等于门槛要保留。"""
+        now = self._utc(2026, 7, 23, 23, 10, 3)
+        assert market_age_hours("2026-07-22T23:10:03Z", now) == 24.0
+
     def test_missing_or_malformed_returns_none(self):
         now = self._utc(2026, 7, 23)
         assert market_age_hours("", now) is None
         assert market_age_hours(None, now) is None
         assert market_age_hours("not-a-date", now) is None
+
+    def test_non_string_returns_none(self):
+        """奖励端点若把 created_at 发成数字/对象,同样 fail-open 返回 None,绝不抛——
+        抛出去会被扫描循环的 except 吞掉,表现为「候选池冻住」或「该钱包永远挂不出单」。"""
+        now = self._utc(2026, 7, 23)
+        assert market_age_hours(1753000000, now) is None
+        assert market_age_hours([], now) is None
+        assert market_age_hours({"a": 1}, now) is None
 
     def test_out_of_range_values_return_none(self):
         """形状合法但取值越界 -> 同样 fail-open 返回 None，绝不抛。"""
@@ -1295,6 +1308,11 @@ class TestLoosestNewMarketHours:
 
     def test_hours_none_treated_as_zero(self):
         assert loosest_new_market_hours([self._t(True, None)]) == 0
+
+    def test_malformed_hours_treated_as_zero(self):
+        """非数字/负数的保护期归 0(= 不筛),不抛——DB 值可能被手改。"""
+        assert loosest_new_market_hours([self._t(True, "abc")]) == 0
+        assert loosest_new_market_hours([self._t(True, -5)]) == 0
 
     def test_missing_keys_treated_as_off(self):
         assert loosest_new_market_hours([{}]) == 0
