@@ -1,12 +1,11 @@
 """tests/test_weekly_push.py — 每周 Telegram 周报:持久化节流/台账门控/时辰/失败不阻断。
 
-发送在后台守护线程(绝不阻塞下单),故调用后 join 线程再断言。目标 token/chat 写死常量。
+发送在后台守护线程(绝不阻塞下单),故调用后 join 线程再断言。token/chat 只在中继 Worker 侧,客户端不持有。
 """
 
 from unittest.mock import MagicMock, patch
 
 from engine.manager import EngineManager
-from config import TG_BOT_TOKEN, TG_CHAT_ID
 
 
 def _mgr(ledger_empty=False):
@@ -82,7 +81,7 @@ def _join(m):
 
 def test_no_push_before_hour():
     m = _mgr()
-    with patch("engine.manager.send_telegram") as st, patch(
+    with patch("engine.manager.send_report") as st, patch(
         "engine.manager.beijing_hour", return_value=8
     ), patch("engine.manager.beijing_day", return_value="2026-07-17"):
         m._maybe_push_weekly()
@@ -92,7 +91,7 @@ def test_no_push_before_hour():
 def test_no_push_when_ledger_empty():
     # 台账还没爬好(daily_pnl 空)-> 先不发,避免发 0(用户实报的核心问题)
     m = _mgr(ledger_empty=True)
-    with patch("engine.manager.send_telegram") as st, patch(
+    with patch("engine.manager.send_report") as st, patch(
         "engine.manager.beijing_hour", return_value=10
     ), patch("engine.manager.beijing_day", return_value="2026-07-17"):
         m._maybe_push_weekly()
@@ -102,7 +101,7 @@ def test_no_push_when_ledger_empty():
 
 def test_push_once_per_week_recent7_and_persists():
     m = _mgr()
-    with patch("engine.manager.send_telegram") as st, patch(
+    with patch("engine.manager.send_report") as st, patch(
         "engine.manager.beijing_hour", return_value=10
     ), patch(
         "engine.manager.beijing_day", return_value="2026-07-17"
@@ -112,15 +111,17 @@ def test_push_once_per_week_recent7_and_persists():
         m._maybe_push_weekly()  # 同周第二次 -> 持久化节流拦下
         _join(m)
     assert st.call_count == 1
-    args = st.call_args.args
-    assert args[0] == TG_BOT_TOKEN and args[1] == TG_CHAT_ID
-    assert "2026-07-10 ~ 2026-07-16" in args[2]  # 最近7整天(截止昨天07-16)
+    payload = st.call_args.args[0]
+    assert payload["week_start"] == "2026-07-10"  # 最近7整天(截止昨天07-16)
+    assert payload["week_end"] == "2026-07-16"
+    assert payload["senders"] == ["0xaaaa1111bbbbcccc"]  # 供 Worker 查白名单,小写
+    assert payload["since_date"] == "2026-05-17"
     m.db.set_last_push_week.assert_called_once_with("2026-07-13")  # 持久化本周周一
 
 
 def test_send_failure_no_persist_and_retries():
     m = _mgr()
-    with patch("engine.manager.send_telegram", side_effect=RuntimeError("net")), patch(
+    with patch("engine.manager.send_report", side_effect=RuntimeError("net")), patch(
         "engine.manager.beijing_hour", return_value=10
     ), patch("engine.manager.beijing_day", return_value="2026-07-17"):
         m._maybe_push_weekly()

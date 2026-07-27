@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta
 from api.polymarket_api import PolymarketAPI
 from api.proxy import use_proxy
-from config import CATEGORY_CATALOG, TG_BOT_TOKEN, TG_CHAT_ID, PUSH_HOUR
+from config import CATEGORY_CATALOG, PUSH_HOUR
 from engine.scanner import MarketScanner, ScanSuperseded
 from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
@@ -21,7 +21,7 @@ from engine.resolution import in_resolution
 from engine.tiers import tier_for
 from engine.pnl import beijing_day, beijing_hour, weekly_window
 from engine.pnl_ledger import rebuild_wallet_pnl
-from engine.notify import format_weekly_report, send_telegram
+from engine.notify import build_report_payload, send_report
 from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
@@ -922,15 +922,16 @@ class EngineManager:
             cum = sum(
                 r["net"] for r in self.db.get_daily_pnl_all(PNL_START_DATE, week_end)
             )
+            wallets = self.db.list_wallets()
             per_wallet = []
-            for w in self.db.list_wallets():
+            for w in wallets:
                 wr = self.db.get_daily_pnl(w["address"], week_start, week_end)
                 if not any(r.get(k) for r in wr for k in KEYS):
                     continue  # 本周无任何活动的钱包不列
                 addr = w["address"]
                 label = (w.get("remark") or "").strip() or f"{addr[:6]}...{addr[-4:]}"
                 per_wallet.append({"label": label, "net": sum(r["net"] for r in wr)})
-            text = format_weekly_report(
+            payload = build_report_payload(
                 week_start,
                 week_end,
                 daily_nets,
@@ -938,6 +939,7 @@ class EngineManager:
                 cum,
                 per_wallet,
                 PNL_START_DATE,
+                [w["address"] for w in wallets],
             )
             proxy = (
                 getattr(self._scanner_api, "proxy_url", None)
@@ -947,7 +949,7 @@ class EngineManager:
             self._pushing = True
             self._push_thread = threading.Thread(
                 target=self._send_report,
-                args=(TG_BOT_TOKEN, TG_CHAT_ID, text, week_key, proxy),
+                args=(payload, week_key, proxy),
                 daemon=True,
                 name="pnl-push",
             )
@@ -955,11 +957,12 @@ class EngineManager:
         except Exception as e:
             logger.warning("周报组装失败: %s", e)
 
-    def _send_report(self, token, chat_id, text, week_key, proxy):
-        """后台线程体:发 Telegram。成功才**持久化** last_push_week(失败下轮重试、不阻塞 loop)。
-        send_telegram 已消毒异常(不带含 token 的 URL),故此处 WARNING 不泄露 token。"""
+    def _send_report(self, payload, week_key, proxy):
+        """后台线程体:把周报 payload 发给中继 Worker。成功才**持久化** last_push_week
+        (失败下轮重试、不阻塞 loop)。send_report 已消毒异常(不带 URL/请求头),故此处
+        WARNING 不泄露 REPORT_KEY。"""
         try:
-            send_telegram(token, chat_id, text, proxy)
+            send_report(payload, proxy)
             self.db.set_last_push_week(week_key)
         except Exception as e:
             logger.warning("周报推送失败: %s", e)

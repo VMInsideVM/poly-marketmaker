@@ -42,11 +42,14 @@ ENGINE_DEFAULTS = {
     "reward_scan_max_pages": 20,
 }
 
-# 每日盈亏日报远程推送(Telegram):目标**写死在代码**,不走配置页——对方更新程序即生效、
-# 无需任何配置。⚠️token 随源码/exe 分发、可被提取;此 bot 仅单向发通知到固定 chat,风险
-# 可接受(用户选择);若泄漏顾虑,BotFather /revoke 换 token 即可。
-TG_BOT_TOKEN = "8908740401:AAHijHbOPQG6rlDo8KUCq8SRofkCztl636s"
-TG_CHAT_ID = "1237806576"
+# 周报中继(Cloudflare Worker)。Telegram token/chat 只存在 Worker 的环境变量里,客户端
+# 一概不知道。写死在这里的两个值会随源码上 GitHub,**都不是秘密**:
+#   REPORT_URL  Worker 地址,公开可见
+#   REPORT_KEY  只用来把随机扫描 workers.dev 的爬虫挡在门外,不是鉴权凭证
+# 真正的防线是 Worker 侧的钱包地址白名单(ALLOW),以及「改 Worker 不用发版」这件事本身。
+# 历史:上一版把 bot token 写死在这里,被人从公开仓库扒走盗用(2026-07-27),已 revoke。
+REPORT_URL = "https://REPLACE-ME.workers.dev"
+REPORT_KEY = "REPLACE-ME"
 PUSH_HOUR = 9  # 北京时间几点后推(8点奖励到账之后)
 
 # 策略级参数:每钱包/每模板取值,存 template_settings 表。

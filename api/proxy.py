@@ -98,6 +98,18 @@ def http_get(url, **kw):
     return _retry_on_connect_error(lambda: requests.get(url, **kw))
 
 
+def http_post(url, **kw):
+    """requests.post 包装:current_proxy 非空时注入 proxies=(http/https 同一代理)。
+
+    与 http_get 同源。_retry_on_connect_error 只重试「连接从未建立」的失败——请求一次都
+    没送达过,所以对 POST 同样安全,不会重复提交。
+    """
+    proxy = current_proxy.get()
+    if proxy:
+        kw.setdefault("proxies", {"http": proxy, "https": proxy})
+    return _retry_on_connect_error(lambda: requests.post(url, **kw))
+
+
 class _ProxyDispatchingClient:
     """替换 py_clob_client_v2 的模块全局 ``_http_client``:按 ``current_proxy``
     选/缓存 per-proxy ``httpx.Client``。``helpers.request()`` 按模块全局名解析
