@@ -70,9 +70,13 @@ function buildText(p) {
 
 export default {
   async fetch(req, env) {
-    // 止损总开关,放在一切处理之前:出事时把 ENABLED 设成 "0",转发立刻全停(30 秒生效、
-    // 不用发版、不影响任何人的交易)。部署时不必配这个变量,未设即为开启。
-    if (env.ENABLED === "0") return new Response("no", { status: 503 });
+    // 止损总开关,放在一切处理之前:出事时把 ENABLED 设成 "0",转发全停(Cloudflare 变量有
+    // 几十秒传播延迟,不是瞬时的)。部署时不必配这个变量,未设即为开启。
+    // 用 String().trim() 而不是 === "0" 直比:填成 "0 "(多一个空格,手机上很容易)会让急停
+    // **静默失效**,而按下的人以为已经停了——这种失败模式的代价太高,宁可判宽一点。
+    if (String(env.ENABLED ?? "").trim() === "0") {
+      return new Response("no", { status: 503 });
+    }
     if (req.method !== "POST") return new Response("no", { status: 405 });
     if (req.headers.get("x-mm-key") !== env.CLIENT_KEY) {
       return new Response("no", { status: 403 });
