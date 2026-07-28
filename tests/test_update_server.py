@@ -1,5 +1,6 @@
 """tests/test_update_server.py — 服务器模式更新(git 同步,全离线)。"""
 
+import subprocess
 import threading
 
 import pytest
@@ -71,6 +72,30 @@ class TestFailureRollback:
         # 关键:不退出进程,旧版本继续跑
         assert exited == []
 
+    def test_pip_failure_and_rollback_itself_fails_reports_manual(self):
+        """回滚命令本身也失败时,不能还告诉用户"已回滚"——磁盘其实停在新代码上,
+        必须提示需要人工处理。"""
+        state, exited = _State(), []
+        calls = []
+
+        def run_cmd(args, cwd):
+            calls.append(args)
+            if args[:2] == ["git", "rev-parse"]:
+                return 0, "oldcommit123\n"
+            if "install" in args:
+                return 1, "No matching distribution"
+            if args[:3] == ["git", "reset", "--hard"] and args[-1] == "oldcommit123":
+                return 1, "fatal: unable to reset"
+            return 0, ""
+
+        _run_git_update(
+            state, INFO, "/repo", run_cmd=run_cmd, shutdown=lambda: exited.append(1)
+        )
+        assert state.state == "error"
+        assert "回滚也失败" in state.message
+        assert "人工" in state.message
+        assert exited == []
+
     def test_fetch_failure_stops_before_reset(self):
         state, exited = _State(), []
         runner = _FakeRunner(failures={"fetch": (1, "could not resolve host")})
@@ -102,6 +127,28 @@ class TestFailureRollback:
         )
         assert state.state == "error"
         assert exited == []
+
+    def test_pip_timeout_after_reset_still_rolls_back(self):
+        """pip install 超时/被杀(抛异常而非返回非 0)时,new tag 已经 reset 过了,
+        必须回滚,否则磁盘停在新代码但依赖没装全,systemd 下次拉起可能直接起不来。
+        """
+        state, exited, calls = _State(), [], []
+
+        def run_cmd(args, cwd):
+            calls.append(args)
+            if args[:2] == ["git", "rev-parse"]:
+                return 0, "oldcommit123\n"
+            if "install" in args:
+                raise subprocess.TimeoutExpired(cmd=args, timeout=600)
+            return 0, ""
+
+        _run_git_update(
+            state, INFO, "/repo", run_cmd=run_cmd, shutdown=lambda: exited.append(1)
+        )
+        git_calls = [c for c in calls if c and c[0] == "git"]
+        assert ["git", "reset", "--hard", "oldcommit123"] in git_calls
+        assert exited == []
+        assert state.state == "error"
 
 
 class TestStartUpdateDispatch:

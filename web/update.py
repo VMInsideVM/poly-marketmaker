@@ -347,6 +347,7 @@ def _run_git_update(state, info, repo_dir, *, run_cmd, shutdown):
     HTTPS 且校验 GitHub 证书,完整性已经具备。
     git reset --hard 不影响 untracked 文件,market_maker.db 在 .gitignore 里。
     """
+    old_commit = None
     try:
         state.state, state.percent, state.message = "downloading", 10, "读取当前版本"
         rc, out = run_cmd(["git", "rev-parse", "HEAD"], repo_dir)
@@ -372,9 +373,14 @@ def _run_git_update(state, info, repo_dir, *, run_cmd, shutdown):
             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], repo_dir
         )
         if rc != 0:
-            run_cmd(["git", "reset", "--hard", old_commit], repo_dir)
+            rrc, rout = run_cmd(["git", "reset", "--hard", old_commit], repo_dir)
             state.state = "error"
-            state.message = f"安装依赖失败,已回滚到原版本:{out.strip()[:300]}"
+            if rrc != 0:
+                state.message = (
+                    f"安装依赖失败,回滚也失败,需人工处理:{rout.strip()[:300]}"
+                )
+            else:
+                state.message = f"安装依赖失败,已回滚到原版本:{out.strip()[:300]}"
             return
 
         state.percent, state.message = 100, "重启中"
@@ -382,6 +388,11 @@ def _run_git_update(state, info, repo_dir, *, run_cmd, shutdown):
         shutdown()
     except Exception as e:  # noqa: BLE001
         logger.exception("更新失败")
+        if old_commit:
+            try:
+                run_cmd(["git", "reset", "--hard", old_commit], repo_dir)
+            except Exception:  # noqa: BLE001
+                logger.exception("异常回滚也失败")
         state.state, state.message = "error", f"更新失败:{e}"
 
 
