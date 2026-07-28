@@ -2207,6 +2207,57 @@ class TestExitPrefetch:
         assert monitor._sell_book("tokA") == (0.01, "0.01", None, None)
         assert api.get_orderbook.call_count == 0
 
+    def test_check_exit_prefetches_before_looping(self):
+        # 3 个仓分属 2 个市场:成交按市场取 2 次,盘口按 asset 取 3 次
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_user_positions.return_value = [
+            self._pos("tokA", "cid1"),
+            self._pos("tokB", "cid1"),
+            self._pos("tokC", "cid2"),
+        ]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor.check_exit()
+        assert api.get_trades.call_count == 2
+        assert api.get_orderbook.call_count == 3
+        assert monitor.last_position_count == 3
+
+    def test_check_exit_does_not_prefetch_just_dumped(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._just_dumped.add("tokA")
+        api.get_user_positions.return_value = [
+            self._pos("tokA", "cid1"),
+            self._pos("tokB", "cid2"),
+        ]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor.check_exit()
+        assert api.get_orderbook.call_count == 1
+        assert "tokA" not in monitor._book_cache
+
+    def test_low_balance_prefetches_and_check_exit_reuses(self):
+        # 低余额先预取过,check_exit 不再重复取同一批
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        db.get_template_for.return_value = {
+            "low_balance_threshold_usd": 4,
+            "liquidate_target_usd": 4,
+            "cooldown_minutes": 20,
+        }
+        api.get_balance.return_value = 1.0
+        api.get_user_positions.return_value = [self._pos("tokA", "cid1")]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor.check_low_balance()
+        before = api.get_orderbook.call_count
+        monitor.check_exit()
+        assert api.get_orderbook.call_count == before  # 复用,没再取
+
 
 class TestStep3Prefetch:
     """Step3 本轮盘口/奖励的并发预取:按 token/市场去重、逐项容错、带钱包代理。"""

@@ -68,6 +68,8 @@ class OrderMonitor:
         self._trades_by_cid: dict = {}
         # asset_id -> get_orderbook 原始返回;None = 本轮取数失败
         self._book_cache: dict = {}
+        # 上一轮 check_exit 判定的持仓数,只给 tick 耗时日志用,不进任何判定。
+        self.last_position_count: int = 0
 
     def begin_status_tick(self) -> None:
         self._status_rows = []
@@ -484,6 +486,8 @@ class OrderMonitor:
         except Exception as e:
             logger.warning("fetch failed (skip low-balance): %s", e)
             return
+        # 逐仓的成交/盘口一次性并发取好,下面的循环只做纯判定(见 _exit_prefetch)。
+        self._exit_prefetch([p for p in positions if float(p.get("size", 0) or 0) > 0])
         meta, candidates = {}, []
         for pos in positions:
             asset_id = pos.get("asset", "")
@@ -581,6 +585,16 @@ class OrderMonitor:
         ]
         status_map = self.api.gamma_resolution_status(cids)
         resolving = {c for c in cids if in_resolution(status_map.get(c))}
+        self.last_position_count = len(cids)
+        # 本轮真要判定的仓(刚被低余额清掉的不算)一次性并发取好成交与盘口。
+        self._exit_prefetch(
+            [
+                p
+                for p in positions
+                if float(p.get("size", 0) or 0) > 0
+                and p.get("asset", "") not in self._just_dumped
+            ]
+        )
         for pos in positions:
             if pos.get("asset", "") in self._just_dumped:
                 continue  # 本 tick 已被低余额清仓卖掉:Data API /positions 滞后仍显满仓,
