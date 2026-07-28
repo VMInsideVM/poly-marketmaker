@@ -1384,11 +1384,13 @@ def api_dashboard():
     )
 
 
-# --- API: 自动更新(免登录:启动时弹窗在登录前出现) ---
+# --- API: 自动更新(check 免登录,apply/status 需登录) ---
+# check 只读固定 GitHub URL 的版本号,带 30 分钟 TTL 缓存,不改变任何状态也不
+# 泄露钱包信息,登录页/设置页底部的"检查更新"链接需要它在未登录时也能用;
+# apply(拉代码+重启进程)和 status 会影响进程/暴露运行状态,必须登录后才能用。
 
 
 @app.route("/api/update/check", methods=["GET"])
-@login_required
 def api_update_check():
     return jsonify(updater.check_update())
 

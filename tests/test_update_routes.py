@@ -13,12 +13,15 @@ def _client(logged_in=True):
     return c
 
 
-def test_check_requires_login(monkeypatch):
-    called = []
-    monkeypatch.setattr(updater, "check_update", lambda: called.append(1) or {})
+def test_check_stays_public(monkeypatch):
+    # 登录页/设置页底部的「检查更新」链接要能用。check 只读 GitHub 版本号,
+    # 带 30 分钟缓存,不改状态也不泄露钱包信息。
+    monkeypatch.setattr(
+        updater, "check_update", lambda: {"update_available": False, "current": "1.0.7"}
+    )
     resp = _client(logged_in=False).get("/api/update/check")
-    assert resp.status_code in (301, 302)  # 重定向到登录页
-    assert called == []  # 未登录不应触发任何检测
+    assert resp.status_code == 200
+    assert resp.get_json()["current"] == "1.0.7"
 
 
 def test_apply_requires_login(monkeypatch):
@@ -32,15 +35,6 @@ def test_apply_requires_login(monkeypatch):
 def test_status_requires_login():
     resp = _client(logged_in=False).get("/api/update/status")
     assert resp.status_code in (301, 302)
-
-
-def test_check_returns_json_when_logged_in(monkeypatch):
-    monkeypatch.setattr(
-        updater, "check_update", lambda: {"update_available": False, "current": "1.0.7"}
-    )
-    resp = _client().get("/api/update/check")
-    assert resp.status_code == 200
-    assert resp.get_json()["current"] == "1.0.7"
 
 
 def test_apply_blocked_returns_409(monkeypatch):
