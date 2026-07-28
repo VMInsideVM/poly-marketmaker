@@ -161,7 +161,10 @@ class TestCheckUpdate:
     def setup_method(self):
         updater._reset_cache()  # 模块级缓存会跨用例残留,每个用例前清空
 
-    def test_update_available(self):
+    def test_update_available(self, monkeypatch):
+        # check_update 内部按 sys.platform 选包(不透传 system 参数),固定为
+        # win32 避免在 macOS 上误选 fixture 里的 .dmg 资源导致断言的 size 对不上。
+        monkeypatch.setattr(updater.sys, "platform", "win32")
         out = check_update(current="1.0.7", fetch=lambda: _fake_release("v1.0.8"))
         assert out["update_available"] is True
         assert out["current"] == "1.0.7"
@@ -173,7 +176,9 @@ class TestCheckUpdate:
         out = check_update(current="1.0.8", fetch=lambda: _fake_release("v1.0.8"))
         assert out["update_available"] is False
 
-    def test_no_exe_asset_no_update(self):
+    def test_no_exe_asset_no_update(self, monkeypatch):
+        # 同上:固定 win32,否则 mac 上仍带 .dmg 的 fixture 会被判定为"有更新"。
+        monkeypatch.setattr(updater.sys, "platform", "win32")
         out = check_update(
             current="1.0.7", fetch=lambda: _fake_release("v1.0.8", with_exe=False)
         )
