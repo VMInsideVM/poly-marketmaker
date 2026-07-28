@@ -1,5 +1,6 @@
 """tests/test_manager.py"""
 
+import logging
 import time
 import pytest
 from unittest.mock import MagicMock, patch
@@ -956,7 +957,10 @@ class TestTickSharesOpenOrders:
         db.get_template_for.return_value = {"low_balance_threshold_usd": 0}
         db.get_blacklist_ids.return_value = set()
         worker = WalletWorker(api, db, "0xW", {"fill_check_interval_sec": 5})
-        worker._last_pnl_date = "9999-01-01"  # 不让台账重算线程掺进来
+        # 不让台账重算线程掺进来:_maybe_rebuild_pnl 只在 _last_pnl_date == 今天(beijing_day)
+        # 时才跳过,写死的 "9999-01-01" 永远不等于今天的日期字符串,起不到拦截作用——直接
+        # 把方法本身替换成空操作,才能确保它真的不起后台线程碰共享 MagicMock。
+        worker._maybe_rebuild_pnl = MagicMock()
         return worker, api, db
 
     def test_tick_fetches_open_orders_twice(self):
@@ -969,3 +973,26 @@ class TestTickSharesOpenOrders:
         worker, api, db = self._worker()
         api.get_open_orders.side_effect = RuntimeError("network")
         worker._tick()  # 不抛异常即通过
+
+    def test_tick_logs_per_step_timing(self, caplog):
+        worker, api, db = self._worker()
+        with caplog.at_level(logging.INFO, logger="engine.manager"):
+            worker._tick()
+        # 注意:不能用 r.message % r.args——caplog 的 handler 在捕获时已经跑过一次
+        # Formatter.format(),record.message 此时已是完全替换过的最终字符串;再对它
+        # 做一次 % r.args 会因为字符串里已经没有 % 占位符、但 args 非空而报
+        # "not all arguments converted"(与本任务实现是否正确无关,任何带 %s 参数的
+        # 日志调用都会这样,已用最小复现验证过)。直接用 r.message 即可。
+        line = [r.message for r in caplog.records if "[tick]" in str(r.msg)]
+        assert len(line) == 1
+        for name in ("成交", "结算", "低余额", "离场", "合规"):
+            assert name in line[0]
+
+    def test_timing_log_emitted_even_when_a_step_raises(self, caplog):
+        # 慢在哪一步的证据,不能因为那一步抛异常就丢掉
+        worker, api, db = self._worker()
+        worker.monitor.check_exit = MagicMock(side_effect=RuntimeError("boom"))
+        with caplog.at_level(logging.INFO, logger="engine.manager"):
+            with pytest.raises(RuntimeError):
+                worker._tick()
+        assert any("[tick]" in str(r.msg) for r in caplog.records)
