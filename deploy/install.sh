@@ -3,6 +3,7 @@
 # 用法(需要 root):
 #   bash install.sh your-domain.com
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
 DOMAIN="${1:-}"
 if [ -z "$DOMAIN" ]; then
@@ -16,12 +17,13 @@ APP="$BASE/poly-marketmaker"
 
 echo "==> 设置时区为 Asia/Shanghai"
 # 每日盈亏台账、周报、监控 watermark 都按本地时间算,留在 UTC 会导致日期错位。
-timedatectl set-timezone Asia/Shanghai
+# 部分 LXC/OpenVZ 或无 dbus 的精简镜像上 timedatectl 会失败,回退到手动软链接。
+timedatectl set-timezone Asia/Shanghai 2>/dev/null || ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 
 echo "==> 安装系统依赖"
 apt-get update
-apt-get install -y python3 python3-venv python3-pip git curl ufw \
-	debian-keyring debian-archive-keyring apt-transport-https
+apt-get install -y python3 python3-venv python3-pip python3-dev git curl ufw sudo gnupg \
+	build-essential debian-keyring debian-archive-keyring apt-transport-https
 
 echo "==> 创建服务用户 pmm"
 id -u pmm >/dev/null 2>&1 || useradd --system --create-home --home-dir "$BASE" --shell /usr/sbin/nologin pmm
@@ -31,18 +33,18 @@ chown -R pmm:pmm "$BASE"
 echo "==> 克隆代码"
 # 必须是 git clone(而不是下载 zip):网页上的「更新」按钮靠 git fetch/reset 工作。
 if [ ! -d "$APP/.git" ]; then
-	sudo -u pmm git clone "$REPO" "$APP"
+	sudo -H -u pmm git clone "$REPO" "$APP"
 fi
 
 echo "==> 建虚拟环境、装 Python 依赖"
-sudo -u pmm python3 -m venv "$BASE/venv"
-sudo -u pmm "$BASE/venv/bin/pip" install --upgrade pip
-sudo -u pmm "$BASE/venv/bin/pip" install -r "$APP/requirements.txt"
+sudo -H -u pmm python3 -m venv "$BASE/venv"
+sudo -H -u pmm "$BASE/venv/bin/pip" install --upgrade pip
+sudo -H -u pmm "$BASE/venv/bin/pip" install -r "$APP/requirements.txt"
 
 echo "==> 安装 Caddy"
 if ! command -v caddy >/dev/null 2>&1; then
 	curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' |
-		gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+		gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 	curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' |
 		tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
 	apt-get update

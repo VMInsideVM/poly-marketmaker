@@ -14,11 +14,14 @@
 > **⚠️ 注意：`install.sh` 会用 `ufw --force enable` 重置防火墙规则，只放行
 > 22/80/443 端口。这个脚本假设你用的是一台全新的、只跑这一个程序的 VPS——
 > 如果这台机器上还跑着别的服务，先打开 `install.sh` 看一眼 ufw 那几行，
-> 不然那些服务会被这次 enable 挡在外面。**
+> 不然那些服务会被这次 enable 挡在外面。
+> 如果你把 SSH 端口改成了非 22，先把脚本里的 `ufw allow 22/tcp` 改成你的实际端口，
+> 否则这一步会把你自己锁在外面。
+> 另外脚本每次运行都会覆盖 `/etc/caddy/Caddyfile`，手动改过的内容会被抹掉。**
 
 ```bash
 ssh root@<你的VPS地址>
-git clone https://github.com/VMInsideVM/poly-marketmaker.git /tmp/pmm-src
+rm -rf /tmp/pmm-src && git clone https://github.com/VMInsideVM/poly-marketmaker.git /tmp/pmm-src
 bash /tmp/pmm-src/deploy/install.sh your-domain.com
 ```
 
