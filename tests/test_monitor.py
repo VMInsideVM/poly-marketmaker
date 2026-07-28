@@ -2163,6 +2163,50 @@ class TestExitPrefetch:
         assert api.get_trades.call_count == 0
         assert api.get_orderbook.call_count == 0
 
+    def test_cost_lots_uses_prefetched_trades(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._trades_by_cid["cid1"] = []
+        monitor._cost_lots("tokA", 100.0, "cid1")
+        assert api.get_trades.call_count == 0
+
+    def test_cost_lots_falls_back_when_not_prefetched(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_trades.return_value = []
+        monitor._cost_lots("tokA", 100.0, "cid1")
+        assert api.get_trades.call_count == 1
+
+    def test_cost_lots_prefetch_failure_means_cost_unknown(self):
+        # 预取那轮取数失败 -> 与自取失败同样的结果:成本未知,调用方跳过 + ⚠️裸奔
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._trades_by_cid["cid1"] = None
+        assert monitor._cost_lots("tokA", 100.0, "cid1") == (None, [])
+        assert api.get_trades.call_count == 0
+
+    def test_sell_book_uses_prefetched_orderbook(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._book_cache["tokA"] = self._ob()
+        tick, tick_str, bid, ask = monitor._sell_book("tokA")
+        assert api.get_orderbook.call_count == 0
+        assert (tick, tick_str, bid, ask) == (0.01, "0.01", 0.30, 0.31)
+
+    def test_sell_book_falls_back_when_not_prefetched(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        assert monitor._sell_book("tokA")[2] == 0.30
+        assert api.get_orderbook.call_count == 1
+
+    def test_sell_book_prefetch_failure_degrades_like_fetch_failure(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._book_cache["tokA"] = None
+        assert monitor._sell_book("tokA") == (0.01, "0.01", None, None)
+        assert api.get_orderbook.call_count == 0
+
 
 class TestStep3Prefetch:
     """Step3 本轮盘口/奖励的并发预取:按 token/市场去重、逐项容错、带钱包代理。"""

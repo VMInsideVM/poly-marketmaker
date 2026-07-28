@@ -182,14 +182,25 @@ class OrderMonitor:
         用 market=condition_id 过滤拉成交,再由 extract_fills 客户端按 asset 过滤:
         Polymarket /trades 的服务端 asset_id 过滤失效(同一 asset 明明有成交却返回空,
         2026-05-29 真实事故 -> 成本算不出、全仓裸奔),而 market(conditionId)过滤可用,
-        且会一并带回我们在该市场的 taker 成交(止损市价单等),正是 extract_fills 所需。"""
+        且会一并带回我们在该市场的 taker 成交(止损市价单等),正是 extract_fills 所需。
+
+        盘口/成交优先读本 tick 的预取表(_exit_prefetch 写入),表里没有该键才自取。"""
         if asset_id in self._cost_cache:
             return self._cost_cache[asset_id]
         funder = self._funder()
-        try:
-            trades = self.api.get_trades(TradeParams(market=condition_id))
-        except Exception as e:
-            logger.warning("get_trades(market=%s) for cost failed: %s", condition_id, e)
+        trades = self._trades_by_cid.get(condition_id, _MISSING)
+        if trades is _MISSING:
+            # 没走预取的调用点(_resolution_dump 等)照旧自取,行为不变。
+            try:
+                trades = self.api.get_trades(TradeParams(market=condition_id))
+            except Exception as e:
+                logger.warning(
+                    "get_trades(market=%s) for cost failed: %s", condition_id, e
+                )
+                self._cost_cache[asset_id] = (None, [])
+                return None, []
+        if trades is None:
+            # 预取那轮取数失败(已在预取里 WARNING 过),等价于自取失败:成本未知。
             self._cost_cache[asset_id] = (None, [])
             return None, []
         fills = extract_fills(trades, funder, asset_id)
@@ -409,9 +420,24 @@ class OrderMonitor:
             )
 
     def _sell_book(self, asset_id: str):
-        """(tick_float, tick_str, best_bid, best_ask);失败/空时缺的位回 None。"""
+        """(tick_float, tick_str, best_bid, best_ask);失败/空时缺的位回 None。
+
+        优先读本 tick 的预取表(_exit_prefetch 写入);表里没有该 asset 才自取,所以
+        不走预取的调用点行为不变。表里的 None = 预取时取数失败,与自取失败同样降级。
+        """
+        ob = self._book_cache.get(asset_id, _MISSING)
+        if ob is _MISSING:
+            try:
+                ob = self.api.get_orderbook(asset_id)
+            except Exception as e:
+                logger.warning(
+                    "orderbook for %s failed (exit tick=0.01): %s", asset_id, e
+                )
+                return 0.01, "0.01", None, None
+        if ob is None:
+            logger.warning("orderbook for %s 预取取不到 (exit tick=0.01)", asset_id)
+            return 0.01, "0.01", None, None
         try:
-            ob = self.api.get_orderbook(asset_id)
             tick_str = ob.get("tick_size", "0.01")
             bids = sorted(
                 ob.get("bids", []), key=lambda x: float(x["price"]), reverse=True
@@ -421,7 +447,9 @@ class OrderMonitor:
             best_ask = float(asks[0]["price"]) if asks else None
             return float(tick_str), tick_str, best_bid, best_ask
         except Exception as e:
-            logger.warning("orderbook for %s failed (exit tick=0.01): %s", asset_id, e)
+            logger.warning(
+                "orderbook for %s 解析失败 (exit tick=0.01): %s", asset_id, e
+            )
             return 0.01, "0.01", None, None
 
     def check_low_balance(self):
