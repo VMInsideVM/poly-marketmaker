@@ -7,6 +7,7 @@ import hashlib
 import logging
 import sqlite3
 import threading
+from datetime import timedelta
 from functools import wraps
 from flask import (
     Flask,
@@ -18,6 +19,7 @@ from flask import (
     url_for,
     flash,
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 from api.proxy import ProxyUnreachable, probe_proxy
 from models.database import Database
 from engine.manager import EngineManager
@@ -26,7 +28,7 @@ from engine.monitor_status import get_snapshot
 from engine.market_links import enrich_with_market_meta, ensure_market_meta
 from engine.blacklist_ops import buy_order_ids_for_condition
 from engine.take_profit import effective_theta_stop
-from config import DB_PATH, HOST, PORT
+from config import DB_PATH, HOST, PORT, SERVER_MODE
 from web import update as updater
 from web.wallet_import import ImportJob, parse_import_lines
 from version import __version__
@@ -45,6 +47,21 @@ app = Flask(
     static_folder=os.path.join(_BASE, "web", "static"),
 )
 app.secret_key = os.urandom(32)
+
+# 会话安全。secret_key 每次启动随机是有意的:进程重启后内存里的加密密钥必然丢失、
+# 本来就得重新登录输密码,让旧 session 一并失效反而一致。
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    # 本地是 http,开了 Secure 浏览器不会回传 cookie,会直接登不进去。
+    SESSION_COOKIE_SECURE=SERVER_MODE,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+)
+
+# Caddy 反代后 request.remote_addr 恒为 127.0.0.1,按 IP 的登录限速会退化成全局限速
+# (攻击者能借此把正常用户锁在门外)。取 X-Forwarded-For 的最后一跳。
+# Flask 只绑回环、只可能被本机 Caddy 访问,该头不可能由外部伪造。
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 
 @app.context_processor
