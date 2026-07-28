@@ -281,7 +281,9 @@ def login():
     if request.method == "POST":
         ip = request.remote_addr or "?"
         wait = login_lock_remaining(ip)
-        if wait:
+        # 本地版只绑 127.0.0.1,限速零收益却有真实回退:锁 15 分钟只能靠重启进程解锁,
+        # 而重启会杀掉止损监控。拒绝这一步只在服务器模式生效,失败计数仍照常记录。
+        if SERVER_MODE and wait:
             logger.warning("登录被限速 ip=%s 剩余=%ds", ip, wait)
             flash(f"登录失败次数过多，请 {wait // 60 + 1} 分钟后再试")
             return render_template("login.html")

@@ -107,6 +107,9 @@ def client(monkeypatch):
         "derive_key",
         lambda pw, salt: b"RIGHT" if pw == RIGHT_PASSWORD else b"WRONG",
     )
+    # 登录限速的"拒绝"步骤只在服务器模式生效;这组集成测试就是验证该拒绝行为,
+    # 故显式模拟服务器模式(本地模式的行为由 test_local_mode_not_locked 单独覆盖)。
+    monkeypatch.setattr(routes, "SERVER_MODE", True)
     routes.app.config["TESTING"] = True
     yield routes.app.test_client()
     # 登录成功的用例会设进程级密钥,清掉以免污染其他测试
@@ -155,3 +158,17 @@ class TestRouteIntegration:
         resp = self._post(client, RIGHT_PASSWORD)
         assert resp.status_code in (301, 302)  # 登录成功,重定向到面板
         assert routes._login_fails == {}
+
+    def test_local_mode_not_locked_after_limit(self, client, monkeypatch):
+        """本地模式(SERVER_MODE=False)下限速的拒绝步骤应被跳过:本地版只绑
+        127.0.0.1,限速零收益,却会把连错 5 次的用户锁 15 分钟,而唯一解锁办法是
+        重启进程 —— 重启会杀掉止损监控,让持仓失去保护。失败计数本身仍照常记录,
+        只是不再据此拒绝请求。"""
+        monkeypatch.setattr(routes, "SERVER_MODE", False)
+        monkeypatch.setattr(routes, "init_manager", lambda m: None)
+        monkeypatch.setattr(routes, "EngineManager", lambda db, key: object())
+        for _ in range(routes._LOGIN_FAIL_LIMIT):
+            self._post(client, "wrong")
+        assert routes._login_fails  # 失败计数正常累积
+        resp = self._post(client, RIGHT_PASSWORD)
+        assert resp.status_code in (301, 302)  # 第 6 次仍能正常登录,没被锁
