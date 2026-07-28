@@ -32,6 +32,10 @@ LIQUIDATE_COOLDOWN_SEC = 60
 # 代理上同时背发现的 4 路 + Step3 的 6 路,峰值约 10 路并发。要回退并发化只改这一个常量。
 _STEP3_MAX_WORKERS = 6
 
+# 离场预取并发上限。与 Step3 取同一个数,但**理由不同**:离场的成交拨走 get_trades,
+# 那是会自动翻页的接口(while cursor != END_CURSOR),不是"轻接口不翻页"。之所以 6 也够,
+# 是因为单个市场的自有成交条数很少、通常一页就完;真遇到成交极多的市场,这一拨会明显变慢,
+# 那时该往下调而不是往上加。要回退并发化只改这一个常量。
 _EXIT_MAX_WORKERS = 6
 # 缓存里 None 表示「取数失败」,所以「没这个键」需要另一个哨兵,不能用 None 表达。
 _MISSING = object()
@@ -63,19 +67,26 @@ class OrderMonitor:
         # 本 tick 刚被 check_low_balance 市价清掉的 asset:check_exit 同 tick 跳过它们
         # (Data API /positions 滞后仍显示满仓,否则会对已卖仓挂卖单被拒、报假「裸奔」)。
         self._just_dumped: set = set()
+        # 本 tick 已被撤掉的卖单 id(begin_status_tick 重置)。步骤 2-4 共用 tick 开头那份
+        # 挂单快照,快照里仍有这些单,但它们已经不在挂了:不滤掉就会让 check_exit 以为
+        # 「已有一张挂在目标价的卖单」而返回 keep -> 持仓无卖单保护、状态行还谎报「保持」
+        # (低余额清仓被拒时必现:撤单已成功、市价卖被拒,仓没了卖单也没被卖掉)。
+        self._cancelled_sell_ids: set = set()
         # 本 tick 的离场取数预取表(begin_status_tick 重置)。
         # condition_id -> get_trades 原始返回;None = 本轮取数失败
         self._trades_by_cid: dict = {}
         # asset_id -> get_orderbook 原始返回;None = 本轮取数失败
         self._book_cache: dict = {}
-        # 上一轮 check_exit 判定的持仓数,只给 tick 耗时日志用,不进任何判定。
-        self.last_position_count: int = 0
+        # 本轮 check_exit 判定的持仓数,只给 tick 耗时日志用,不进任何判定。
+        # None = 本轮还没判定/早退了(日志渲染成 ?),别拿上一轮的数冒充这一轮。
+        self.last_position_count = 0
 
     def begin_status_tick(self) -> None:
         self._status_rows = []
         self._tick_ts = time.time()
         self._cost_cache = {}
         self._just_dumped = set()
+        self._cancelled_sell_ids = set()
         self._trades_by_cid = {}
         self._book_cache = {}
 
@@ -211,7 +222,7 @@ class OrderMonitor:
         return result
 
     # --- Step 1: fills via get_trades (flatten maker_orders) ---
-    def check_buy_orders(self, open_orders=None):
+    def check_buy_orders(self):
         # 去重集未就绪(启动 priming 失败、网络还没恢复):先补 priming;仍失败就本轮
         # 不处理成交,避免把整批历史成交当"新成交"重放(cancel_remainder 洪水)。
         if self._prime_pending and not self._prime_seen_keys():
@@ -231,17 +242,17 @@ class OrderMonitor:
         # 不在挂单里,撤它们只会报 already-canceled 刷屏(get_trades 去重在并发下不可靠,
         # 不能只靠它)。「是否仍在挂」才是「撤剩余未成交量」的真实前提,且 get_open_orders
         # 可靠——这是根治重放洪水的护栏,不依赖 get_trades/水位。
+        # **这里坚持自取,不吃 tick 开头的共用快照**:快照比它要判定的这批成交旧一个往返,
+        # 「成交之后这单还在不在挂」正是护栏本身的判据,拿旧一拍的挂单去判会把护栏磨钝。
+        # 代价也几乎为零——这次取数本来就只在真检测到成交时才发生(低频路径)。
         open_ids: set = set()
         if fills:
-            if open_orders is not None:
-                open_ids = {o.get("id") for o in open_orders}
-            else:
-                try:
-                    open_ids = {o.get("id") for o in self.api.get_open_orders()}
-                except Exception as e:
-                    logger.warning(
-                        "get_open_orders failed in Step 1 (本轮跳过撤余量): %s", e
-                    )
+            try:
+                open_ids = {o.get("id") for o in self.api.get_open_orders()}
+            except Exception as e:
+                logger.warning(
+                    "get_open_orders failed in Step 1 (本轮跳过撤余量): %s", e
+                )
         cancelled_orders: set = set()
         for ev in fills:
             try:
@@ -492,7 +503,16 @@ class OrderMonitor:
             logger.warning("fetch failed (skip low-balance): %s", e)
             return
         # 逐仓的成交/盘口一次性并发取好,下面的循环只做纯判定(见 _exit_prefetch)。
-        self._exit_prefetch([p for p in positions if float(p.get("size", 0) or 0) > 0])
+        # 包 try:parallel_map 可能在任何一个任务开跑之前就抛(最现实的是线程池建不出线程,
+        # N 个钱包 × 6 路 + 采集的 4 路同进程),让它逃出去会连带跳过后面的 check_exit ——
+        # 全部持仓无保护、无 ⚠️ 状态行、什么都不发布,正是本仓出过两次事故的静默故障。
+        # 降级是免费的:预取表空 = 每个 _cost_lots/_sell_book 各自回退自取(并发化前的行为)。
+        try:
+            self._exit_prefetch(
+                [p for p in positions if float(p.get("size", 0) or 0) > 0]
+            )
+        except Exception as e:
+            logger.warning("[低余额] 离场预取失败(退回逐仓自取): %s", e)
         meta, candidates = {}, []
         for pos in positions:
             asset_id = pos.get("asset", "")
@@ -571,6 +591,9 @@ class OrderMonitor:
         stop_cents = tmpl.get("theta_stop_cents", 5)
         case_a_mode = tmpl.get("case_a_mode", "ask")
         take_profit_mode = tmpl.get("take_profit_mode", "maker")
+        # 先置「本轮未判定」:任何早退(取持仓/取挂单失败)都不能让 tick 耗时日志把上一轮的
+        # 持仓数当成这一轮报出来 —— 那条日志是判断还要不要继续提速的唯一依据,不能骗人。
+        self.last_position_count = None
         try:
             positions = self.api.get_user_positions(self._funder())
         except Exception as e:
@@ -593,14 +616,19 @@ class OrderMonitor:
         resolving = {c for c in cids if in_resolution(status_map.get(c))}
         self.last_position_count = len(cids)
         # 本轮真要判定的仓(刚被低余额清掉的不算)一次性并发取好成交与盘口。
-        self._exit_prefetch(
-            [
-                p
-                for p in positions
-                if float(p.get("size", 0) or 0) > 0
-                and p.get("asset", "") not in self._just_dumped
-            ]
-        )
+        # 包 try 的理由同 check_low_balance:预取抛出去会让整轮离场判定不执行(持仓全裸奔
+        # 且无任何状态行),而降级只是退回并发化之前的逐仓自取。
+        try:
+            self._exit_prefetch(
+                [
+                    p
+                    for p in positions
+                    if float(p.get("size", 0) or 0) > 0
+                    and p.get("asset", "") not in self._just_dumped
+                ]
+            )
+        except Exception as e:
+            logger.warning("[离场] 预取失败(退回逐仓自取): %s", e)
         for pos in positions:
             if pos.get("asset", "") in self._just_dumped:
                 continue  # 本 tick 已被低余额清仓卖掉:Data API /positions 滞后仍显满仓,
@@ -691,10 +719,15 @@ class OrderMonitor:
             plan["action"],
             plan["price"],
         )
+        # open_orders 是 tick 开头的共用快照:本 tick 已被撤掉的卖单(低余额/结算清仓撤的)
+        # 在快照里还在,必须滤掉——否则 plan_take_profit 会以为目标价上已有一张卖单而返回
+        # keep,持仓实际无任何卖单保护,状态行还谎报「保持」。
         sells = [
             o
             for o in open_orders
-            if o.get("asset_id") == asset_id and o.get("side") == "SELL"
+            if o.get("asset_id") == asset_id
+            and o.get("side") == "SELL"
+            and o.get("id") not in self._cancelled_sell_ids
         ]
         action = plan["action"]
         basis = describe_cost_basis(cost, lots)
@@ -936,12 +969,17 @@ class OrderMonitor:
         sells = [
             o
             for o in open_orders
-            if o.get("asset_id") == asset_id and o.get("side") == "SELL"
+            if o.get("asset_id") == asset_id
+            and o.get("side") == "SELL"
+            and o.get("id") not in self._cancelled_sell_ids
         ]
         sell_ids = [o["id"] for o in sells]
         if sell_ids:
             try:
                 self.api.cancel_orders(sell_ids)
+                # 撤成功即登记:共用快照里这些单还在,后面的 check_exit 不滤掉就会把它们
+                # 当成"仓已有卖单保护"(市价卖被拒时 -> 裸奔 + 状态行谎报「保持」)。
+                self._cancelled_sell_ids.update(sell_ids)
                 self._record_action(
                     market_id=cid,
                     action_type="exit_cancel_sell",

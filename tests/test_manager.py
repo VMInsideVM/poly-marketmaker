@@ -941,7 +941,11 @@ def test_pnl_start_date_is_project_start():
 
 
 class TestTickSharesOpenOrders:
-    """一个 tick 里 get_open_orders 只取两次:步骤 1-4 共用一份,Step3 自取新鲜的。"""
+    """一个 tick 里 get_open_orders 取两次:步骤 2-4 共用一份,Step3 自取新鲜的。
+
+    Step1(check_buy_orders)也自取,但它那次取数只在**真检测到成交**时才发生;本组用例
+    的 get_trades 返回 [],没有成交,所以次数仍是两次(有成交的轮会是三次)。
+    """
 
     def _worker(self):
         from engine.manager import WalletWorker
