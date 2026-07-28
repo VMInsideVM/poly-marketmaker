@@ -3,10 +3,10 @@
 > 本地单用户的 Polymarket 自动做市工具，通过挂单赚取流动性奖励（liquidity rewards）。
 > A local, single-user app that automates reward-farming market making on Polymarket.
 
-![version](https://img.shields.io/badge/version-6.0.0-blue)
+![version](https://img.shields.io/badge/version-8.2.0-blue)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![flask](https://img.shields.io/badge/flask-3.1-black)
-![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
 
 中文说明在前，English notes follow each section.
 
@@ -86,20 +86,20 @@ Built for **non-technical users**: install, double-click, a browser opens, you s
 
 > 运行时数据写入 `%LOCALAPPDATA%\PolymarketMarketMaker`，不会污染安装目录。
 
-### macOS（Apple 芯片 / Apple Silicon）
+### Linux 服务器
 
-1. 下载 `PolymarketMarketMaker_Mac_arm64.dmg`，双击打开，把里面的 App 拖进「应用程序 / Applications」。
-2. **首次打开务必右键点击 App → 选「打开」**（直接双击会被 Gatekeeper 拦下，因为本 App 未做 Apple 签名）。
-3. 若提示「已损坏，无法打开」（Apple 芯片常见），先在「终端」运行一次下面的命令解除隔离，再打开：
+想让程序 7×24 跑着、不用自己电脑一直开机，可以装到一台 Linux VPS 上，通过自己的域名用 https 访问。步骤见 [`deploy/README.md`](deploy/README.md)。
 
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/PolymarketMarketMaker.app
-   ```
+> ⚠️ **必须配域名并走 https。** 用裸 IP 加 http 访问的话，私钥在提交时是明文穿过公网的。
+> ⚠️ **进程重启后要重新登录**：私钥用登录密码加密，密钥只存在内存里，引擎不会自动恢复。
 
-> 运行时数据写入 `~/Library/Application Support/PolymarketMarketMaker`。
-> ⚠️ 目前仅提供 **Apple 芯片（arm64）** 版本；macOS 端**自动更新暂不可用**，升级请手动到 Releases 下载新版 `.dmg`。
+> Run it 24/7 on a Linux VPS behind your own domain — see [`deploy/README.md`](deploy/README.md). HTTPS is mandatory; the private key crosses the network in plaintext over bare-IP HTTP.
 
-### 启动后（两个系统通用）/ After launch
+### macOS
+
+**不再提供 macOS 安装包**（2026-07-28 起）。此前发布的 `.dmg` 未做 Apple 签名、也从未在真机上验证过，现已停止构建。macOS 用户可以按 [`deploy/README.md`](deploy/README.md) 的服务器模式自行从源码运行。
+
+### 启动后 / After launch
 
 浏览器会自动打开 `http://127.0.0.1:8765`：
 
@@ -107,7 +107,7 @@ Built for **non-technical users**: install, double-click, a browser opens, you s
 2. 录入钱包私钥（仅需私钥，程序会自动推导你的 Polymarket 资金存款地址 / Gnosis Safe）。
 3. 确认参数后启动引擎。**建议先用小额资金试跑**，观察止盈/止损与挂单是否符合预期。
 
-> Download the installer for your OS from **Releases** (`.exe` for Windows, `.dmg` for Apple-Silicon macOS — on macOS, right-click → Open the first time since the app is unsigned), open `http://127.0.0.1:8765`, set a login password (used to encrypt your key — **not recoverable if lost**), enter your wallet private key, and start the engine. Test with small amounts first.
+> Download the Windows installer (`.exe`) from **Releases**, or deploy to a Linux VPS per [`deploy/README.md`](deploy/README.md). Open `http://127.0.0.1:8765`, set a login password (used to encrypt your key, **not recoverable if lost**), enter your wallet private key, and start the engine. Test with small amounts first.
 
 ⚠️ **停止引擎会同时停止止损监控**：已停止时仍持有的仓位将不再被止损保护——界面对此有明确提示，请留意。
 
@@ -222,9 +222,10 @@ powershell -ExecutionPolicy Bypass -File release.ps1
 - 版本号唯一来源：`version.py`（被 build / release / 自动更新共同读取）。
 - 发版需要已安装并登录的 [GitHub CLI](https://cli.github.com/)（`gh auth login`）。
 - 根目录若存在 `RELEASE_NOTES.md` 则作为 Release 说明，否则自动生成。
-- **macOS 包（`.dmg`）在云端构建**：`.github/workflows/build-mac.yml` 在 GitHub 的 Apple 芯片 runner 上用 `MarketMaker-mac.spec` 打包。发版（release published）时自动触发并挂到该 Release；也可在 Actions 里手动运行（`workflow_dispatch`，填 tag）把产物补挂到已有 Release。
+- **发版只出 Windows 安装包**（2026-07-28 起）。Linux 服务器模式不需要安装包，更新走 `git fetch --tags` + `git reset --hard <tag>`，只要 tag 推上去即可。
+- **macOS 已停止构建**：`.github/workflows/build-mac.yml` 的 `release published` 自动触发已移除，只留手动触发（Actions 页填 tag 可给某个 Release 补挂 `.dmg`）。停发对客户端安全——`web/update.py` 的 `parse_release` 在 darwin 上找不到 `.dmg` 时判定「无可用更新」，不会报错。
 
-> Single source of version truth is `version.py`. `release.ps1` builds the Windows installer locally; the macOS `.dmg` is built in the cloud by `.github/workflows/build-mac.yml` (Apple-Silicon runner) and attached to the release automatically on publish.
+> Single source of version truth is `version.py`. `release.ps1` builds the Windows installer locally; Linux updates itself from the pushed git tag and needs no artifact. macOS builds are no longer published (the workflow keeps a manual trigger only).
 
 ---
 

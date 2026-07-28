@@ -1,8 +1,14 @@
 name: Build macOS app
 
 # 在 GitHub 的 macOS (Apple 芯片) runner 上把应用打成 .dmg，并挂到指定 Release。
-#   - 手动触发 (workflow_dispatch)：把产物挂到 release_tag 指定的已有 Release（不发新版）。
-#   - 发版触发 (release published)：每次新建 Release 时自动构建并挂到该 Release。
+#
+# ⚠️ 2026-07-28 起不再随发版自动构建（用户决定不再发 Mac 版）。原来的
+# `release: types: [published]` 触发已移除，只保留手动触发。以后要给某个
+# Release 补 .dmg，去 Actions 页手动跑本工作流并填 release_tag 即可；要恢复
+# 自动发布就把那两行 trigger 加回来。
+#
+# 停发 Mac 对客户端是安全的：web/update.py 的 parse_release 在 darwin 上找
+# 不到 .dmg 时 pkg_url 为 None，检查更新会判定「无可用更新」而不是报错。
 # 不做 Apple 签名/公证：用户首次需右键→打开（README 有说明）。
 
 on:
@@ -12,8 +18,6 @@ on:
         description: "要挂载 .dmg 的 Release tag（例如 v1.0.15）"
         required: true
         default: "v1.0.15"
-  release:
-    types: [published]
 
 permissions:
   contents: write
