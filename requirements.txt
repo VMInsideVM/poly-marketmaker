@@ -4,3 +4,4 @@ py-builder-relayer-client>=0.0.1
 cryptography>=44.0.0
 socksio>=1.0.0
 PySocks>=1.7.1
+waitress>=3.0.0

@@ -22,3 +22,14 @@ def pick_port(host: str, preferred: int) -> int:
         f"无法绑定任何端口(首选 {preferred} 与系统分配端口均失败);"
         f"请检查 {host} 上的端口占用/保留情况"
     )
+
+
+def resolve_port(host: str, preferred: int, server_mode: bool) -> int:
+    """选定实际监听端口。
+
+    服务器模式下固定用 preferred:反向代理写死了这个端口,一旦回退到别的端口,
+    服务看起来启动成功、网页却打不开。端口被占用时让后续 bind 直接失败,
+    由 systemd 的重启循环和日志把问题暴露出来。
+    本地模式沿用 pick_port 的回退行为(见其 docstring 中的 Windows 端口保留问题)。
+    """
+    return preferred if server_mode else pick_port(host, preferred)

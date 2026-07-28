@@ -45,3 +45,36 @@ def test_raises_when_nothing_bindable():
         sock.return_value.__enter__.return_value = s
         with pytest.raises(OSError):
             pick_port(HOST, 8765)
+
+
+import socket
+from utils.net import resolve_port
+
+
+class TestResolvePort:
+    def test_server_mode_returns_preferred_without_probing(self):
+        # 服务器模式下不探测、不回退,直接返回首选端口
+        assert resolve_port("127.0.0.1", 8765, True) == 8765
+
+    def test_server_mode_returns_preferred_even_if_occupied(self):
+        # 端口被占用也照样返回它 —— 让后续 bind 直接报错退出,
+        # 而不是悄悄换端口导致 Caddy 反代不到
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            occupied = s.getsockname()[1]
+            assert resolve_port("127.0.0.1", occupied, True) == occupied
+
+    def test_local_mode_falls_back_when_occupied(self):
+        # 本地模式保持原有行为:占用时回退到别的端口
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            occupied = s.getsockname()[1]
+            assert resolve_port("127.0.0.1", occupied, False) != occupied
+
+    def test_local_mode_returns_preferred_when_free(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            free = s.getsockname()[1]
+        assert resolve_port("127.0.0.1", free, False) == free
