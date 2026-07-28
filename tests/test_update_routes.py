@@ -1,19 +1,43 @@
-"""tests/test_update_routes.py — 更新端点(免登录 + 安全闸)。"""
+"""tests/test_update_routes.py — 更新端点(需登录 + 安全闸)。"""
 
 import web.routes as routes
 import web.update as updater
 
 
-def _client():
+def _client(logged_in=True):
     routes.app.config["TESTING"] = True
-    return routes.app.test_client()
+    c = routes.app.test_client()
+    if logged_in:
+        with c.session_transaction() as s:
+            s["logged_in"] = True
+    return c
 
 
-def test_check_is_public_and_returns_json(monkeypatch):
+def test_check_requires_login(monkeypatch):
+    called = []
+    monkeypatch.setattr(updater, "check_update", lambda: called.append(1) or {})
+    resp = _client(logged_in=False).get("/api/update/check")
+    assert resp.status_code in (301, 302)  # 重定向到登录页
+    assert called == []  # 未登录不应触发任何检测
+
+
+def test_apply_requires_login(monkeypatch):
+    called = []
+    monkeypatch.setattr(updater, "start_update", lambda mgr: called.append(1) or {})
+    resp = _client(logged_in=False).post("/api/update/apply")
+    assert resp.status_code in (301, 302)
+    assert called == []  # 关键:未登录绝不能触发更新
+
+
+def test_status_requires_login():
+    resp = _client(logged_in=False).get("/api/update/status")
+    assert resp.status_code in (301, 302)
+
+
+def test_check_returns_json_when_logged_in(monkeypatch):
     monkeypatch.setattr(
         updater, "check_update", lambda: {"update_available": False, "current": "1.0.7"}
     )
-    # 关键:不登录也能访问
     resp = _client().get("/api/update/check")
     assert resp.status_code == 200
     assert resp.get_json()["current"] == "1.0.7"
@@ -35,7 +59,7 @@ def test_apply_ok_returns_200(monkeypatch):
     assert resp.get_json()["ok"] is True
 
 
-def test_status_returns_snapshot():
+def test_status_returns_snapshot_when_logged_in():
     updater.STATE.state = "downloading"
     updater.STATE.percent = 42
     resp = _client().get("/api/update/status")

@@ -1388,16 +1388,19 @@ def api_dashboard():
 
 
 @app.route("/api/update/check", methods=["GET"])
+@login_required
 def api_update_check():
     return jsonify(updater.check_update())
 
 
 @app.route("/api/update/apply", methods=["POST"])
+@login_required
 def api_update_apply():
     result = updater.start_update(manager)
     return jsonify(result), (200 if result.get("ok") else 409)
 
 
 @app.route("/api/update/status", methods=["GET"])
+@login_required
 def api_update_status():
     return jsonify(updater.STATE.snapshot())
