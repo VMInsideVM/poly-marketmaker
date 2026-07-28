@@ -47,7 +47,14 @@
         if (d.update_available) {
           $('update-title').textContent = '发现新版本 v' + d.latest + '(当前 v' + d.current + ')';
           $('update-notes').textContent = d.notes || '';
-          show('update-notes'); show('update-actions-update', 'flex');
+          show('update-notes');
+          if (d.logged_in) {
+            show('update-actions-update', 'flex');
+          } else {
+            // /api/update/apply 需要登录,未登录点"现在更新"只会被重定向,提示误导
+            $('update-msg').textContent = '请先登录后再更新。';
+            show('update-msg'); show('update-actions-close', 'flex');
+          }
         } else if (d.latest) {
           $('update-title').textContent = '已是最新版本';
           $('update-msg').textContent = '当前版本 v' + d.current + ' 已是最新。';
@@ -72,6 +79,7 @@
 
   $('update-yes').onclick = function () {
     reset();
+    pollFailSince = null;
     $('update-title').textContent = '正在更新';
     show('update-progress-wrap');
     setProgress(0, '准备中…');
@@ -96,8 +104,16 @@
     show('update-actions-close', 'flex'); // 失败后让用户能关闭
   }
 
+  // 连续轮询失败超过这么久就放弃:服务器模式下进程重启后 secret_key 会变、
+  // 旧 session 失效,/api/update/status 会被 @login_required 重定向到登录页
+  // 的 HTML,r.json() 解析失败进入 catch,如果不设上限就会永远轮询下去。
+  // 本地模式进程重启很快,轮询会在超时前重新连上,不受影响。
+  var POLL_FAIL_TIMEOUT_MS = 30000;
+  var pollFailSince = null;
+
   function poll() {
     fetch('/api/update/status').then(function (r) { return r.json(); }).then(function (s) {
+      pollFailSince = null;
       if (s.state === 'downloading') setProgress(s.percent, '正在下载… ' + (s.percent || 0) + '%');
       else if (s.state === 'verifying') setProgress(100, '正在校验…');
       else if (s.state === 'installing') setProgress(100, INSTALL_MSG);
@@ -106,6 +122,14 @@
       setTimeout(poll, 800);
     }).catch(function () {
       // 连接断开 = 服务端已退出、进入安装阶段(预期现象)
+      var now = Date.now();
+      if (pollFailSince === null) { pollFailSince = now; }
+      if (now - pollFailSince >= POLL_FAIL_TIMEOUT_MS) {
+        // 服务器模式:新进程不会"自动重新打开",旧 session 也已失效
+        setProgress(100, '更新已完成,请刷新页面重新登录。');
+        show('update-actions-close', 'flex');
+        return;
+      }
       setProgress(100, INSTALL_MSG);
       setTimeout(poll, 2000);
     });

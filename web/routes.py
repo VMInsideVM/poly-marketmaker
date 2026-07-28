@@ -1463,7 +1463,10 @@ def api_dashboard():
 
 @app.route("/api/update/check", methods=["GET"])
 def api_update_check():
-    return jsonify(updater.check_update())
+    result = updater.check_update()
+    # apply 需要登录;未登录时前端不该展示"现在更新"按钮(点了也只会被重定向)
+    result["logged_in"] = bool(session.get("logged_in"))
+    return jsonify(result)
 
 
 @app.route("/api/update/apply", methods=["POST"])
