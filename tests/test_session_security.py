@@ -1,8 +1,11 @@
 """tests/test_session_security.py — 会话 cookie 的安全属性。"""
 
+import hashlib
 from datetime import timedelta
 
 import web.routes as routes
+from models.database import Database
+from utils.crypto import derive_key
 
 
 def test_httponly_and_samesite_always_on():
@@ -57,3 +60,38 @@ def test_forwarded_for_becomes_remote_addr():
         proxy_fix.app = original_inner_app
 
     assert captured["ip"] == "203.0.113.9"
+
+
+def test_login_sets_permanent_session_cookie(tmp_path):
+    # PERMANENT_SESSION_LIFETIME 只对 permanent=True 的 session 生效;Flask 默认
+    # session 是非 permanent 的“关浏览器即失效”会话 cookie,不带 Expires/Max-Age。
+    # 只测 config 字典里的 PERMANENT_SESSION_LIFETIME 测不出登录路由是否真的把
+    # session 标成了 permanent —— 这里跑真实的 /login 流程,检查下发的 Set-Cookie
+    # 头是否带过期时间。
+    password = "test-password-123456"
+    db = Database(str(tmp_path / "session_security.db"))
+    db.init()
+    salt = b"0123456789abcdef"
+    key = derive_key(password, salt)
+    hashed = hashlib.sha256(key).hexdigest()
+    db.save_password(hashed, salt)
+
+    original_db = routes.db
+    original_manager = routes.manager
+    original_key = routes.encryption_key
+    routes.db = db
+    routes.manager = None
+    routes.encryption_key = None
+    try:
+        client = routes.app.test_client()
+        resp = client.post("/login", data={"password": password})
+        set_cookie_headers = resp.headers.get_all("Set-Cookie")
+        session_cookie = next(
+            h for h in set_cookie_headers if h.startswith("session=")
+        )
+        assert "Expires=" in session_cookie or "Max-Age=" in session_cookie
+    finally:
+        routes.db = original_db
+        routes.manager = original_manager
+        routes.encryption_key = original_key
+        db.close()

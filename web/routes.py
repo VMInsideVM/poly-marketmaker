@@ -227,6 +227,7 @@ def setup():
         mgr = EngineManager(db, key)
         init_manager(mgr)
         session["logged_in"] = True
+        session.permanent = True
         return redirect(url_for("dashboard"))
     return render_template("setup.html")
 
@@ -247,6 +248,7 @@ def login():
                 mgr = EngineManager(db, key)
                 init_manager(mgr)
             session["logged_in"] = True
+            session.permanent = True
             return redirect(url_for("dashboard"))
         flash("密码错误")
     return render_template("login.html")
