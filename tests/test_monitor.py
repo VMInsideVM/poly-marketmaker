@@ -2240,7 +2240,12 @@ class TestExitPrefetch:
         assert "tokA" not in monitor._book_cache
 
     def test_low_balance_prefetches_and_check_exit_reuses(self):
-        # 低余额先预取过,check_exit 不再重复取同一批
+        # 低余额先预取过,check_exit 不再重复取同一批。用一笔与持仓 size 匹配的真实成交
+        # 让成本重建得出来(0.20),循环才会真的走到 _sell_book——否则(get_trades=[])
+        # 两边都在 cost is None 处提前 return,断言测不到"缓存复用"这件事本身
+        # (评审 2026-07-28 指出的 vacuous test)。买盘留空:让 check_low_balance 的
+        # 清仓判定因无买盘跳过(不卖出、不进 _just_dumped),这样 check_exit 才会正常
+        # 处理这个仓、真正调用 _sell_book 读缓存,而不是因为"已被清掉"而整个跳过。
         monitor, api, db = _make_monitor()
         monitor.begin_status_tick()
         db.get_template_for.return_value = {
@@ -2248,12 +2253,34 @@ class TestExitPrefetch:
             "liquidate_target_usd": 4,
             "cooldown_minutes": 20,
         }
+        db.get_market_daily_reward.return_value = 50  # 不落进低奖励档,与本用例无关
         api.get_balance.return_value = 1.0
         api.get_user_positions.return_value = [self._pos("tokA", "cid1")]
         api.get_open_orders.return_value = []
-        api.get_orderbook.return_value = self._ob()
-        api.get_trades.return_value = []
+        api.get_orderbook.return_value = {
+            "bids": [],  # 无买盘 -> 低余额清仓判定跳过,不会把这个仓卖掉
+            "asks": [{"price": "0.31", "size": "1000"}],
+            "tick_size": "0.01",
+        }
+        api.get_trades.return_value = [
+            {
+                "id": "t-tokA",
+                "market": "cid1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o-tokA",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "100",
+                        "price": "0.20",
+                        "asset_id": "tokA",
+                    }
+                ],
+            }
+        ]
         monitor.check_low_balance()
+        assert "tokA" not in monitor._just_dumped  # 无买盘没被清掉,仍走正常离场
         before = api.get_orderbook.call_count
         monitor.check_exit()
         assert api.get_orderbook.call_count == before  # 复用,没再取
