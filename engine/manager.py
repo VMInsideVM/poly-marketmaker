@@ -131,13 +131,23 @@ class WalletWorker:
         """One monitor pass: detect fills, UMA resolution guard, three-tier
         exit, strategy compliance. check_resolution runs right after fill
         detection to cancel buys in any market whose UMA resolution was just
-        proposed; check_exit then reflects the latest fills."""
+        proposed; check_exit then reflects the latest fills.
+
+        步骤 1-4 共用一份 tick 开头取的挂单快照。Step3(check_sell_orders)**不共用**:
+        它跑在最后、共用的那份最陈旧,而它会对已经消失的单再撤一次并往 actions 写
+        幻影记录,省一个往返不值。快照取不到时传 None,各步照旧自取或自行降级。
+        """
         self._maybe_rebuild_pnl()
         self.monitor.begin_status_tick()
-        self.monitor.check_buy_orders()
-        self.monitor.check_resolution()
-        self.monitor.check_low_balance()
-        self.monitor.check_exit()
+        try:
+            open_orders = self.api.get_open_orders()
+        except Exception as e:
+            logger.warning("tick 开头取挂单失败(各步自行降级): %s", e)
+            open_orders = None
+        self.monitor.check_buy_orders(open_orders)
+        self.monitor.check_resolution(open_orders)
+        self.monitor.check_low_balance(open_orders)
+        self.monitor.check_exit(open_orders)
         self.monitor.check_sell_orders()
         self.monitor.publish_status()
 

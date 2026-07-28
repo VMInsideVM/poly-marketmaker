@@ -937,3 +937,35 @@ def test_pnl_start_date_is_project_start():
     from engine.manager import PNL_START_DATE
 
     assert PNL_START_DATE == "2026-05-17"
+
+
+class TestTickSharesOpenOrders:
+    """一个 tick 里 get_open_orders 只取两次:步骤 1-4 共用一份,Step3 自取新鲜的。"""
+
+    def _worker(self):
+        from engine.manager import WalletWorker
+
+        api = MagicMock()
+        db = MagicMock()
+        api.get_open_orders.return_value = []
+        api.get_trades.return_value = []
+        api.get_user_positions.return_value = []
+        api.gamma_resolution_status.return_value = {}
+        api.get_balance.return_value = 100.0
+        db.get_settings.return_value = {"rewards_cache_ttl_sec": 0}
+        db.get_template_for.return_value = {"low_balance_threshold_usd": 0}
+        db.get_blacklist_ids.return_value = set()
+        worker = WalletWorker(api, db, "0xW", {"fill_check_interval_sec": 5})
+        worker._last_pnl_date = "9999-01-01"  # 不让台账重算线程掺进来
+        return worker, api, db
+
+    def test_tick_fetches_open_orders_twice(self):
+        worker, api, db = self._worker()
+        worker._tick()
+        assert api.get_open_orders.call_count == 2
+
+    def test_shared_snapshot_failure_does_not_kill_the_tick(self):
+        # 共用快照取不到时各步自己降级,tick 不能整个抛出去
+        worker, api, db = self._worker()
+        api.get_open_orders.side_effect = RuntimeError("network")
+        worker._tick()  # 不抛异常即通过

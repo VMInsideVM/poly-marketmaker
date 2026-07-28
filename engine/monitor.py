@@ -211,7 +211,7 @@ class OrderMonitor:
         return result
 
     # --- Step 1: fills via get_trades (flatten maker_orders) ---
-    def check_buy_orders(self):
+    def check_buy_orders(self, open_orders=None):
         # 去重集未就绪(启动 priming 失败、网络还没恢复):先补 priming;仍失败就本轮
         # 不处理成交,避免把整批历史成交当"新成交"重放(cancel_remainder 洪水)。
         if self._prime_pending and not self._prime_seen_keys():
@@ -233,12 +233,15 @@ class OrderMonitor:
         # 可靠——这是根治重放洪水的护栏,不依赖 get_trades/水位。
         open_ids: set = set()
         if fills:
-            try:
-                open_ids = {o.get("id") for o in self.api.get_open_orders()}
-            except Exception as e:
-                logger.warning(
-                    "get_open_orders failed in Step 1 (本轮跳过撤余量): %s", e
-                )
+            if open_orders is not None:
+                open_ids = {o.get("id") for o in open_orders}
+            else:
+                try:
+                    open_ids = {o.get("id") for o in self.api.get_open_orders()}
+                except Exception as e:
+                    logger.warning(
+                        "get_open_orders failed in Step 1 (本轮跳过撤余量): %s", e
+                    )
         cancelled_orders: set = set()
         for ev in fills:
             try:
@@ -298,7 +301,7 @@ class OrderMonitor:
             detail=f"成交{size}，止盈由持仓维护",
         )
 
-    def check_resolution(self):
+    def check_resolution(self, open_orders=None):
         """UMA 结算守卫:对已挂买单的市场,一旦 umaResolutionStatus 非空(有人在 UMA
         上提交了 resolution)即撤掉该市场全部 BUY,避免被成交买进一个即将结算的市场。
         持仓与卖单不动(卖单仍由 check_exit 在结算前正常离场)。
@@ -306,11 +309,12 @@ class OrderMonitor:
         Gamma 失败时 gamma_resolution_status 返回 {} -> 一律不撤(fail-open),绝不
         因一次接口抖动误撤全仓买单;下个 tick 自然重试。
         """
-        try:
-            open_orders = self.api.get_open_orders()
-        except Exception as e:
-            logger.error("get_open_orders failed (skip resolution guard): %s", e)
-            return
+        if open_orders is None:
+            try:
+                open_orders = self.api.get_open_orders()
+            except Exception as e:
+                logger.error("get_open_orders failed (skip resolution guard): %s", e)
+                return
         buys_by_cid: dict = {}
         for o in open_orders:
             if o.get("side") != "BUY":
@@ -454,7 +458,7 @@ class OrderMonitor:
             )
             return 0.01, "0.01", None, None
 
-    def check_low_balance(self):
+    def check_low_balance(self, open_orders=None):
         """余额 < 阈值(0=关)时按优先级逐笔市价卖持仓腾现金,卖到「停手目标」停。
         覆盖「永不低于成本」(主动清仓腾现金,同结算清仓)。用估算余额防过卖(市价卖后链上
         余额有滞后,逐笔重查会过卖);无买盘跳过;整体失败不阻断其余步骤。在 check_exit 之前跑。"""
@@ -482,7 +486,8 @@ class OrderMonitor:
             return  # 已达目标(target<threshold 时可能):免空扫拉持仓/成本
         try:
             positions = self.api.get_user_positions(self._funder())
-            open_orders = self.api.get_open_orders()
+            if open_orders is None:
+                open_orders = self.api.get_open_orders()
         except Exception as e:
             logger.warning("fetch failed (skip low-balance): %s", e)
             return
@@ -554,7 +559,7 @@ class OrderMonitor:
         if dumped_any:
             self._liquidate_cooldown_until = time.time() + LIQUIDATE_COOLDOWN_SEC
 
-    def check_exit(self):
+    def check_exit(self, open_orders=None):
         """两段式离场:成本≤买一挂卖一,成本>买一挂成本价(永不低于成本;亏损≥强平阈值兜底市价止损)。
 
         强平阈值可配置(模板 stop_loss_mode):按比例(占成本%,默认20%)或按固定金额(美分)。
@@ -571,11 +576,12 @@ class OrderMonitor:
         except Exception as e:
             logger.warning("Data API positions failed (skip exit): %s", e)
             return
-        try:
-            open_orders = self.api.get_open_orders()
-        except Exception as e:
-            logger.error("get_open_orders failed (skip exit): %s", e)
-            return
+        if open_orders is None:
+            try:
+                open_orders = self.api.get_open_orders()
+            except Exception as e:
+                logger.error("get_open_orders failed (skip exit): %s", e)
+                return
         # 结算守卫(持仓侧):对持仓所在市场批量取 UMA 结算状态,结果已提交(非空)的市场,
         # 该持仓无视盈亏市价清仓。fail-open:Gamma 返回 {} -> resolving 空 -> 全部走原离场。
         cids = [
