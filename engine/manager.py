@@ -131,15 +131,53 @@ class WalletWorker:
         """One monitor pass: detect fills, UMA resolution guard, three-tier
         exit, strategy compliance. check_resolution runs right after fill
         detection to cancel buys in any market whose UMA resolution was just
-        proposed; check_exit then reflects the latest fills."""
+        proposed; check_exit then reflects the latest fills.
+
+        步骤 2-4(结算/低余额/离场)共用一份 tick 开头取的挂单快照。**Step1 与 Step3 各自
+        自取**:Step1 的挂单是「成交后这单还在不在挂」这条防重放洪水护栏的判据,共用快照
+        比它要判定的成交旧一个往返、会把护栏磨钝,而那次取数本来就只在真有成交时才发生;
+        Step3 跑在最后、共用的那份最陈旧,而它会对已经消失的单再撤一次并往 actions 写
+        幻影记录。两处省的都是一个低频往返,不值。快照取不到时传 None,各步自行降级。
+        """
+        t0 = time.time()
+        marks: list = []
+
+        def _step(name, fn, *a):
+            t = time.time()
+            try:
+                fn(*a)
+            finally:
+                marks.append(f"{name}{time.time() - t:.1f}s")
+
         self._maybe_rebuild_pnl()
         self.monitor.begin_status_tick()
-        self.monitor.check_buy_orders()
-        self.monitor.check_resolution()
-        self.monitor.check_low_balance()
-        self.monitor.check_exit()
-        self.monitor.check_sell_orders()
-        self.monitor.publish_status()
+        try:
+            open_orders = self.api.get_open_orders()
+        except Exception as e:
+            logger.warning("tick 开头取挂单失败(各步自行降级): %s", e)
+            open_orders = None
+        try:
+            _step("成交", self.monitor.check_buy_orders)
+            _step("结算", self.monitor.check_resolution, open_orders)
+            _step("低余额", self.monitor.check_low_balance, open_orders)
+            _step("离场", self.monitor.check_exit, open_orders)
+            _step("合规", self.monitor.check_sell_orders)
+            self.monitor.publish_status()
+        finally:
+            # 监控周期 = 本轮耗时 + fill_check_interval_sec,而撤单/止损的响应延迟上限
+            # 就是这个周期。哪一步在吃时间只有这条日志看得见,放 finally 是因为抛异常的
+            # 那一轮往往正是最慢的那一轮,证据不能跟着异常一起丢。
+            # 持仓数 None = 本轮离场早退没判定成(取持仓/挂单失败),渲染成 ?,
+            # 绝不拿上一轮的数冒充这一轮。
+            pos_n = self.monitor.last_position_count
+            logger.info(
+                "[tick] %s 持仓%s 挂单%s 总计%.1fs | %s",
+                self.wallet_address[:8],
+                pos_n if pos_n is not None else "?",
+                len(open_orders) if open_orders is not None else "?",
+                time.time() - t0,
+                " ".join(marks),
+            )
 
     def _maybe_rebuild_pnl(self):
         """每日盈亏台账:首个 tick(含每次重启)从 2026-05-17 全量补漏到今天;之后跨北京日

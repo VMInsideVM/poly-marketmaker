@@ -1778,6 +1778,136 @@ class TestLowBalance:
         api.place_limit_sell.assert_not_called()
 
 
+def _monitor_with_one_position(low_balance=0):
+    """离场夹具:一个仓(tokA / cid1,100 份,成交重建成本 0.20)+ 盘口 0.30/0.31。
+
+    low_balance>0 时同时打开低余额清仓(阈值与停手目标都取这个数,余额固定 1.0)。
+    """
+    monitor, api, db = _make_monitor(
+        settings={
+            "low_balance_threshold_usd": low_balance,
+            "liquidate_target_usd": low_balance,
+            "low_reward_threshold_usd": 30,
+            "small_position_shares": 20,
+        }
+    )
+    api.get_balance.return_value = 1.0
+    api.get_user_positions.return_value = [
+        {"asset": "tokA", "size": "100", "conditionId": "cid1", "curPrice": "0.30"}
+    ]
+    api.get_orderbook.return_value = {
+        "bids": [{"price": "0.30", "size": "500"}],
+        "asks": [{"price": "0.31", "size": "500"}],
+        "tick_size": "0.01",
+    }
+    api.get_trades.return_value = [
+        {
+            "id": "t-tokA",
+            "market": "cid1",
+            "match_time": "1",
+            "maker_orders": [
+                {
+                    "order_id": "o-tokA",
+                    "maker_address": "0xFUNDER",
+                    "side": "BUY",
+                    "matched_amount": "100",
+                    "price": "0.20",
+                    "asset_id": "tokA",
+                }
+            ],
+        }
+    ]
+    db.get_market_daily_reward.return_value = 50  # 不落进低奖励档,与本组用例无关
+    monitor.begin_status_tick()
+    return monitor, api, db
+
+
+class TestDumpRejectedLeavesNoUnprotectedPosition:
+    """低余额清仓被拒(撤单已成功、市价卖没成)-> 同一 tick 的 check_exit 必须把卖单挂回来。
+
+    步骤 1-4 共用 tick 开头那份挂单快照,而清仓是在拍完快照之后才撤的卖单——快照里它还在。
+    不把已撤的单滤掉,plan_take_profit 就判「目标价上已有一张卖单」-> keep,于是持仓既没被
+    卖掉也没有卖单保护,状态行还谎报「保持…挂卖单0.3100」指着一张不存在的单。
+    触发面不冷门:FAK(市价卖)打进薄奖励市场没吃到就被杀 = status unmatched = OrderRejected,
+    而低余额清仓正是在没钱的钱包上干这件事;失败不设冷却,每 tick 复发。
+    """
+
+    SNAPSHOT_SELL = {
+        "id": "sell1",
+        "asset_id": "tokA",
+        "side": "SELL",
+        "price": "0.31",  # 正是 plan_exit 这轮要挂的价 -> 不滤掉必判 keep
+        "original_size": "100",
+        "size_matched": "0",
+    }
+
+    def test_exit_replaces_sell_after_failed_liquidation(self):
+        monitor, api, db = _monitor_with_one_position(low_balance=4)
+        api.place_market_sell.side_effect = RuntimeError("unmatched: FAK 未成交即被杀")
+        snapshot = [self.SNAPSHOT_SELL]
+
+        monitor.check_low_balance(snapshot)
+        # 清仓失败:卖单已撤、仓没卖掉,也没进 _just_dumped
+        api.cancel_orders.assert_called_once_with(["sell1"])
+        assert "tokA" not in monitor._just_dumped
+
+        monitor.check_exit(snapshot)
+        api.place_limit_sell.assert_called_once()
+        args, kwargs = api.place_limit_sell.call_args
+        assert args[0] == "tokA"
+        assert abs(args[1] - 0.31) < 1e-9  # A 档挂卖一,且 ≥ 成本 0.20
+        assert abs(args[2] - 100.0) < 1e-9
+        # 撤过的单不能再撤一次(重复撤已撤单会刷 already-canceled)
+        assert api.cancel_orders.call_count == 1
+
+    def test_status_row_does_not_claim_keep_when_sell_was_cancelled(self):
+        monitor, api, db = _monitor_with_one_position(low_balance=4)
+        api.place_market_sell.side_effect = RuntimeError("unmatched: FAK 未成交即被杀")
+        snapshot = [self.SNAPSHOT_SELL]
+
+        monitor.check_low_balance(snapshot)
+        monitor.check_exit(snapshot)
+        actions = [str(r.get("action", "")) for r in monitor._status_rows]
+        assert not any("保持" in a for a in actions), actions
+        assert any("挂卖单" in a for a in actions), actions
+
+
+class TestExitPrefetchFailureDegradesInsteadOfKillingTheTick:
+    """_exit_prefetch 抛出去 = 整轮离场判定不执行(持仓全无保护、无 ⚠️ 状态行、什么都不发布)。
+
+    parallel_map 可能在任何一个任务开跑之前就抛 —— 最现实的是线程池建不出线程
+    (N 个钱包 × 6 路 + 采集的 4 路同进程)。降级是免费的:预取表为空 = 逐仓回退自取,
+    也就是并发化之前的串行行为。
+    """
+
+    def test_check_exit_completes_when_prefetch_raises(self):
+        monitor, api, db = _monitor_with_one_position()
+        monitor._exit_prefetch = MagicMock(
+            side_effect=RuntimeError("can't start new thread")
+        )
+        monitor.check_exit([])
+        api.place_limit_sell.assert_called_once()  # 回退自取,该挂的卖单照挂
+        assert monitor._status_rows  # 状态行照出,监控表不冻
+
+    def test_check_low_balance_completes_when_prefetch_raises(self):
+        monitor, api, db = _monitor_with_one_position(low_balance=4)
+        monitor._exit_prefetch = MagicMock(
+            side_effect=RuntimeError("can't start new thread")
+        )
+        monitor.check_low_balance([])
+        api.place_market_sell.assert_called_once_with("tokA", 100.0)
+
+
+def test_last_position_count_is_unknown_when_exit_returns_early():
+    # tick 耗时日志的持仓数不能骗人:离场早退(取持仓失败)时置 None(日志渲染成 ?),
+    # 绝不把上一轮的持仓数当成这一轮报出来。
+    monitor, api, db = _make_monitor()
+    monitor.last_position_count = 7  # 上一轮的数
+    api.get_user_positions.side_effect = RuntimeError("data api down")
+    monitor.check_exit()
+    assert monitor.last_position_count is None
+
+
 class TestMarketRewards:
     """一次取数拿到 rewards_max_spread 与每日奖励;TTL=0 时每次都重新联网。"""
 
@@ -2051,6 +2181,239 @@ class TestStep3RewardDrop:
         monitor.check_sell_orders()
         assert api.get_rewards_for_market.call_count == 1
         api.cancel_orders.assert_not_called()
+
+
+class TestExitPrefetch:
+    """离场判定的成交/盘口并发预取:按市场/asset 去重、逐项容错、不重复取。"""
+
+    def _pos(self, asset, cid, size="100"):
+        return {"asset": asset, "conditionId": cid, "size": size, "curPrice": "0.30"}
+
+    def _ob(self):
+        return {
+            "bids": [{"price": "0.30", "size": "1000"}],
+            "asks": [{"price": "0.31", "size": "1000"}],
+            "tick_size": "0.01",
+        }
+
+    def test_dedups_trades_by_condition_id(self):
+        # 同市场 YES/NO 两个仓:成交只取一次,盘口按 asset 取两次
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = [{"id": "t1"}]
+        monitor._exit_prefetch(
+            [self._pos("tokYes", "cid1"), self._pos("tokNo", "cid1")]
+        )
+        assert api.get_trades.call_count == 1
+        assert api.get_orderbook.call_count == 2
+        assert monitor._trades_by_cid == {"cid1": [{"id": "t1"}]}
+        assert set(monitor._book_cache) == {"tokYes", "tokNo"}
+
+    def test_trades_failure_recorded_as_none(self):
+        # 取数失败记 None,与「取到了但没有成交」([])区分开
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.side_effect = RuntimeError("network")
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        assert monitor._trades_by_cid == {"cid1": None}
+
+    def test_empty_trades_list_is_not_none(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        assert monitor._trades_by_cid == {"cid1": []}
+
+    def test_book_failure_recorded_as_none(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_trades.return_value = []
+        api.get_orderbook.side_effect = RuntimeError("network")
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        assert monitor._book_cache == {"tokA": None}
+
+    def test_one_failure_does_not_affect_others(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_trades.return_value = []
+
+        def _ob_or_boom(asset_id):
+            if asset_id == "tokBad":
+                raise RuntimeError("network")
+            return self._ob()
+
+        api.get_orderbook.side_effect = _ob_or_boom
+        monitor._exit_prefetch(
+            [self._pos("tokBad", "cid1"), self._pos("tokOk", "cid2")]
+        )
+        assert monitor._book_cache["tokBad"] is None
+        assert monitor._book_cache["tokOk"] == self._ob()
+
+    def test_second_call_only_fetches_the_difference(self):
+        # check_low_balance 先预取过一轮时,check_exit 这轮只补差集
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        monitor._exit_prefetch([self._pos("tokA", "cid1"), self._pos("tokB", "cid2")])
+        assert api.get_trades.call_count == 2  # cid1 一次 + cid2 一次
+        assert api.get_orderbook.call_count == 2  # tokA 一次 + tokB 一次
+
+    def test_begin_status_tick_clears_both_caches(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        monitor.begin_status_tick()
+        assert monitor._trades_by_cid == {}
+        assert monitor._book_cache == {}
+
+    def test_trades_wave_completes_before_books_wave(self):
+        # 顺序不可调:盘口驱动挂价与 B0 判定,必须是更新鲜的那份
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        seen = []
+        api.get_trades.side_effect = lambda *a, **k: seen.append("trades") or []
+        api.get_orderbook.side_effect = (
+            lambda *a, **k: seen.append("book") or self._ob()
+        )
+        monitor._exit_prefetch([self._pos("tokA", "cid1"), self._pos("tokB", "cid2")])
+        assert seen.count("trades") == 2 and seen.count("book") == 2
+        assert seen.index("book") > max(i for i, s in enumerate(seen) if s == "trades")
+
+    def test_skips_blank_ids(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._exit_prefetch([{"asset": "", "conditionId": "", "size": "10"}])
+        assert api.get_trades.call_count == 0
+        assert api.get_orderbook.call_count == 0
+
+    def test_cost_lots_uses_prefetched_trades(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._trades_by_cid["cid1"] = []
+        monitor._cost_lots("tokA", 100.0, "cid1")
+        assert api.get_trades.call_count == 0
+
+    def test_cost_lots_falls_back_when_not_prefetched(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_trades.return_value = []
+        monitor._cost_lots("tokA", 100.0, "cid1")
+        assert api.get_trades.call_count == 1
+
+    def test_cost_lots_prefetch_failure_means_cost_unknown(self):
+        # 预取那轮取数失败 -> 与自取失败同样的结果:成本未知,调用方跳过 + ⚠️裸奔
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._trades_by_cid["cid1"] = None
+        assert monitor._cost_lots("tokA", 100.0, "cid1") == (None, [])
+        assert api.get_trades.call_count == 0
+
+    def test_sell_book_uses_prefetched_orderbook(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._book_cache["tokA"] = self._ob()
+        tick, tick_str, bid, ask = monitor._sell_book("tokA")
+        assert api.get_orderbook.call_count == 0
+        assert (tick, tick_str, bid, ask) == (0.01, "0.01", 0.30, 0.31)
+
+    def test_sell_book_falls_back_when_not_prefetched(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        assert monitor._sell_book("tokA")[2] == 0.30
+        assert api.get_orderbook.call_count == 1
+
+    def test_sell_book_prefetch_failure_degrades_like_fetch_failure(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._book_cache["tokA"] = None
+        assert monitor._sell_book("tokA") == (0.01, "0.01", None, None)
+        assert api.get_orderbook.call_count == 0
+
+    def test_check_exit_prefetches_before_looping(self):
+        # 3 个仓分属 2 个市场:成交按市场取 2 次,盘口按 asset 取 3 次
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_user_positions.return_value = [
+            self._pos("tokA", "cid1"),
+            self._pos("tokB", "cid1"),
+            self._pos("tokC", "cid2"),
+        ]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor.check_exit()
+        assert api.get_trades.call_count == 2
+        assert api.get_orderbook.call_count == 3
+        assert monitor.last_position_count == 3
+
+    def test_check_exit_does_not_prefetch_just_dumped(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._just_dumped.add("tokA")
+        api.get_user_positions.return_value = [
+            self._pos("tokA", "cid1"),
+            self._pos("tokB", "cid2"),
+        ]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor.check_exit()
+        assert api.get_orderbook.call_count == 1
+        assert "tokA" not in monitor._book_cache
+
+    def test_low_balance_prefetches_and_check_exit_reuses(self):
+        # 低余额先预取过,check_exit 不再重复取同一批。用一笔与持仓 size 匹配的真实成交
+        # 让成本重建得出来(0.20),循环才会真的走到 _sell_book——否则(get_trades=[])
+        # 两边都在 cost is None 处提前 return,断言测不到"缓存复用"这件事本身
+        # (评审 2026-07-28 指出的 vacuous test)。买盘留空:让 check_low_balance 的
+        # 清仓判定因无买盘跳过(不卖出、不进 _just_dumped),这样 check_exit 才会正常
+        # 处理这个仓、真正调用 _sell_book 读缓存,而不是因为"已被清掉"而整个跳过。
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        db.get_template_for.return_value = {
+            "low_balance_threshold_usd": 4,
+            "liquidate_target_usd": 4,
+            "cooldown_minutes": 20,
+        }
+        db.get_market_daily_reward.return_value = 50  # 不落进低奖励档,与本用例无关
+        api.get_balance.return_value = 1.0
+        api.get_user_positions.return_value = [self._pos("tokA", "cid1")]
+        api.get_open_orders.return_value = []
+        api.get_orderbook.return_value = {
+            "bids": [],  # 无买盘 -> 低余额清仓判定跳过,不会把这个仓卖掉
+            "asks": [{"price": "0.31", "size": "1000"}],
+            "tick_size": "0.01",
+        }
+        api.get_trades.return_value = [
+            {
+                "id": "t-tokA",
+                "market": "cid1",
+                "match_time": "1",
+                "maker_orders": [
+                    {
+                        "order_id": "o-tokA",
+                        "maker_address": "0xFUNDER",
+                        "side": "BUY",
+                        "matched_amount": "100",
+                        "price": "0.20",
+                        "asset_id": "tokA",
+                    }
+                ],
+            }
+        ]
+        monitor.check_low_balance()
+        assert "tokA" not in monitor._just_dumped  # 无买盘没被清掉,仍走正常离场
+        before = api.get_orderbook.call_count
+        monitor.check_exit()
+        assert api.get_orderbook.call_count == before  # 复用,没再取
 
 
 class TestStep3Prefetch:
