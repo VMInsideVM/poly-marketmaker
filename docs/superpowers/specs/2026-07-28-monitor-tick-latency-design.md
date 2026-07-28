@@ -62,11 +62,11 @@ worker 线程**只发网络请求，绝不碰 `db`**。`models/database.py` 每�
 
 ### 1b 共用一份 open_orders 快照
 
-tick 开头取一次 `get_open_orders`，步骤 1 到 4 共用。
+tick 开头取一次 `get_open_orders`，步骤 2 到 4（结算守卫、低余额清仓、离场）共用。
 
-**Step 3 保留自己的新鲜取数。** 它会重挂买单，吃陈旧快照就可能看到一张 Step 1 刚因成交撤掉的单，然后在刚成交过的市场里重新挂一张。冷却机制正是要拦这个。
+**Step 1 和 Step 3 各自自取，不吃这份快照。** Step 3 跑在最后、共用的那份最陈旧，而它会对已经消失的单再撤一次并往 actions 写幻影记录。Step 1 的挂单是「成交之后这单还在不在挂」这条护栏的判据（2026-07-04 根治 cancel_remainder 重放洪水时装的），共用快照比它要判定的那批成交旧一个往返，会把护栏磨钝；而它那次取数本来就只在真检测到成交时才发生，属于低频路径，共用也省不下几个往返。两处都是「省一个低频往返换一层护栏变钝」，不划算。
 
-步骤 1 到 4 吃 tick 开头的快照是安全的：`check_exit` 只看 SELL，而被 `check_low_balance` 清掉的仓已经被 `_just_dumped` 挡在循环外。
+**共用快照必须配一张「本 tick 已撤卖单」表 `_cancelled_sell_ids`。** 初稿在这里写过一句错的论证：「步骤 1 到 4 吃快照是安全的，因为 `check_exit` 只看 SELL，而被 `check_low_balance` 清掉的仓已经被 `_just_dumped` 挡在循环外」——它默认清仓一定成功。真实情况是 `_market_dump` **先撤该 asset 的全部挂卖单、再市价卖**，市价卖被拒时返回 `None`，那个 asset 就不会进 `_just_dumped`（FAK 打进薄奖励市场没吃到就被杀 = status `unmatched` = `OrderRejected`，而低余额清仓正是在没钱的钱包上干这件事，不是冷门路径）。于是 `check_exit` 照常处理这个仓，但共用快照里那张卖单还在（它是拍完快照之后才被撤的），`plan_take_profit` 据此判 keep、什么都不挂：持仓没有任何卖单保护，状态行还谎报「保持(A) 成本0.2000 挂卖单0.2600」指着一张已经不存在的单；清仓失败又不设冷却，于是每隔一 tick 复发一次。所以撤单成功后要把这些 id 登记进 `_cancelled_sell_ids`（`begin_status_tick` 重置），`_exit_position` 与 `_market_dump` 构造 sells 时一律过滤掉——清仓成功和失败两种情况才都正确。**以后想把共用快照的范围再扩大的人，先读这一段。**
 
 这一项收益不大（一轮省 1 到 3 个往返，不到 tick 时长的 5%），但顺手且风险可控。
 
