@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.request
 
-from config import DATA_DIR
+from config import DATA_DIR, SERVER_MODE
 from version import __version__
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,9 @@ def check_update(current=__version__, fetch=None, now=None):
             info = None
     if info is None:
         return {"update_available": False, "current": current}
-    available = bool(info["pkg_url"]) and is_newer(info["version"], current)
+    # 服务器模式走 git,不需要 release 里有本平台的安装包,只比版本号。
+    has_package = SERVER_MODE or bool(info["pkg_url"])
+    available = has_package and is_newer(info["version"], current)
     return {
         "update_available": available,
         "current": current,
@@ -324,6 +326,76 @@ def _shutdown_self():
     os._exit(0)
 
 
+def _repo_dir():
+    """仓库根目录(web/ 的上一级)。服务器模式是 git clone 出来的源码目录。"""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _run_cmd(args, cwd):
+    """在 cwd 里执行命令,返回 (返回码, stdout+stderr)。"""
+    p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=600)
+    return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def _run_git_update(state, info, repo_dir, *, run_cmd, shutdown):
+    """服务器模式更新:同步到 release tag -> 装依赖 -> 退出,由 systemd 拉起新代码。
+
+    任一步失败都回滚到更新前的 commit、置 error、**不退出进程**,让当前能跑的版本
+    继续跑。副作用(执行命令、退出进程)经参数注入,便于离线单测。
+
+    不做 sha256 校验:原流程校验是因为要下载并执行二进制安装包,而 git fetch 走
+    HTTPS 且校验 GitHub 证书,完整性已经具备。
+    git reset --hard 不影响 untracked 文件,market_maker.db 在 .gitignore 里。
+    """
+    old_commit = None
+    try:
+        state.state, state.percent, state.message = "downloading", 10, "读取当前版本"
+        rc, out = run_cmd(["git", "rev-parse", "HEAD"], repo_dir)
+        if rc != 0:
+            state.state, state.message = "error", f"读取当前版本失败:{out.strip()}"
+            return
+        old_commit = out.strip()
+
+        state.percent, state.message = 30, "拉取新版本"
+        rc, out = run_cmd(["git", "fetch", "--tags", "origin"], repo_dir)
+        if rc != 0:
+            state.state, state.message = "error", f"拉取失败:{out.strip()}"
+            return
+
+        state.percent, state.message = 50, "切换到新版本"
+        rc, out = run_cmd(["git", "reset", "--hard", info["tag"]], repo_dir)
+        if rc != 0:
+            state.state, state.message = "error", f"切换版本失败:{out.strip()}"
+            return
+
+        state.state, state.percent, state.message = "installing", 70, "安装依赖"
+        rc, out = run_cmd(
+            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], repo_dir
+        )
+        if rc != 0:
+            rrc, rout = run_cmd(["git", "reset", "--hard", old_commit], repo_dir)
+            state.state = "error"
+            if rrc != 0:
+                state.message = (
+                    f"安装依赖失败,回滚也失败,需人工处理:{rout.strip()[:300]}"
+                )
+            else:
+                state.message = f"安装依赖失败,已回滚到原版本:{out.strip()[:300]}"
+            return
+
+        state.percent, state.message = 100, "重启中"
+        logger.info("更新完成,退出进程交由 systemd 重启")
+        shutdown()
+    except Exception as e:  # noqa: BLE001
+        logger.exception("更新失败")
+        if old_commit:
+            try:
+                run_cmd(["git", "reset", "--hard", old_commit], repo_dir)
+            except Exception:  # noqa: BLE001
+                logger.exception("异常回滚也失败")
+        state.state, state.message = "error", f"更新失败:{e}"
+
+
 def start_update(mgr, *, info_provider=None, **deps):
     """供路由调用的入口:做安全闸/并发检查,然后后台线程执行 _run_update。"""
     if engine_active(mgr):
@@ -334,6 +406,21 @@ def start_update(mgr, *, info_provider=None, **deps):
         }
     if STATE.state in ("downloading", "verifying", "installing"):
         return {"ok": True, "message": "更新已在进行中"}
+
+    if SERVER_MODE:
+        info = (info_provider or (lambda: parse_release(_fetch_latest_release())))()
+        if not info or not info.get("tag"):
+            return {"ok": False, "message": "未获取到最新版本信息"}
+        deps.setdefault("run_cmd", _run_cmd)
+        deps.setdefault("shutdown", _shutdown_self)
+        STATE.state, STATE.percent, STATE.message = "downloading", 0, ""
+        threading.Thread(
+            target=_run_git_update,
+            args=(STATE, info, _repo_dir()),
+            kwargs=deps,
+            daemon=True,
+        ).start()
+        return {"ok": True}
 
     info = (info_provider or (lambda: parse_release(_fetch_latest_release())))()
     if not info or not info.get("pkg_url") or not info.get("sha256_url"):

@@ -93,7 +93,13 @@ Hyper-V 保留端口区间写的。服务器上换了端口，Caddy 就反代不
 - `/api/update/status`（GET）
 
 本地只监听回环时无害，公网暴露后任何人 POST 一次 `/api/update/apply` 就能让进程退出重启；改为
-git 更新后更严重，等于未鉴权触发拉取代码并重启。三个路由都加 `login_required`。本地版同样受益。
+git 更新后更严重，等于未鉴权触发拉取代码并重启。
+
+`apply` 与 `status` 加 `login_required`。**`check` 保持免登录**：`login.html` 和 `setup.html`
+底部都有「检查更新」链接，未登录时能查版本是有意功能；而 `check` 只是向固定的 GitHub URL 读一个
+版本号、带 30 分钟 TTL 缓存，既不改变状态也不泄露钱包信息，未鉴权的代价至多是消耗一点 GitHub
+匿名限额。（初版设计要求三个都加，实现时发现会让登录页的「检查更新」显示误导性的"无法连接
+GitHub"，2026-07-27 改为此方案。）
 
 ### 2. `config.py`
 

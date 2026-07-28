@@ -1,0 +1,13 @@
+YOUR_DOMAIN {
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+	}
+
+	# 应用只绑 127.0.0.1,公网唯一入口就是这里。
+	reverse_proxy 127.0.0.1:8765
+}

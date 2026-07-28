@@ -1,0 +1,20 @@
+[Unit]
+Description=Polymarket Market Maker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmm
+Group=pmm
+WorkingDirectory=/opt/pmm/poly-marketmaker
+Environment=PMM_SERVER=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/pmm/venv/bin/python app.py
+# 崩溃后自动拉起,同时也是网页「更新」按钮的实现基础:
+# 更新流程结束时进程主动退出,由这里把新代码拉起来。
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

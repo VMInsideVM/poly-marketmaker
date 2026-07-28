@@ -7,6 +7,8 @@ import hashlib
 import logging
 import sqlite3
 import threading
+import time
+from datetime import timedelta
 from functools import wraps
 from flask import (
     Flask,
@@ -18,6 +20,7 @@ from flask import (
     url_for,
     flash,
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 from api.proxy import ProxyUnreachable, probe_proxy
 from models.database import Database
 from engine.manager import EngineManager
@@ -26,7 +29,7 @@ from engine.monitor_status import get_snapshot
 from engine.market_links import enrich_with_market_meta, ensure_market_meta
 from engine.blacklist_ops import buy_order_ids_for_condition
 from engine.take_profit import effective_theta_stop
-from config import DB_PATH, HOST, PORT
+from config import DB_PATH, HOST, PORT, SERVER_MODE
 from web import update as updater
 from web.wallet_import import ImportJob, parse_import_lines
 from version import __version__
@@ -45,6 +48,21 @@ app = Flask(
     static_folder=os.path.join(_BASE, "web", "static"),
 )
 app.secret_key = os.urandom(32)
+
+# 会话安全。secret_key 每次启动随机是有意的:进程重启后内存里的加密密钥必然丢失、
+# 本来就得重新登录输密码,让旧 session 一并失效反而一致。
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    # 本地是 http,开了 Secure 浏览器不会回传 cookie,会直接登不进去。
+    SESSION_COOKIE_SECURE=SERVER_MODE,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+)
+
+# Caddy 反代后 request.remote_addr 恒为 127.0.0.1,按 IP 的登录限速会退化成全局限速
+# (攻击者能借此把正常用户锁在门外)。取 X-Forwarded-For 的最后一跳。
+# Flask 只绑回环、只可能被本机 Caddy 访问,该头不可能由外部伪造。
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 
 @app.context_processor
@@ -173,6 +191,46 @@ def _derive_display_metrics(markets):
     return markets
 
 
+# --- 登录限速 ---
+# 公网部署后,登录密码是解开所有钱包私钥的唯一屏障。单进程单用户,内存字典足够。
+_LOGIN_FAIL_LIMIT = 5  # 连续失败多少次触发锁定
+_LOGIN_LOCK_SEC = 900  # 锁定时长(秒)
+_login_fails: dict = {}  # ip -> (连续失败次数, 锁定截止时间戳)
+# waitress 单进程多线程,同一 IP 的并发登录请求会同时读-改-写 _login_fails,
+# 不加锁会有 check-then-act 竞态(两个线程都读到旧计数,各自 +1 写回,漏计一次)。
+_login_fails_lock = threading.Lock()
+
+# 这个密码同时是解开所有钱包私钥的加密密钥。公网部署后弱口令的代价太大,
+# 首次设置强制 12 位起。项目没有改密码功能,故只影响全新安装。
+_MIN_PASSWORD_LEN = 12
+
+
+def login_lock_remaining(ip, now=None):
+    """该 IP 还要锁多少秒;未锁定返回 0。锁定到期时顺手清零计数。"""
+    now = time.time() if now is None else now
+    with _login_fails_lock:
+        count, lock_until = _login_fails.get(ip, (0, 0.0))
+        if lock_until and now >= lock_until:
+            _login_fails.pop(ip, None)  # 到期后重新计数,而不是"再错一次又锁 15 分钟"
+            return 0
+    return max(0, int(lock_until - now))
+
+
+def record_login_failure(ip, now=None):
+    """记一次失败;达到上限则开始锁定。"""
+    now = time.time() if now is None else now
+    with _login_fails_lock:
+        count = _login_fails.get(ip, (0, 0.0))[0] + 1
+        lock_until = now + _LOGIN_LOCK_SEC if count >= _LOGIN_FAIL_LIMIT else 0.0
+        _login_fails[ip] = (count, lock_until)
+
+
+def clear_login_failures(ip):
+    """登录成功后清零。"""
+    with _login_fails_lock:
+        _login_fails.pop(ip, None)
+
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -194,8 +252,8 @@ def setup():
     if request.method == "POST":
         password = request.form.get("password", "")
         confirm = request.form.get("confirm", "")
-        if len(password) < 6:
-            flash("密码至少6个字符")
+        if len(password) < _MIN_PASSWORD_LEN:
+            flash(f"密码至少{_MIN_PASSWORD_LEN}个字符")
             return render_template("setup.html")
         if password != confirm:
             flash("两次输入的密码不一致")
@@ -210,6 +268,7 @@ def setup():
         mgr = EngineManager(db, key)
         init_manager(mgr)
         session["logged_in"] = True
+        session.permanent = True
         return redirect(url_for("dashboard"))
     return render_template("setup.html")
 
@@ -220,17 +279,29 @@ def login():
     if pw_hash is None:
         return redirect(url_for("setup"))
     if request.method == "POST":
+        ip = request.remote_addr or "?"
+        wait = login_lock_remaining(ip)
+        # 本地版只绑 127.0.0.1,限速零收益却有真实回退:锁 15 分钟只能靠重启进程解锁,
+        # 而重启会杀掉止损监控。拒绝这一步只在服务器模式生效,失败计数仍照常记录。
+        if SERVER_MODE and wait:
+            logger.warning("登录被限速 ip=%s 剩余=%ds", ip, wait)
+            flash(f"登录失败次数过多，请 {wait // 60 + 1} 分钟后再试")
+            return render_template("login.html")
         password = request.form.get("password", "")
         key = derive_key(password, salt)
         hashed = hashlib.sha256(key).hexdigest()
         if hashed == pw_hash:
+            clear_login_failures(ip)
             set_encryption_key(key)
             global manager
             if manager is None:
                 mgr = EngineManager(db, key)
                 init_manager(mgr)
             session["logged_in"] = True
+            session.permanent = True
             return redirect(url_for("dashboard"))
+        record_login_failure(ip)
+        logger.warning("登录密码错误 ip=%s", ip)
         flash("密码错误")
     return render_template("login.html")
 
@@ -1384,20 +1455,28 @@ def api_dashboard():
     )
 
 
-# --- API: 自动更新(免登录:启动时弹窗在登录前出现) ---
+# --- API: 自动更新(check 免登录,apply/status 需登录) ---
+# check 只读固定 GitHub URL 的版本号,带 30 分钟 TTL 缓存,不改变任何状态也不
+# 泄露钱包信息,登录页/设置页底部的"检查更新"链接需要它在未登录时也能用;
+# apply(拉代码+重启进程)和 status 会影响进程/暴露运行状态,必须登录后才能用。
 
 
 @app.route("/api/update/check", methods=["GET"])
 def api_update_check():
-    return jsonify(updater.check_update())
+    result = updater.check_update()
+    # apply 需要登录;未登录时前端不该展示"现在更新"按钮(点了也只会被重定向)
+    result["logged_in"] = bool(session.get("logged_in"))
+    return jsonify(result)
 
 
 @app.route("/api/update/apply", methods=["POST"])
+@login_required
 def api_update_apply():
     result = updater.start_update(manager)
     return jsonify(result), (200 if result.get("ok") else 409)
 
 
 @app.route("/api/update/status", methods=["GET"])
+@login_required
 def api_update_status():
     return jsonify(updater.STATE.snapshot())

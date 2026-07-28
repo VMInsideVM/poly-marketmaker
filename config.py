@@ -129,3 +129,8 @@ LOG_PATH = os.path.join(DATA_DIR, "market_maker.log")
 HOST = "127.0.0.1"
 PORT = 8765
 SECRET_KEY = None  # Set at runtime from user password
+
+# 服务器模式:部署在 VPS 上由 systemd 注入 PMM_SERVER=1 开启。
+# 显式开关而非按 sys.platform 推断,这样在 mac/Windows 上开发时行为完全不变。
+# 它控制四件事:不开浏览器、固定端口、用 waitress、更新走 git。
+SERVER_MODE = os.environ.get("PMM_SERVER") == "1"
