@@ -2053,6 +2053,117 @@ class TestStep3RewardDrop:
         api.cancel_orders.assert_not_called()
 
 
+class TestExitPrefetch:
+    """离场判定的成交/盘口并发预取:按市场/asset 去重、逐项容错、不重复取。"""
+
+    def _pos(self, asset, cid, size="100"):
+        return {"asset": asset, "conditionId": cid, "size": size, "curPrice": "0.30"}
+
+    def _ob(self):
+        return {
+            "bids": [{"price": "0.30", "size": "1000"}],
+            "asks": [{"price": "0.31", "size": "1000"}],
+            "tick_size": "0.01",
+        }
+
+    def test_dedups_trades_by_condition_id(self):
+        # 同市场 YES/NO 两个仓:成交只取一次,盘口按 asset 取两次
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = [{"id": "t1"}]
+        monitor._exit_prefetch(
+            [self._pos("tokYes", "cid1"), self._pos("tokNo", "cid1")]
+        )
+        assert api.get_trades.call_count == 1
+        assert api.get_orderbook.call_count == 2
+        assert monitor._trades_by_cid == {"cid1": [{"id": "t1"}]}
+        assert set(monitor._book_cache) == {"tokYes", "tokNo"}
+
+    def test_trades_failure_recorded_as_none(self):
+        # 取数失败记 None,与「取到了但没有成交」([])区分开
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.side_effect = RuntimeError("network")
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        assert monitor._trades_by_cid == {"cid1": None}
+
+    def test_empty_trades_list_is_not_none(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        assert monitor._trades_by_cid == {"cid1": []}
+
+    def test_book_failure_recorded_as_none(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_trades.return_value = []
+        api.get_orderbook.side_effect = RuntimeError("network")
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        assert monitor._book_cache == {"tokA": None}
+
+    def test_one_failure_does_not_affect_others(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_trades.return_value = []
+
+        def _ob_or_boom(asset_id):
+            if asset_id == "tokBad":
+                raise RuntimeError("network")
+            return self._ob()
+
+        api.get_orderbook.side_effect = _ob_or_boom
+        monitor._exit_prefetch(
+            [self._pos("tokBad", "cid1"), self._pos("tokOk", "cid2")]
+        )
+        assert monitor._book_cache["tokBad"] is None
+        assert monitor._book_cache["tokOk"] == self._ob()
+
+    def test_second_call_only_fetches_the_difference(self):
+        # check_low_balance 先预取过一轮时,check_exit 这轮只补差集
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        monitor._exit_prefetch([self._pos("tokA", "cid1"), self._pos("tokB", "cid2")])
+        assert api.get_trades.call_count == 2  # cid1 一次 + cid2 一次
+        assert api.get_orderbook.call_count == 2  # tokA 一次 + tokB 一次
+
+    def test_begin_status_tick_clears_both_caches(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_orderbook.return_value = self._ob()
+        api.get_trades.return_value = []
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
+        monitor.begin_status_tick()
+        assert monitor._trades_by_cid == {}
+        assert monitor._book_cache == {}
+
+    def test_trades_wave_completes_before_books_wave(self):
+        # 顺序不可调:盘口驱动挂价与 B0 判定,必须是更新鲜的那份
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        seen = []
+        api.get_trades.side_effect = lambda *a, **k: seen.append("trades") or []
+        api.get_orderbook.side_effect = (
+            lambda *a, **k: seen.append("book") or self._ob()
+        )
+        monitor._exit_prefetch([self._pos("tokA", "cid1"), self._pos("tokB", "cid2")])
+        assert seen.count("trades") == 2 and seen.count("book") == 2
+        assert seen.index("book") > max(i for i, s in enumerate(seen) if s == "trades")
+
+    def test_skips_blank_ids(self):
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._exit_prefetch([{"asset": "", "conditionId": "", "size": "10"}])
+        assert api.get_trades.call_count == 0
+        assert api.get_orderbook.call_count == 0
+
+
 class TestStep3Prefetch:
     """Step3 本轮盘口/奖励的并发预取:按 token/市场去重、逐项容错、带钱包代理。"""
 

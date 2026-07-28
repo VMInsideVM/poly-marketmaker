@@ -32,6 +32,10 @@ LIQUIDATE_COOLDOWN_SEC = 60
 # 代理上同时背发现的 4 路 + Step3 的 6 路,峰值约 10 路并发。要回退并发化只改这一个常量。
 _STEP3_MAX_WORKERS = 6
 
+_EXIT_MAX_WORKERS = 6
+# 缓存里 None 表示「取数失败」,所以「没这个键」需要另一个哨兵,不能用 None 表达。
+_MISSING = object()
+
 
 class OrderMonitor:
     def __init__(self, api, db, wallet_address: str, on_reward_update=None):
@@ -59,12 +63,19 @@ class OrderMonitor:
         # 本 tick 刚被 check_low_balance 市价清掉的 asset:check_exit 同 tick 跳过它们
         # (Data API /positions 滞后仍显示满仓,否则会对已卖仓挂卖单被拒、报假「裸奔」)。
         self._just_dumped: set = set()
+        # 本 tick 的离场取数预取表(begin_status_tick 重置)。
+        # condition_id -> get_trades 原始返回;None = 本轮取数失败
+        self._trades_by_cid: dict = {}
+        # asset_id -> get_orderbook 原始返回;None = 本轮取数失败
+        self._book_cache: dict = {}
 
     def begin_status_tick(self) -> None:
         self._status_rows = []
         self._tick_ts = time.time()
         self._cost_cache = {}
         self._just_dumped = set()
+        self._trades_by_cid = {}
+        self._book_cache = {}
 
     def _status_add(self, **fields) -> None:
         try:
@@ -343,6 +354,58 @@ class OrderMonitor:
                 stage="结算守卫",
                 action="⚠️UMA已提交·撤买单",
                 detail=f"umaResolutionStatus={status}，撤 {len(ids)} 笔买单",
+            )
+
+    def _exit_prefetch(self, positions) -> None:
+        """本 tick 离场判定所需的成交/盘口并发预取,结果写进两张 per-tick 表。
+
+        **成交先取、盘口后取,两拨串行,顺序不可调。** 先取的那拨等到判定时,已经陈旧了
+        后取那拨的全部耗时;而盘口驱动挂卖价与 B0 强平判定(是钱路上的决定),成本则只在
+        我们自己成交时才变。与 Step3 `_prefetch` 里「奖励先、盘口后」是同构的理由。
+
+        成交拨按 condition_id 去重:同一市场的 YES/NO 两个持仓共用一次
+        get_trades(market=cid)。盘口拨按 asset_id 去重。已经在表里的键一律跳过,所以
+        check_low_balance 先预取过一轮之后,check_exit 这轮只补差集。
+
+        表里的 None 表示**取数失败**,与「取到了但没有成交 / 盘口为空」不是一回事:
+        前者让成本算不出来(跳过 + ⚠️裸奔),后者是正常的空结果。两者塌成一个会让监控
+        状态表说谎。
+
+        worker 线程只发网络请求、**绝不碰 db**(每线程一条 sqlite 连接且从不回收),
+        每个任务自带异常处理、绝不外抛。判定、下单、记账、状态行全部留在主线程。
+        """
+        cids = [
+            c
+            for c in {p.get("conditionId", "") for p in positions}
+            if c and c not in self._trades_by_cid
+        ]
+        assets = [
+            a
+            for a in {p.get("asset", "") for p in positions}
+            if a and a not in self._book_cache
+        ]
+
+        def _trades(cid):
+            try:
+                return self.api.get_trades(TradeParams(market=cid))
+            except Exception as e:
+                logger.warning("[离场预取] get_trades(market=%s) 失败: %s", cid, e)
+                return None
+
+        def _book(asset_id):
+            try:
+                return self.api.get_orderbook(asset_id)
+            except Exception as e:
+                logger.warning("[离场预取] 订单簿 %s 失败: %s", asset_id, e)
+                return None
+
+        if cids:
+            self._trades_by_cid.update(
+                zip(cids, parallel_map(_trades, cids, _EXIT_MAX_WORKERS))
+            )
+        if assets:
+            self._book_cache.update(
+                zip(assets, parallel_map(_book, assets, _EXIT_MAX_WORKERS))
             )
 
     def _sell_book(self, asset_id: str):
