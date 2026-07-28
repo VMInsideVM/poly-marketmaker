@@ -59,6 +59,7 @@ echo "==> 安装 systemd 服务"
 cp "$APP/deploy/pmm.service" /etc/systemd/system/pmm.service
 systemctl daemon-reload
 systemctl enable --now pmm
+systemctl restart pmm  # enable --now 在服务已运行时不会重启,重跑脚本时确保新代码/配置生效
 
 echo "==> 配置防火墙"
 ufw default deny incoming

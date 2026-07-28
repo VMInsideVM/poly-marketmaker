@@ -30,6 +30,12 @@ bash /tmp/pmm-src/deploy/install.sh your-domain.com
 
 完成后打开 `https://your-domain.com`，首次访问会进入设置页要求设定密码。
 
+> **⚠️ 脚本跑完请立刻打开网址设置密码。** Caddy 申请证书时会把域名写进公开的
+> 证书透明度(CT)日志，扫描机器人几乎是秒级发现新上线的域名；`/setup` 页面对谁
+> 先访问没有任何限制，谁先设密码谁就占住了这个实例。如果第一次打开看到的是
+> **登录页**而不是设置页，说明已经被人抢先设过密码了——删掉
+> `/opt/pmm/poly-marketmaker/market_maker.db` 后 `systemctl restart pmm` 重来。
+
 ## 必做的 SSH 加固
 
 私钥托管在这台机器上，SSH 弱口令等于把私钥送人。部署完立刻改
@@ -50,6 +56,9 @@ systemctl status pmm          # 看服务状态
 journalctl -u pmm -f          # 看实时日志
 systemctl restart pmm         # 重启(重启后需要重新登录网页)
 ```
+
+> **⚠️ `systemctl restart pmm` 前请先在网页上停止引擎。** 进程退出时不会自动撤单、
+> 不会停引擎——直接重启会让挂单留在交易所，且没有任何止损监控保护持仓。
 
 **重启后必须有人登录网页。** 钱包私钥是用登录密码派生的密钥加密的，密钥只存在内存里，
 进程一重启就没了。所以引擎不会自动恢复，得有人打开网页输密码、再手动启动引擎。
