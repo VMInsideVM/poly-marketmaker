@@ -25,6 +25,8 @@
 
 三个更新端点当前无鉴权。本地只绑回环时无害，公网暴露后任何人 POST 一次 `/api/update/apply` 就能让进程退出重启。这是既有漏洞，与部署无关，先修。
 
+**2026-07-27 裁定（覆盖本任务下文中"三个都加"的写法）**：只给 `apply` 和 `status` 加 `login_required`，**`check` 保持免登录**。`login.html` / `setup.html` 底部有「检查更新」链接，未登录时能查版本是有意功能；`check` 只向固定 GitHub URL 读版本号、带 30 分钟缓存，不改状态也不泄露钱包信息。
+
 **Files:**
 - Modify: `web/routes.py:1390-1404`
 - Test: `tests/test_update_routes.py`（现有文件，需改写其中的免登录断言）
@@ -53,12 +55,15 @@ def _client(logged_in=True):
     return c
 
 
-def test_check_requires_login(monkeypatch):
-    called = []
-    monkeypatch.setattr(updater, "check_update", lambda: called.append(1) or {})
+def test_check_stays_public(monkeypatch):
+    # 登录页/设置页底部的「检查更新」链接要能用。check 只读 GitHub 版本号,
+    # 带 30 分钟缓存,不改状态也不泄露钱包信息。
+    monkeypatch.setattr(
+        updater, "check_update", lambda: {"update_available": False, "current": "1.0.7"}
+    )
     resp = _client(logged_in=False).get("/api/update/check")
-    assert resp.status_code in (301, 302)  # 重定向到登录页
-    assert called == []  # 未登录不应触发任何检测
+    assert resp.status_code == 200
+    assert resp.get_json()["current"] == "1.0.7"
 
 
 def test_apply_requires_login(monkeypatch):
@@ -117,13 +122,9 @@ Expected: 三个 `*_requires_login` 测试 FAIL（返回 200 而非重定向）
 
 `web/routes.py` 中三处，各加一行 `@login_required`（放在 `@app.route` 下方、`def` 上方）：
 
+`check` 不加装饰器（保持免登录），只改 `apply` 与 `status`：
+
 ```python
-@app.route("/api/update/check", methods=["GET"])
-@login_required
-def api_update_check():
-    return jsonify(updater.check_update())
-
-
 @app.route("/api/update/apply", methods=["POST"])
 @login_required
 def api_update_apply():
