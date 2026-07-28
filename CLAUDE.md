@@ -18,6 +18,27 @@ pytest tests/test_strategy.py::TestMaxSpread2_TickSize1Cent::test_bid1_gt_2000_p
 
 `tests/` holds pytest unit tests (pure logic, no network). The top-level `test_live.py`, `test_simulate.py`, `test_real_order.py` are **not** pytest tests — they are manual scripts that hit the real Polymarket API and the local `market_maker.db`; `test_real_order.py` places actual orders. Do not run them as part of a test suite.
 
+## Server deployment
+
+The app can also run on a Linux VPS behind a domain + HTTPS (`deploy/README.md`, design in
+`docs/superpowers/specs/2026-07-27-vps-deployment-design.md`). A single env var,
+`PMM_SERVER=1`, switches on all server-only behavior: no `webbrowser.open`, fixed port (no
+`pick_port` fallback — the reverse proxy hardcodes it), waitress instead of the Flask dev
+server, and a git-based update path instead of downloading a `.exe`/`.dmg`. **It must stay
+single-process** — `web/routes.py` holds `db`/`manager`/`encryption_key` as module globals and
+the engine runs as in-process threads, so a multi-worker WSGI server would run two engines
+over the same wallets. Flask still binds `127.0.0.1` only; Caddy terminates TLS and proxies to
+it. `ProxyFix(x_for=1)` recovers the real client IP for login rate limiting (5 failures per IP
+→ 15 min lock) — without it every request looks like `127.0.0.1` and the limiter degrades into
+a global lock anyone can trip. `/api/update/apply` and `/api/update/status` require login (one
+can restart the process, the other exposes update progress); `/api/update/check` stays
+unauthenticated on purpose — the login page's "检查更新" link needs it reachable before login,
+and it only reads a version number from GitHub through a 30-minute-TTL cache, so it changes no
+state and leaks no wallet info. The server-mode update (`_run_git_update` in `web/update.py`)
+syncs to the release tag, installs deps, then exits for systemd to restart; any failure — including
+exceptions raised mid-update, not just a failed step — rolls back to the pre-update commit and
+leaves the process running.
+
 ## Architecture
 
 **Auth gates everything.** Wallet private keys are AES-256-GCM encrypted with a key derived (PBKDF2, 600k iterations) from the user's password (`utils/crypto.py`). The key exists only in memory after login, so engines **cannot auto-start on boot** — the user must log in first. Note `app.py` imports but never calls `init_manager`; the `EngineManager` is constructed inside the `/setup` and `/login` routes (`web/routes.py`) once the encryption key is available. `web/routes.py` holds module-global `db`, `manager`, `encryption_key` — this is a deliberately single-process, single-user design.
