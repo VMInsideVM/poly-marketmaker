@@ -196,29 +196,35 @@ def _derive_display_metrics(markets):
 _LOGIN_FAIL_LIMIT = 5  # 连续失败多少次触发锁定
 _LOGIN_LOCK_SEC = 900  # 锁定时长(秒)
 _login_fails: dict = {}  # ip -> (连续失败次数, 锁定截止时间戳)
+# waitress 单进程多线程,同一 IP 的并发登录请求会同时读-改-写 _login_fails,
+# 不加锁会有 check-then-act 竞态(两个线程都读到旧计数,各自 +1 写回,漏计一次)。
+_login_fails_lock = threading.Lock()
 
 
 def login_lock_remaining(ip, now=None):
     """该 IP 还要锁多少秒;未锁定返回 0。锁定到期时顺手清零计数。"""
     now = time.time() if now is None else now
-    count, lock_until = _login_fails.get(ip, (0, 0.0))
-    if lock_until and now >= lock_until:
-        _login_fails.pop(ip, None)  # 到期后重新计数,而不是"再错一次又锁 15 分钟"
-        return 0
+    with _login_fails_lock:
+        count, lock_until = _login_fails.get(ip, (0, 0.0))
+        if lock_until and now >= lock_until:
+            _login_fails.pop(ip, None)  # 到期后重新计数,而不是"再错一次又锁 15 分钟"
+            return 0
     return max(0, int(lock_until - now))
 
 
 def record_login_failure(ip, now=None):
     """记一次失败;达到上限则开始锁定。"""
     now = time.time() if now is None else now
-    count = _login_fails.get(ip, (0, 0.0))[0] + 1
-    lock_until = now + _LOGIN_LOCK_SEC if count >= _LOGIN_FAIL_LIMIT else 0.0
-    _login_fails[ip] = (count, lock_until)
+    with _login_fails_lock:
+        count = _login_fails.get(ip, (0, 0.0))[0] + 1
+        lock_until = now + _LOGIN_LOCK_SEC if count >= _LOGIN_FAIL_LIMIT else 0.0
+        _login_fails[ip] = (count, lock_until)
 
 
 def clear_login_failures(ip):
     """登录成功后清零。"""
-    _login_fails.pop(ip, None)
+    with _login_fails_lock:
+        _login_fails.pop(ip, None)
 
 
 def login_required(f):

@@ -1,6 +1,7 @@
 """tests/test_login_rate_limit.py — 登录失败限速(纯逻辑 + 路由集成)。"""
 
 import hashlib
+import threading
 
 import pytest
 
@@ -54,6 +55,33 @@ class TestPureLogic:
         for _ in range(routes._LOGIN_FAIL_LIMIT):
             routes.record_login_failure("1.2.3.4", now=1000.0)
         assert routes.login_lock_remaining("5.6.7.8", now=1000.0) == 0
+
+    def test_concurrent_failures_not_lost(self):
+        """并发调用 record_login_failure 不应因 check-then-act 竞态漏计。
+
+        waitress 多线程下,多个请求可能同时命中同一 IP。用 Barrier 让所有线程
+        尽量同时起跑,提高撞上竞态窗口的概率;不加锁的旧实现在本机上能稳定
+        复现计数小于总调用次数。
+        """
+        ip = "9.9.9.9"
+        n_threads = 20
+        calls_per_thread = 5
+        total_calls = n_threads * calls_per_thread
+        barrier = threading.Barrier(n_threads)
+
+        def worker():
+            barrier.wait()
+            for _ in range(calls_per_thread):
+                routes.record_login_failure(ip, now=1000.0)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        count, _ = routes._login_fails[ip]
+        assert count == total_calls
 
 
 RIGHT_PASSWORD = "correct-horse-battery"
