@@ -200,6 +200,10 @@ _login_fails: dict = {}  # ip -> (连续失败次数, 锁定截止时间戳)
 # 不加锁会有 check-then-act 竞态(两个线程都读到旧计数,各自 +1 写回,漏计一次)。
 _login_fails_lock = threading.Lock()
 
+# 这个密码同时是解开所有钱包私钥的加密密钥。公网部署后弱口令的代价太大,
+# 首次设置强制 12 位起。项目没有改密码功能,故只影响全新安装。
+_MIN_PASSWORD_LEN = 12
+
 
 def login_lock_remaining(ip, now=None):
     """该 IP 还要锁多少秒;未锁定返回 0。锁定到期时顺手清零计数。"""
@@ -248,8 +252,8 @@ def setup():
     if request.method == "POST":
         password = request.form.get("password", "")
         confirm = request.form.get("confirm", "")
-        if len(password) < 6:
-            flash("密码至少6个字符")
+        if len(password) < _MIN_PASSWORD_LEN:
+            flash(f"密码至少{_MIN_PASSWORD_LEN}个字符")
             return render_template("setup.html")
         if password != confirm:
             flash("两次输入的密码不一致")
