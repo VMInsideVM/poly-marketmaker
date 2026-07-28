@@ -7,6 +7,7 @@ import hashlib
 import logging
 import sqlite3
 import threading
+import time
 from datetime import timedelta
 from functools import wraps
 from flask import (
@@ -190,6 +191,36 @@ def _derive_display_metrics(markets):
     return markets
 
 
+# --- 登录限速 ---
+# 公网部署后,登录密码是解开所有钱包私钥的唯一屏障。单进程单用户,内存字典足够。
+_LOGIN_FAIL_LIMIT = 5  # 连续失败多少次触发锁定
+_LOGIN_LOCK_SEC = 900  # 锁定时长(秒)
+_login_fails: dict = {}  # ip -> (连续失败次数, 锁定截止时间戳)
+
+
+def login_lock_remaining(ip, now=None):
+    """该 IP 还要锁多少秒;未锁定返回 0。锁定到期时顺手清零计数。"""
+    now = time.time() if now is None else now
+    count, lock_until = _login_fails.get(ip, (0, 0.0))
+    if lock_until and now >= lock_until:
+        _login_fails.pop(ip, None)  # 到期后重新计数,而不是"再错一次又锁 15 分钟"
+        return 0
+    return max(0, int(lock_until - now))
+
+
+def record_login_failure(ip, now=None):
+    """记一次失败;达到上限则开始锁定。"""
+    now = time.time() if now is None else now
+    count = _login_fails.get(ip, (0, 0.0))[0] + 1
+    lock_until = now + _LOGIN_LOCK_SEC if count >= _LOGIN_FAIL_LIMIT else 0.0
+    _login_fails[ip] = (count, lock_until)
+
+
+def clear_login_failures(ip):
+    """登录成功后清零。"""
+    _login_fails.pop(ip, None)
+
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -238,10 +269,17 @@ def login():
     if pw_hash is None:
         return redirect(url_for("setup"))
     if request.method == "POST":
+        ip = request.remote_addr or "?"
+        wait = login_lock_remaining(ip)
+        if wait:
+            logger.warning("登录被限速 ip=%s 剩余=%ds", ip, wait)
+            flash(f"登录失败次数过多，请 {wait // 60 + 1} 分钟后再试")
+            return render_template("login.html")
         password = request.form.get("password", "")
         key = derive_key(password, salt)
         hashed = hashlib.sha256(key).hexdigest()
         if hashed == pw_hash:
+            clear_login_failures(ip)
             set_encryption_key(key)
             global manager
             if manager is None:
@@ -250,6 +288,8 @@ def login():
             session["logged_in"] = True
             session.permanent = True
             return redirect(url_for("dashboard"))
+        record_login_failure(ip)
+        logger.warning("登录密码错误 ip=%s", ip)
         flash("密码错误")
     return render_template("login.html")
 
