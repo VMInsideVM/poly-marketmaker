@@ -424,21 +424,19 @@ class OrderMonitor:
                 logger.warning("[离场预取] get_trades(market=%s) 失败: %s", cid, e)
                 return None
 
-        def _book(asset_id):
-            try:
-                return self.api.get_orderbook(asset_id)
-            except Exception as e:
-                logger.warning("[离场预取] 订单簿 %s 失败: %s", asset_id, e)
-                return None
-
         if cids:
             self._trades_by_cid.update(
                 zip(cids, parallel_map(_trades, cids, _EXIT_MAX_WORKERS))
             )
         if assets:
-            self._book_cache.update(
-                zip(assets, parallel_map(_book, assets, _EXIT_MAX_WORKERS))
-            )
+            try:
+                self._book_cache.update(self.api.get_orderbooks(assets))
+            except Exception as e:
+                # get_orderbooks 内部已按批 try(失败批记 None),走到这里是整个调用崩了。
+                # **什么都不写**:表里留空(_MISSING)让 _sell_book 逐仓自取,即并发化
+                # 之前的串行行为。写 None 反而会关掉那条自取退路,把一次抖动变成整轮
+                # 拿不到盘口 —— 与 _cost_lots 对预取失败改自取重试是同一个道理。
+                logger.warning("[离场预取] 批量订单簿失败,退回逐仓自取: %s", e)
 
     def _sell_book(self, asset_id: str):
         """(tick_float, tick_str, best_bid, best_ask);失败/空时缺的位回 None。
@@ -1160,6 +1158,11 @@ class OrderMonitor:
         实测「娇气」的那个(烂代理约 30% 连接超时,_retry_on_connect_error 最多重试 3
         次),几个卡住的奖励任务能把那一拨拖到几十秒,这份陈旧不该落在盘口上。
 
+        盘口走**一次批量** get_orderbooks(POST /books),不再每 token 一个请求:
+        2026-07-29 实盘 51+ 挂单时这一拨中位 10.7s、p90 17.3s、最大 46.1s,而判定本身
+        只要几毫秒(相邻判定日志 90% 间隔 <10ms)—— 撤单延迟(= tick 耗时 + 5s,实测
+        p99 22s)几乎全是在等这些单发往返。奖励没有批量端点,仍走并发。
+
         两拨保持分开、不合成一拨异构任务:分开才有天然的按 token / 按市场去重。
 
         **books 里的 None 表示取数失败**,与「取到了但买卖盘为空」不是一回事:前者该单
@@ -1181,13 +1184,6 @@ class OrderMonitor:
         token_ids = [t for t in {o.get("asset_id", "") for o in pending} if t]
         cids = [c for c in {o.get("market", "") for o in pending} if c]
 
-        def _book(token_id):
-            try:
-                return self.api.get_orderbook(token_id)
-            except Exception as e:
-                logger.warning("[Step3] 预取订单簿失败 %s: %s", token_id, e)
-                return None
-
         rewards = dict(
             zip(
                 cids,
@@ -1196,7 +1192,14 @@ class OrderMonitor:
                 ),
             )
         )
-        books = dict(zip(token_ids, parallel_map(_book, token_ids, _STEP3_MAX_WORKERS)))
+        try:
+            books = self.api.get_orderbooks(token_ids)
+        except Exception as e:
+            # get_orderbooks 内部已按批 try(失败批记 None),走到这里说明整个调用崩了。
+            # 与旧的「每个取数任务自带 try、绝不外抛」保持一致:全记 None,该轮各单
+            # 走「订单簿取不到,本轮跳过」,绝不让 Step3 抛出去冻住 publish_status。
+            logger.warning("[Step3] 批量预取订单簿失败,本轮全部跳过: %s", e)
+            books = {t: None for t in token_ids}
         # 干过活的轮才记一条汇总:这次并发化的全部理由是「36 秒降到 6 秒」、最大风险是
         # 6 路把娇气的奖励端点打崩,两件事都只有这条日志看得见(逐项 WARNING 看不出面),
         # 而奖励系统性取不到会静默退化成 fail-open 跳过。

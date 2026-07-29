@@ -312,9 +312,65 @@ class TestDiscoverAndRefreshSplit:
         api.get_spread.assert_not_called()  # 发现阶段不抓订单簿
         api.get_orderbook.assert_not_called()
 
+    def test_refresh_orderbooks_takes_whole_pool_in_one_batch(self):
+        """整池所有 token 一次批量取完,不再每 token 一个请求。
+
+        刷簿的请求数是 O(候选池 × 每市场 token 数):~180 市场就是 360 次单发往返,
+        过代理时这一步能吃掉几十分钟(2026-07-04 实盘:filter 拿不到簿 -> 不挂单)。
+        """
+        ob = {
+            "bids": [{"price": "0.30", "size": "100"}],
+            "asks": [{"price": "0.31", "size": "100"}],
+            "tick_size": "0.01",
+        }
+        api = MagicMock()
+        api.get_orderbooks.return_value = {"A-y": ob, "A-n": ob, "B-y": ob}
+        scanner = MarketScanner(api, MagicMock(), "")
+        pool = [
+            {
+                "condition_id": "A",
+                "tokens": [{"token_id": "A-y"}, {"token_id": "A-n"}],
+            },
+            {"condition_id": "B", "tokens": [{"token_id": "B-y"}]},
+        ]
+
+        scanner.refresh_orderbooks(pool)
+
+        assert api.get_orderbook.call_count == 0, "不该再每 token 单发"
+        assert api.get_orderbooks.call_count == 1, "整池一次拿完"
+        assert set(api.get_orderbooks.call_args[0][0]) == {"A-y", "A-n", "B-y"}
+        # 分发回各自的市场,不能串台
+        assert set(pool[0]["_orderbooks"]) == {"A-y", "A-n"}
+        assert set(pool[1]["_orderbooks"]) == {"B-y"}
+
+    def test_refresh_orderbooks_skips_tokens_the_batch_did_not_return(self):
+        """批量没返回的 token 不进该市场的簿(等价于旧的单发失败 continue)。
+
+        filter 对没有簿的 token 会跳过;写进去一个空壳簿反而会被当成真实盘口判定。
+        """
+        ob = {"bids": [], "asks": [], "tick_size": "0.01"}
+        api = MagicMock()
+        api.get_orderbooks.return_value = {"A-y": ob, "A-n": None}
+        scanner = MarketScanner(api, MagicMock(), "")
+        pool = [
+            {"condition_id": "A", "tokens": [{"token_id": "A-y"}, {"token_id": "A-n"}]}
+        ]
+
+        scanner.refresh_orderbooks(pool)
+
+        assert set(pool[0]["_orderbooks"]) == {"A-y"}
+
     def test_refresh_orderbooks_fills_and_overwrites(self):
         api = MagicMock()
         api.get_spread.return_value = 0.01
+        api.get_orderbooks.side_effect = lambda ids: {
+            t: {
+                "bids": [{"price": "0.30", "size": "100"}],
+                "asks": [{"price": "0.31", "size": "100"}],
+                "tick_size": "0.01",
+            }
+            for t in ids
+        }
         api.get_orderbook.return_value = {
             "bids": [{"price": "0.30", "size": "100"}],
             "asks": [{"price": "0.31", "size": "100"}],
@@ -882,10 +938,8 @@ class TestSpreadComputedLocally:
 
     def _scanner(self, bids, asks):
         api = MagicMock()
-        api.get_orderbook.return_value = {
-            "bids": bids,
-            "asks": asks,
-            "tick_size": "0.01",
+        api.get_orderbooks.side_effect = lambda ids: {
+            t: {"bids": bids, "asks": asks, "tick_size": "0.01"} for t in ids
         }
         return api, MarketScanner(api, MagicMock(), "")
 

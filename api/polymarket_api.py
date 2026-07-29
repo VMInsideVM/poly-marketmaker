@@ -7,6 +7,7 @@ from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
     AssetType,
     BalanceAllowanceParams,
+    BookParams,
     OrderArgs,
     OrderType,
     OrderPayload,
@@ -42,6 +43,10 @@ POLYMARKET_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
 SIG_POLY_PROXY = 1  # Email/embedded-login Polymarket Proxy Wallet
 SIG_GNOSIS_SAFE = 2  # Browser-wallet proxy signature type
+
+# POST /books 单次可带的 token 数。实测 500 个仍 HTTP 200(1.78s),1000 与 2000 都是
+# HTTP 400。取 100 留足余量:一批同生共死,批越大一次失败丢的盘口越多。
+_BOOKS_BATCH_SIZE = 100
 
 # Rewards API is part of the CLOB API
 REWARDS_API = POLYMARKET_HOST
@@ -216,6 +221,38 @@ class PolymarketAPI:
     def get_orderbook(self, token_id: str) -> dict:
         """Get orderbook for a token. Returns {bids: [...], asks: [...]}."""
         return self.client.get_order_book(token_id)
+
+    def get_orderbooks(self, token_ids: list) -> dict:
+        """批量取盘口,返回 {token_id: 盘口 dict 或 None}。None = 该 token 没取到。
+
+        CLOB 的 POST /books 一次返回多个盘口,字段与单发 GET /book 完全一致
+        (asset_id/bids/asks/tick_size/neg_risk/min_order_size…,盘口深度不截断)。
+
+        **必须按 asset_id 对齐,不能按下标 zip**:实测 /books 对失效 token 静默丢弃
+        (HTTP 200 但返回条数少于请求条数),按下标会把后一个 token 的盘口安到前一个
+        头上 —— Step3 拿错盘口判撤单、离场拿错买一定卖价。
+
+        分批发,每批独立 try:一批同生共死,失败只让那批记 None,不能让一次抖动把整轮
+        盘口清空(那等于 Step3 全跳过、离场全部 ⚠️裸奔)。
+        """
+        out = {t: None for t in token_ids}
+        for i in range(0, len(token_ids), _BOOKS_BATCH_SIZE):
+            chunk = token_ids[i : i + _BOOKS_BATCH_SIZE]
+            try:
+                resp = self.client.get_order_books(
+                    [BookParams(token_id=t) for t in chunk]
+                )
+            except Exception as e:
+                logger.warning(
+                    "get_order_books 批(%d 个)失败,该批记 None: %s", len(chunk), e
+                )
+                continue
+            by_asset = {
+                b.get("asset_id"): b for b in (resp or []) if isinstance(b, dict)
+            }
+            for t in chunk:
+                out[t] = by_asset.get(t)
+        return out
 
     def get_spread(self, token_id: str) -> float:
         """Get spread for a token via GET /spread.
@@ -772,6 +809,7 @@ class PolymarketAPI:
 # 采集器)设的环境代理走采集所用钱包的代理。
 _PROXIED_METHODS = (
     "get_orderbook",
+    "get_orderbooks",
     "get_spread",
     "get_last_trade_price",
     "get_balance",

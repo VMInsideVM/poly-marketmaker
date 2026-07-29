@@ -30,6 +30,10 @@ def _make_monitor(settings=None):
     api.gamma_resolution_status.return_value = {}
     # Step 1 只撤仍在挂的单;默认无在挂单(测试按需覆盖)
     api.get_open_orders.return_value = []
+    # 批量盘口默认转发到单发 mock:用例只需照旧设 api.get_orderbook.return_value,
+    # 不必关心取数走批量还是单发(那是取数实现,不是这些用例要测的判定逻辑)。
+    # 要断言批量契约本身的用例自行覆盖 side_effect。
+    api.get_orderbooks.side_effect = lambda ids: {t: api.get_orderbook(t) for t in ids}
     monitor = OrderMonitor(api, db, "0xABC")
     return monitor, api, db
 
@@ -353,6 +357,37 @@ class TestCheckSellOrders:
         monitor.check_sell_orders()
 
         api.cancel_orders.assert_not_called()
+
+    def test_prefetch_takes_all_books_in_one_batch(self):
+        """N 个在挂买单只发一次盘口请求,不再逐个单发。
+
+        2026-07-29 实盘:51+ 挂单时 Step3 预取中位 10.7s、p90 17.3s,而判定本身
+        只要几毫秒(相邻判定日志 90% 间隔 <10ms)——时间全耗在等 N 个单发往返上,
+        把撤单延迟(= tick 耗时 + 5s)抬到 p99 22s。批量把 N 次往返压成 1 次。
+        """
+        monitor, api, db = _make_monitor()
+        tokens = ["tok1", "tok2", "tok3"]
+        api.get_open_orders.return_value = [
+            {
+                "id": f"o{i}",
+                "side": "BUY",
+                "asset_id": t,
+                "market": f"cid{i}",
+                "size_matched": "0",
+                "price": "0.48",
+                "original_size": "500",
+            }
+            for i, t in enumerate(tokens)
+        ]
+        api.get_orderbooks.side_effect = None  # 覆盖 _make_monitor 的单发转发
+        api.get_orderbooks.return_value = {t: self._ob() for t in tokens}
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+
+        monitor.check_sell_orders()
+
+        assert api.get_orderbook.call_count == 0, "不该再逐个单发盘口"
+        assert api.get_orderbooks.call_count == 1, "所有盘口必须一次拿完"
+        assert set(api.get_orderbooks.call_args[0][0]) == set(tokens)
 
     def test_cancel_outofband_order(self):
         # price 0.40 is outside reward band [0.47, 0.53] → cancel, no re-place
@@ -2338,6 +2373,20 @@ class TestExitPrefetch:
         assert monitor._trades_by_cid == {"cid1": [{"id": "t1"}]}
         assert set(monitor._book_cache) == {"tokYes", "tokNo"}
 
+    def test_takes_all_books_in_one_batch(self):
+        """N 个持仓的盘口一次批量拿完,不再逐仓单发(与 Step3 同因)。"""
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_trades.return_value = []
+        api.get_orderbooks.side_effect = None  # 覆盖 _make_monitor 的单发转发
+        api.get_orderbooks.return_value = {"tokA": self._ob(), "tokB": self._ob()}
+
+        monitor._exit_prefetch([self._pos("tokA", "cid1"), self._pos("tokB", "cid2")])
+
+        assert api.get_orderbook.call_count == 0, "不该再逐仓单发盘口"
+        assert api.get_orderbooks.call_count == 1
+        assert set(api.get_orderbooks.call_args[0][0]) == {"tokA", "tokB"}
+
     def test_trades_failure_recorded_as_none(self):
         # 取数失败记 None,与「取到了但没有成交」([])区分开
         monitor, api, db = _make_monitor()
@@ -2356,24 +2405,37 @@ class TestExitPrefetch:
         assert monitor._trades_by_cid == {"cid1": []}
 
     def test_book_failure_recorded_as_none(self):
+        # 批量取到了、但这个 token 没在返回里(实测 /books 静默丢弃取不到的 token)
         monitor, api, db = _make_monitor()
         monitor.begin_status_tick()
         api.get_trades.return_value = []
-        api.get_orderbook.side_effect = RuntimeError("network")
+        api.get_orderbooks.side_effect = lambda ids: {t: None for t in ids}
         monitor._exit_prefetch([self._pos("tokA", "cid1")])
         assert monitor._book_cache == {"tokA": None}
 
-    def test_one_failure_does_not_affect_others(self):
+    def test_whole_batch_crash_leaves_table_empty_for_self_fetch(self):
+        """整个批量调用崩掉时**什么都不写**,让 _sell_book 逐仓自取。
+
+        写 None 会关掉 _sell_book 的自取退路(None = 预取失败、不自取),把一次抖动
+        放大成整轮拿不到盘口。留空(_MISSING)才退回并发化之前的串行行为。
+        """
         monitor, api, db = _make_monitor()
         monitor.begin_status_tick()
         api.get_trades.return_value = []
+        api.get_orderbooks.side_effect = RuntimeError("boom")
 
-        def _ob_or_boom(asset_id):
-            if asset_id == "tokBad":
-                raise RuntimeError("network")
-            return self._ob()
+        monitor._exit_prefetch([self._pos("tokA", "cid1")])
 
-        api.get_orderbook.side_effect = _ob_or_boom
+        assert monitor._book_cache == {}, "留空才有自取退路,不能写成 None"
+
+    def test_one_failure_does_not_affect_others(self):
+        # 同 Step3:批量对取不到的 token 静默丢弃,该仓记 None、同批其余照常
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        api.get_trades.return_value = []
+        api.get_orderbooks.side_effect = lambda ids: {
+            t: (None if t == "tokBad" else self._ob()) for t in ids
+        }
         monitor._exit_prefetch(
             [self._pos("tokBad", "cid1"), self._pos("tokOk", "cid2")]
         )
@@ -2604,15 +2666,13 @@ class TestStep3Prefetch:
         assert books == {"tokA": None}
 
     def test_one_failure_does_not_affect_others(self):
+        # 批量取数下这仍然成立:实测 /books 对取不到的 token **静默丢弃**(HTTP 200,
+        # 返回条数少于请求条数),该 token 记 None、同批其余照常返回。
         monitor, api, db = _make_monitor()
         self._ready(monitor, api)
-
-        def _ob_or_boom(token_id):
-            if token_id == "tokBad":
-                raise RuntimeError("network")
-            return self._ob()
-
-        api.get_orderbook.side_effect = _ob_or_boom
+        api.get_orderbooks.side_effect = lambda ids: {
+            t: (None if t == "tokBad" else self._ob()) for t in ids
+        }
         orders = [self._buy("o1", "tokBad", "cid1"), self._buy("o2", "tokOk", "cid2")]
         books, rewards = monitor._prefetch(orders, set(), 0)
         assert books["tokBad"] is None
@@ -2753,11 +2813,6 @@ class TestStep3Prefetch:
         monitor, api, db = _make_monitor()
         self._ready(monitor, api)
 
-        def _ob_or_boom(token_id):
-            if token_id == "tokBad":
-                raise RuntimeError("network")
-            return self._ob()
-
         def _rewards_or_boom(condition_id):
             if condition_id == "cidBad":
                 raise RuntimeError("network")
@@ -2765,7 +2820,9 @@ class TestStep3Prefetch:
                 {"rewards_max_spread": 3, "rewards_config": [{"rate_per_day": 120}]}
             ]
 
-        api.get_orderbook.side_effect = _ob_or_boom
+        api.get_orderbooks.side_effect = lambda ids: {
+            t: (None if t == "tokBad" else self._ob()) for t in ids
+        }
         api.get_rewards_for_market.side_effect = _rewards_or_boom
         orders = [
             self._buy("o1", "tokBad", "cidBad"),
@@ -2860,16 +2917,18 @@ class TestStep3PrefetchWiring:
             self._buy("o2", "tokOk", "cid2"),
         ]
 
-        def _ob_or_boom(token_id):
-            if token_id == "tokBad":
-                raise RuntimeError("network")
-            return {
-                "bids": [{"price": "0.30", "size": "1000"}],
-                "asks": [{"price": "0.31", "size": "1000"}],
-                "tick_size": "0.01",
-            }
-
-        api.get_orderbook.side_effect = _ob_or_boom
+        api.get_orderbooks.side_effect = lambda ids: {
+            t: (
+                None
+                if t == "tokBad"
+                else {
+                    "bids": [{"price": "0.30", "size": "1000"}],
+                    "asks": [{"price": "0.31", "size": "1000"}],
+                    "tick_size": "0.01",
+                }
+            )
+            for t in ids
+        }
         api.get_rewards_for_market.return_value = self._rewards()
         monitor.check_sell_orders()
         rows = [r for r in monitor._status_rows if r.get("stage") == "Step3"]
