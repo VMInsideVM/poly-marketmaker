@@ -14,6 +14,7 @@ from engine.take_profit import (
     ceil_to_tick,
 )
 from engine.eligibility import recheck_resting_buy
+from engine.laddering import has_cliff_below
 from engine.resolution import in_resolution
 from engine.liquidation import plan_liquidation
 from engine.strategy import reward_price_range
@@ -202,8 +203,12 @@ class OrderMonitor:
             return self._cost_cache[asset_id]
         funder = self._funder()
         trades = self._trades_by_cid.get(condition_id, _MISSING)
-        if trades is _MISSING:
-            # 没走预取的调用点(_resolution_dump 等)照旧自取,行为不变。
+        if trades is _MISSING or trades is None:
+            # _MISSING = 没走预取的调用点(_resolution_dump 等),照旧自取。
+            # None = 预取那一路取数失败(已在预取里 WARNING 过)——同样自取重试一次,
+            # 不能直接判成本未知:成本未知 = 整仓跳过 + ⚠️裸奔,等于把一次网络抖动
+            # 翻译成一段无保护窗口(2026-07-29 实盘 810 次裸奔里 789 次紧跟一次预取
+            # 失败)。自取走的是新连接,瞬时抖动多半能过;真取不到才认成本未知。
             try:
                 trades = self.api.get_trades(TradeParams(market=condition_id))
             except Exception as e:
@@ -213,7 +218,6 @@ class OrderMonitor:
                 self._cost_cache[asset_id] = (None, [])
                 return None, []
         if trades is None:
-            # 预取那轮取数失败(已在预取里 WARNING 过),等价于自取失败:成本未知。
             self._cost_cache[asset_id] = (None, [])
             return None, []
         fills = extract_fills(trades, funder, asset_id)
@@ -420,21 +424,19 @@ class OrderMonitor:
                 logger.warning("[离场预取] get_trades(market=%s) 失败: %s", cid, e)
                 return None
 
-        def _book(asset_id):
-            try:
-                return self.api.get_orderbook(asset_id)
-            except Exception as e:
-                logger.warning("[离场预取] 订单簿 %s 失败: %s", asset_id, e)
-                return None
-
         if cids:
             self._trades_by_cid.update(
                 zip(cids, parallel_map(_trades, cids, _EXIT_MAX_WORKERS))
             )
         if assets:
-            self._book_cache.update(
-                zip(assets, parallel_map(_book, assets, _EXIT_MAX_WORKERS))
-            )
+            try:
+                self._book_cache.update(self.api.get_orderbooks(assets))
+            except Exception as e:
+                # get_orderbooks 内部已按批 try(失败批记 None),走到这里是整个调用崩了。
+                # **什么都不写**:表里留空(_MISSING)让 _sell_book 逐仓自取,即并发化
+                # 之前的串行行为。写 None 反而会关掉那条自取退路,把一次抖动变成整轮
+                # 拿不到盘口 —— 与 _cost_lots 对预取失败改自取重试是同一个道理。
+                logger.warning("[离场预取] 批量订单簿失败,退回逐仓自取: %s", e)
 
     def _sell_book(self, asset_id: str):
         """(tick_float, tick_str, best_bid, best_ask);失败/空时缺的位回 None。
@@ -526,7 +528,7 @@ class OrderMonitor:
                 # 成本没重建出(新成交未进 get_trades):推迟,不盲目清仓认亏(同 check_exit
                 # 的裸奔跳过;低余额无结算 deadline,不必像结算清仓那样成本未知也照卖)。
                 continue
-            _, _, best_bid, _ = self._sell_book(asset_id)
+            _, tick_str, best_bid, _ = self._sell_book(asset_id)
             reward = self.db.get_market_daily_reward(cid)
             loss = None if best_bid is None else (cost - best_bid) * size
             meta[asset_id] = {
@@ -536,6 +538,7 @@ class OrderMonitor:
                 "best_bid": best_bid,
                 "cost": cost,
                 "lots": lots,
+                "tick_str": tick_str,
             }
             candidates.append(
                 {
@@ -566,6 +569,7 @@ class OrderMonitor:
                     open_orders,
                     tag="低余额",
                     reason="低余额清仓腾现金（无视盈亏）",
+                    tick_str=m["tick_str"],
                 )
             except Exception as e:
                 logger.warning("low-balance dump %s failed: %s", asset_id, e)
@@ -849,7 +853,7 @@ class OrderMonitor:
 
         if action == "market":
             try:
-                resp = self.api.place_market_sell(asset_id, size)
+                resp = self.api.place_market_sell(asset_id, size, tick_size=tick_str)
             except Exception as e:
                 logger.error(
                     "Market exit failed asset=%s: %s — UNPROTECTED", asset_id, e
@@ -918,7 +922,7 @@ class OrderMonitor:
         情况。先撤该 asset 全部挂卖单(否则挂卖单占用份额,市价卖没份额可卖),再市价卖。
         成交价用 market_fill_price(≈买一),绝不用 Data API 现价。
         """
-        _, _, best_bid, _ = self._sell_book(asset_id)
+        _, tick_str, best_bid, _ = self._sell_book(asset_id)
         if best_bid is None or best_bid <= 0:
             # 无买盘 / 买一≤0(或盘口拉取失败):市价单吃不到任何流动性(卖不出),且
             # market_fill_price 仅当 best_bid>0 才取买一、否则退回被禁的 Data API 现价
@@ -946,6 +950,7 @@ class OrderMonitor:
             tag="结算",
             reason="市场结果已提交/进入 UMA 结算 → 市价清仓（无视盈亏）",
             expose_on_fail=True,
+            tick_str=tick_str,
         )
 
     def _market_dump(
@@ -961,6 +966,7 @@ class OrderMonitor:
         tag,
         reason,
         expose_on_fail=False,
+        tick_str="0.01",
     ):
         """市价清仓一个持仓(撤挂卖→FAK 市价卖→记账),覆盖「永不低于成本」。tag=短标签
         (结算/低余额),reason=record_action 理由。成功返成交价 fill、被拒返 None。
@@ -995,7 +1001,7 @@ class OrderMonitor:
                     "Cancel sells %s failed (proceed to %s dump): %s", asset_id, tag, e
                 )
         try:
-            resp = self.api.place_market_sell(asset_id, size)
+            resp = self.api.place_market_sell(asset_id, size, tick_size=tick_str)
         except Exception as e:
             logger.error("%s dump failed asset=%s: %s", tag, asset_id, e)
             self._status_add(
@@ -1152,6 +1158,11 @@ class OrderMonitor:
         实测「娇气」的那个(烂代理约 30% 连接超时,_retry_on_connect_error 最多重试 3
         次),几个卡住的奖励任务能把那一拨拖到几十秒,这份陈旧不该落在盘口上。
 
+        盘口走**一次批量** get_orderbooks(POST /books),不再每 token 一个请求:
+        2026-07-29 实盘 51+ 挂单时这一拨中位 10.7s、p90 17.3s、最大 46.1s,而判定本身
+        只要几毫秒(相邻判定日志 90% 间隔 <10ms)—— 撤单延迟(= tick 耗时 + 5s,实测
+        p99 22s)几乎全是在等这些单发往返。奖励没有批量端点,仍走并发。
+
         两拨保持分开、不合成一拨异构任务:分开才有天然的按 token / 按市场去重。
 
         **books 里的 None 表示取数失败**,与「取到了但买卖盘为空」不是一回事:前者该单
@@ -1173,13 +1184,6 @@ class OrderMonitor:
         token_ids = [t for t in {o.get("asset_id", "") for o in pending} if t]
         cids = [c for c in {o.get("market", "") for o in pending} if c]
 
-        def _book(token_id):
-            try:
-                return self.api.get_orderbook(token_id)
-            except Exception as e:
-                logger.warning("[Step3] 预取订单簿失败 %s: %s", token_id, e)
-                return None
-
         rewards = dict(
             zip(
                 cids,
@@ -1188,7 +1192,14 @@ class OrderMonitor:
                 ),
             )
         )
-        books = dict(zip(token_ids, parallel_map(_book, token_ids, _STEP3_MAX_WORKERS)))
+        try:
+            books = self.api.get_orderbooks(token_ids)
+        except Exception as e:
+            # get_orderbooks 内部已按批 try(失败批记 None),走到这里说明整个调用崩了。
+            # 与旧的「每个取数任务自带 try、绝不外抛」保持一致:全记 None,该轮各单
+            # 走「订单簿取不到,本轮跳过」,绝不让 Step3 抛出去冻住 publish_status。
+            logger.warning("[Step3] 批量预取订单簿失败,本轮全部跳过: %s", e)
+            books = {t: None for t in token_ids}
         # 干过活的轮才记一条汇总:这次并发化的全部理由是「36 秒降到 6 秒」、最大风险是
         # 6 路把娇气的奖励端点打崩,两件事都只有这条日志看得见(逐项 WARNING 看不出面),
         # 而奖励系统性取不到会静默退化成 fail-open 跳过。
@@ -1477,6 +1488,50 @@ class OrderMonitor:
                 cur_price,
                 rmin,
                 rmax,
+            )
+            return
+
+        # 悬崖复查：奖励区间下沿往下 N¢ 内无买档支撑 → 撤买单不重挂（cancel-only）。
+        # 与下单时的判定共用 has_cliff_below，两处口径不会漂。之所以在挂单也要复查：下单轮
+        # 在预算被持仓吃空时会整市场 continue（manager.py 的「预算不足：活跃侧保持不动」），
+        # 那条路径下在挂买单永远走不到下单轮的悬崖判定，只有这里够得着。
+        cliff_cents = float(settings.get("cliff_probe_cents", 2) or 0)
+        if has_cliff_below(bids, rmin, cliff_cents):
+            reason = f"奖励区间下方 {cliff_cents:g}¢ 内无买档支撑（悬崖），撤买单不重挂"
+            try:
+                self.api.cancel_orders([o.get("id")])
+            except Exception as e:
+                logger.warning("Cliff cancel %s failed: %s", o.get("id"), e)
+                return
+            self._record_action(
+                market_id=cid,
+                action_type="cliff_cancel",
+                side="-",
+                price=-1,
+                size=osize,
+                reason=reason,
+                price_basis=(
+                    f"奖励区间下沿={rmin:.4f}；探测带"
+                    f"[{rmin - cliff_cents * 0.01:.4f},{rmin:.4f}) 内无买档；"
+                    f"来源：CLOB get_orderbook"
+                ),
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price=f"{cur_price:.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="撤单(悬崖)",
+                detail=reason,
+            )
+            logger.info(
+                "[Step3] cliff cancel %s market %s | 下沿 %.4f 往下 %g¢ 无买档",
+                o.get("id"),
+                cid,
+                rmin,
+                cliff_cents,
             )
             return
 

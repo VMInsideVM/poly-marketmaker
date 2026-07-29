@@ -390,7 +390,19 @@ class WalletWorker:
 
             side_a = sides[0]
             side_b = sides[1] if len(sides) > 1 else None
-            balance = self.api.get_balance()
+            try:
+                # 循环里唯一的余额读取(每市场重读一次,防并发成交超卖——别改成缓存)。
+                # 失败只跳过这个市场:整轮抛出会让排序靠后的市场既不下单也不撤单,而市场
+                # 顺序按竞争度固定,等于被系统性饿死(2026-07-29 实盘 159 次整轮早退)。
+                balance = self.api.get_balance()
+            except Exception as ex:
+                logger.warning(
+                    "get_balance failed for %s, skip market %s: %s",
+                    self.wallet_address,
+                    mid,
+                    ex,
+                )
+                continue
             budget = max(0.0, min(balance, max_exposure_usd) - held_value.get(mid, 0.0))
             shares_budget = max(0, max_exposure_shares - int(held_shares.get(mid, 0.0)))
             budget_ok = budget > 0 and shares_budget > 0

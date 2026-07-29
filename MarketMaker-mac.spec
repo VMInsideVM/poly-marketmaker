@@ -18,12 +18,18 @@ datas = [
 ]
 
 # 这些包会动态 import 子模块，整包收进来，避免被静态分析漏掉。
+# coincurve 尤其要收：eth_keys 在运行时靠 is_coincurve_available() 里的 `import coincurve`
+# 选 ECC 后端，而 coincurve 的密码学实现在两个 cffi 生成的扩展里（_libsecp256k1、
+# _cffi_backend），静态分析跟不到。只收一半会让它处于不一致状态——同一个
+# is_coincurve_available() 前一次答 True（于是选了 CoinCurveECCBackend）、后一次在
+# __init__ 里答 False，正是 2026-07-29 日志里 644 次建 API 失败的那条报错。
 hiddenimports = []
 for pkg in (
     "py_clob_client_v2",
     "py_builder_relayer_client",
     "eth_account",
     "poly_eip712_structs",
+    "coincurve",
 ):
     hiddenimports += collect_submodules(pkg)
     datas += collect_data_files(pkg)

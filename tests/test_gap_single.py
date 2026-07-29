@@ -457,6 +457,34 @@ from engine.laddering import (
 )
 
 
+def test_has_cliff_below_detects_void():
+    # 下沿 0.10 往下 2¢ 带 [0.08,0.10) 内无档(下一档直接 0.02)-> 悬崖
+    from engine.laddering import has_cliff_below
+
+    assert has_cliff_below([_b(0.18, 50), _b(0.02, 9999)], 0.10, 2) is True
+
+
+def test_has_cliff_below_support_in_band():
+    from engine.laddering import has_cliff_below
+
+    assert has_cliff_below([_b(0.18, 50), _b(0.09, 30)], 0.10, 2) is False
+
+
+def test_has_cliff_below_boundary_not_dusted():
+    # floor 0.10、N=1:9¢ 恰落在 [0.09,0.10) 带内,不能被浮点尘排掉判成悬崖。
+    from engine.laddering import has_cliff_below
+
+    assert has_cliff_below([_b(0.09, 30)], 0.10, 1) is False
+
+
+def test_has_cliff_below_disabled_or_no_book():
+    # N<=0 = 关闭;空买单簿 = 无从判断,都不报悬崖(不撤单)。
+    from engine.laddering import has_cliff_below
+
+    assert has_cliff_below([_b(0.02, 9999)], 0.10, 0) is False
+    assert has_cliff_below([], 0.10, 2) is False
+
+
 def test_cliff_below_zone_skips():
     # in_range 有 0.18/0.17(≥rmin 0.10);[0.08,0.10) 内无档(下一档直接 0.02)→ 悬崖
     out = _plan([_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)], cliff=2)

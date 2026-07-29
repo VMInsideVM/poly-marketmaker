@@ -376,16 +376,35 @@ class MarketScanner:
         某 token 抓不到则不入该市场的 _orderbooks(filter 现有逻辑会跳过该 token),
         覆盖写保证不留上一轮的陈旧簿。
 
-        **并发**拉:串行拉整池(~180 市场 × 每市场 4 次网络)过代理要几十分钟、下单轮
-        基本跑不完,filter 拿不到簿 -> eligible 空 -> 不挂单(2026-07-04 实盘)。_fetch_
-        orderbooks 自带 per-token 容错、不抛,parallel_map 保序 + 带 current_proxy。"""
+        整池的 token **一次批量**拉(get_orderbooks,内部按 100 个一批):刷簿的请求数
+        是 O(候选池 × 每市场 token 数),~180 市场就是 360 次单发往返,过代理时能吃掉
+        几十分钟、下单轮基本跑不完,filter 拿不到簿 -> eligible 空 -> 不挂单(2026-07-04
+        实盘)。批量整体失败时 books 为空,各市场照旧覆盖成空簿 —— 覆盖写是刻意的,留着
+        上一轮的陈旧簿会让下单按过时盘口定价。"""
         if cancel and cancel():
             raise ScanSuperseded()
-        results = parallel_map(
-            lambda m: self._fetch_orderbooks(m), pool, _DISCOVERY_MAX_WORKERS
-        )
-        for market, books in zip(pool, results):
-            market["_orderbooks"] = books
+        token_ids = [
+            t
+            for t in {
+                tk.get("token_id", "") for m in pool for tk in m.get("tokens", [])
+            }
+            if t
+        ]
+        try:
+            books = self.api.get_orderbooks(token_ids)
+        except Exception as e:
+            logger.warning("批量刷簿失败,本轮各市场按空簿处理: %s", e)
+            books = {}
+        for market in pool:
+            market["_orderbooks"] = self._build_orderbooks(market, books)
+        if token_ids:
+            got = sum(1 for t in token_ids if isinstance(books.get(t), dict))
+            if got < len(token_ids):
+                # 只在真缺的时候说话。缺的 token 会被 filter 跳过 = 那个市场这一轮
+                # 不下单,系统性取不到就是「预演能出却不下单」,只有这条看得见。
+                logger.warning(
+                    "刷簿缺 %d/%d 个 token", len(token_ids) - got, len(token_ids)
+                )
 
     def fetch_candidates(
         self,
@@ -457,29 +476,31 @@ class MarketScanner:
         ]
         return {"categories": cats, "other_count": other}
 
-    def _fetch_orderbooks(self, market: dict) -> dict:
-        """抓该市场每 token 的订单簿快照(钱包无关)。抓不到的略过。
+    def _build_orderbooks(self, market: dict, books: dict) -> dict:
+        """从本轮批量取回的簿里挑出该市场每 token 的快照(钱包无关)。取不到的略过。
 
-        每 token 只发一次请求:价差由 book_spread 从这份簿本地算,不再多发 /spread。"""
-        books = {}
+        `books` 由 refresh_orderbooks 一次批量取好;里面缺的 token 或值为 None 的
+        (批量对取不到的 token 静默丢弃)一律跳过 —— filter 对没有簿的 token 会跳过,
+        而写进一个空壳簿会被当成真实盘口参与判定。
+
+        价差由 book_spread 从这份簿本地算,不再多发 /spread。"""
+        out = {}
         for token in market.get("tokens", []):
             token_id = token.get("token_id", "")
             if not token_id:
                 continue
-            try:
-                ob = self.api.get_orderbook(token_id)
-            except Exception as e:
-                logger.warning("Orderbook fetch failed for %s: %s", token_id, e)
-                continue
+            ob = books.get(token_id)
+            if not isinstance(ob, dict):
+                continue  # 缺多少由 refresh_orderbooks 汇总打一条,不逐 token 刷屏
             bids = ob.get("bids", [])
             asks = ob.get("asks", [])
-            books[token_id] = {
+            out[token_id] = {
                 "bids": bids,
                 "asks": asks,
                 "tick_size": ob.get("tick_size", "0.01"),
                 "spread": book_spread(bids, asks),
             }
-        return books
+        return out
 
     def prefilter_for_template(
         self, candidate_pool, template, wallet_address
