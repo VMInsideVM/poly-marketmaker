@@ -13,6 +13,9 @@ def _make_monitor(settings=None):
     default_settings = {
         "cooldown_minutes": 20,
         "rewards_cache_ttl_sec": 600,
+        # 悬崖复查默认关:这些用例测的是价差/奖励/价格带子逻辑,不该被悬崖否决误伤
+        # (与 tests/test_place_orders.py 的 _make_worker 同样处理)。要测的用例显式传。
+        "cliff_probe_cents": 0,
     }
     if settings:
         default_settings.update(settings)
@@ -818,6 +821,52 @@ class TestStep3ActionLog:
         assert "奖励区间" in call.kwargs["reason"]
         api.place_limit_buy.assert_not_called()
 
+    def _ob_cliff(self, extra_bid=None):
+        # 买一 0.48 / 卖一 0.52 -> mid 0.50、max_spread 3 -> 奖励区间 [0.47,0.53],
+        # 下沿 0.47。extra_bid 落在 [0.45,0.47) 带内即为支撑,否则下方直通 0.02 = 悬崖。
+        bids = [{"price": "0.48", "size": "1000"}]
+        if extra_bid:
+            bids.append({"price": extra_bid, "size": "300"})
+        bids.append({"price": "0.02", "size": "9999"})
+        return {
+            "bids": bids,
+            "asks": [{"price": "0.52", "size": "1000"}],
+            "tick_size": "0.01",
+        }
+
+    def test_cliff_below_band_cancels_resting_buy(self):
+        # 挂单价 0.48 在奖励区间内(出界闸门不撤它),但下沿往下 2¢ 内无买档 -> 悬崖 -> 撤。
+        # 下单时判过一次还不够:预算被持仓吃空的市场整轮 continue(manager.py:452),
+        # 那条路径下在挂单永远走不到下单轮的判定,只有 Step3 复查够得着。
+        monitor, api, db = _make_monitor({"cliff_probe_cents": 2})
+        api.get_open_orders.return_value = [self._order(price="0.48")]
+        api.get_orderbook.return_value = self._ob_cliff()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        monitor.check_sell_orders()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["cliff_cancel"]
+        assert "悬崖" in db.record_action.call_args_list[0].kwargs["reason"]
+        api.cancel_orders.assert_called_once_with(["o1"])
+        api.place_limit_buy.assert_not_called()
+
+    def test_cliff_support_within_band_keeps_resting_buy(self):
+        # 0.46 落在 [0.45,0.47) 带内 -> 有支撑 -> 保持不动。
+        monitor, api, db = _make_monitor({"cliff_probe_cents": 2})
+        api.get_open_orders.return_value = [self._order(price="0.48")]
+        api.get_orderbook.return_value = self._ob_cliff(extra_bid="0.46")
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        monitor.check_sell_orders()
+        db.record_action.assert_not_called()
+
+    def test_cliff_disabled_keeps_resting_buy(self):
+        # cliff_probe_cents=0 -> 整段不查(零回归),同样的悬崖盘口也不撤。
+        monitor, api, db = _make_monitor({"cliff_probe_cents": 0})
+        api.get_open_orders.return_value = [self._order(price="0.48")]
+        api.get_orderbook.return_value = self._ob_cliff()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        monitor.check_sell_orders()
+        db.record_action.assert_not_called()
+
     def test_inband_records_no_action(self):
         # price 0.48 in reward band [0.47, 0.53] → keep, no action recorded
         monitor, api, db = _make_monitor()
@@ -1159,6 +1208,7 @@ class TestCheckExit:
         cur_price=None,
         stop_mode="fixed",
         stop_percent=20,
+        tick="0.01",
     ):
         monitor, api, db = _make_monitor(
             settings={
@@ -1183,7 +1233,7 @@ class TestCheckExit:
         api.get_orderbook.return_value = {
             "bids": [{"price": str(p), "size": str(s)} for p, s in bids],
             "asks": [{"price": str(p), "size": str(s)} for p, s in asks],
-            "tick_size": "0.01",
+            "tick_size": tick,
         }
         monitor._cost_lots = lambda a, s, c: (
             cost,
@@ -1214,8 +1264,20 @@ class TestCheckExit:
     def test_b0_market_clear_and_record(self):
         monitor, api, db = self._setup(0.40, 100, [(0.35, 500)], [(0.36, 500)])
         monitor.check_exit()
-        api.place_market_sell.assert_called_once_with("A-y", 100)
+        api.place_market_sell.assert_called_once_with("A-y", 100, tick_size="0.01")
         db.record_trade.assert_called_once()
+
+    def test_b0_market_sell_passes_real_tick_size(self):
+        # 0.1¢ 市场:B0 市价清仓必须把盘口真实 tick 传给下单接口。漏传时客户端按默认
+        # 0.01 的价格网格校验,算出的 0.001 被判 invalid price(min 0.01),止损单根本
+        # 发不出去、持仓一直裸奔(2026-07-29 实盘 385 次)。
+        monitor, api, db = self._setup(
+            0.40, 100, [(0.35, 500)], [(0.36, 500)], tick="0.001"
+        )
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once()
+        _, k = api.place_market_sell.call_args
+        assert k.get("tick_size") == "0.001"
 
     def test_b0_percent_mode_triggers_at_cost_pct(self):
         # 按比例 20%:成本 0.40 -> 阈值 0.08。买一 0.31(亏 0.09 ≥ 0.08)-> B0 市价清仓。
@@ -1228,7 +1290,7 @@ class TestCheckExit:
             stop_percent=20,
         )
         monitor.check_exit()
-        api.place_market_sell.assert_called_once_with("A-y", 100)
+        api.place_market_sell.assert_called_once_with("A-y", 100, tick_size="0.01")
 
     def test_b0_percent_mode_holds_within_threshold(self):
         # 按比例 20%:成本 0.40 -> 阈值 0.08。买一 0.35(亏 0.05 < 0.08)-> 不强平,挂成本价。
@@ -1293,7 +1355,9 @@ class TestCheckExit:
             0.40, 100, [(0.35, 500)], [(0.36, 500)], sells=sells
         )
         api.cancel_orders.side_effect = lambda ids: calls.append(("cancel", ids))
-        api.place_market_sell.side_effect = lambda a, s: calls.append(("market", a, s))
+        api.place_market_sell.side_effect = lambda a, s, **kw: calls.append(
+            ("market", a, s)
+        )
         monitor.check_exit()
         assert calls[0][0] == "cancel" and "s1" in calls[0][1]
         assert calls[1][0] == "market"
@@ -1479,7 +1543,17 @@ class TestExitTakeProfitMode:
 class TestResolutionExit:
     """结算(umaResolutionStatus 非空)时,该市场持仓无视盈亏市价清仓。"""
 
-    def _setup(self, cost, size, bids, asks, sells=None, cur_price=None, gamma=None):
+    def _setup(
+        self,
+        cost,
+        size,
+        bids,
+        asks,
+        sells=None,
+        cur_price=None,
+        gamma=None,
+        tick="0.01",
+    ):
         monitor, api, db = _make_monitor(
             settings={
                 "theta_loss_cents": 2,
@@ -1503,7 +1577,7 @@ class TestResolutionExit:
         api.get_orderbook.return_value = {
             "bids": [{"price": str(p), "size": str(s)} for p, s in bids],
             "asks": [{"price": str(p), "size": str(s)} for p, s in asks],
-            "tick_size": "0.01",
+            "tick_size": tick,
         }
         api.gamma_resolution_status.return_value = gamma if gamma is not None else {}
         monitor._cost_lots = lambda a, s, c: (
@@ -1518,11 +1592,26 @@ class TestResolutionExit:
             0.30, 100, [(0.31, 500)], [(0.33, 500)], gamma={"A": "proposed"}
         )
         monitor.check_exit()
-        api.place_market_sell.assert_called_once_with("A-y", 100)
+        api.place_market_sell.assert_called_once_with("A-y", 100, tick_size="0.01")
         api.place_limit_sell.assert_not_called()
         ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
         assert "exit_market" in ats
         db.record_trade.assert_called_once()  # 成本已知 -> 记 pnl
+
+    def test_resolving_market_sell_passes_real_tick_size(self):
+        # 0.1¢ 市场的结算清仓同样要传真实 tick,否则市价卖被客户端拦下 -> 仓等着被结算成 0。
+        monitor, api, db = self._setup(
+            0.30,
+            100,
+            [(0.31, 500)],
+            [(0.33, 500)],
+            gamma={"A": "proposed"},
+            tick="0.001",
+        )
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once()
+        _, k = api.place_market_sell.call_args
+        assert k.get("tick_size") == "0.001"
 
     def test_resolving_cancels_resting_sell_before_market(self):
         # 已有挂卖单 -> 必须先撤再市价卖(否则挂卖单占用份额,市价卖没份额可卖)。
@@ -1546,7 +1635,9 @@ class TestResolutionExit:
             gamma={"A": "proposed"},
         )
         api.cancel_orders.side_effect = lambda ids: calls.append(("cancel", ids))
-        api.place_market_sell.side_effect = lambda a, s: calls.append(("market", a, s))
+        api.place_market_sell.side_effect = lambda a, s, **kw: calls.append(
+            ("market", a, s)
+        )
         monitor.check_exit()
         assert calls[0][0] == "cancel" and "s1" in calls[0][1]
         assert calls[1][0] == "market"
@@ -1560,7 +1651,7 @@ class TestResolutionExit:
         rows = []
         monitor._status_add = lambda **kw: rows.append(kw)
         monitor.check_exit()
-        api.place_market_sell.assert_called_once_with("A-y", 100)
+        api.place_market_sell.assert_called_once_with("A-y", 100, tick_size="0.01")
         db.record_trade.assert_not_called()  # 成本未知 -> 不记 pnl
         assert any("结算" in (r.get("action") or "") for r in rows), rows
         assert not any("跳过" in (r.get("action") or "") for r in rows), rows
@@ -1654,6 +1745,7 @@ class TestLowBalance:
         threshold=4,
         target_usd=4,
         mode="balance",
+        tick="0.01",
     ):
         monitor, api, db = _make_monitor(
             settings={
@@ -1674,8 +1766,8 @@ class TestLowBalance:
             [{"price": costs.get(a) or 0, "take": s, "ts": 0, "trade_id": "t"}],
         )
         monitor._sell_book = lambda a: (
-            0.01,
-            "0.01",
+            float(tick),
+            tick,
             bids.get(a),
             (bids.get(a) or 0) + 0.02,
         )
@@ -1701,7 +1793,22 @@ class TestLowBalance:
             {"A": 0.05, "B": 0.05},
         )
         m.check_low_balance()
-        api.place_market_sell.assert_called_once_with("A", 100)
+        api.place_market_sell.assert_called_once_with("A", 100, tick_size="0.01")
+
+    def test_low_balance_dump_passes_real_tick_size(self):
+        # 0.1¢ 市场的低余额清仓同样要传真实 tick,否则市价卖被拦、余额腾不出来。
+        m, api, db = self._mon(
+            2,
+            [self._pos("A", 100, "cA")],
+            {"cA": 10},
+            {"A": 0.1},
+            {"A": 0.05},
+            tick="0.001",
+        )
+        m.check_low_balance()
+        api.place_market_sell.assert_called_once()
+        _, k = api.place_market_sell.call_args
+        assert k.get("tick_size") == "0.001"
 
     def test_skips_no_bid(self):
         m, api, db = self._mon(
@@ -1895,7 +2002,7 @@ class TestExitPrefetchFailureDegradesInsteadOfKillingTheTick:
             side_effect=RuntimeError("can't start new thread")
         )
         monitor.check_low_balance([])
-        api.place_market_sell.assert_called_once_with("tokA", 100.0)
+        api.place_market_sell.assert_called_once_with("tokA", 100.0, tick_size="0.01")
 
 
 def test_last_position_count_is_unknown_when_exit_returns_early():

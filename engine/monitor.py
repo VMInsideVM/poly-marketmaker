@@ -14,6 +14,7 @@ from engine.take_profit import (
     ceil_to_tick,
 )
 from engine.eligibility import recheck_resting_buy
+from engine.laddering import has_cliff_below
 from engine.resolution import in_resolution
 from engine.liquidation import plan_liquidation
 from engine.strategy import reward_price_range
@@ -526,7 +527,7 @@ class OrderMonitor:
                 # 成本没重建出(新成交未进 get_trades):推迟,不盲目清仓认亏(同 check_exit
                 # 的裸奔跳过;低余额无结算 deadline,不必像结算清仓那样成本未知也照卖)。
                 continue
-            _, _, best_bid, _ = self._sell_book(asset_id)
+            _, tick_str, best_bid, _ = self._sell_book(asset_id)
             reward = self.db.get_market_daily_reward(cid)
             loss = None if best_bid is None else (cost - best_bid) * size
             meta[asset_id] = {
@@ -536,6 +537,7 @@ class OrderMonitor:
                 "best_bid": best_bid,
                 "cost": cost,
                 "lots": lots,
+                "tick_str": tick_str,
             }
             candidates.append(
                 {
@@ -566,6 +568,7 @@ class OrderMonitor:
                     open_orders,
                     tag="低余额",
                     reason="低余额清仓腾现金（无视盈亏）",
+                    tick_str=m["tick_str"],
                 )
             except Exception as e:
                 logger.warning("low-balance dump %s failed: %s", asset_id, e)
@@ -849,7 +852,7 @@ class OrderMonitor:
 
         if action == "market":
             try:
-                resp = self.api.place_market_sell(asset_id, size)
+                resp = self.api.place_market_sell(asset_id, size, tick_size=tick_str)
             except Exception as e:
                 logger.error(
                     "Market exit failed asset=%s: %s — UNPROTECTED", asset_id, e
@@ -918,7 +921,7 @@ class OrderMonitor:
         情况。先撤该 asset 全部挂卖单(否则挂卖单占用份额,市价卖没份额可卖),再市价卖。
         成交价用 market_fill_price(≈买一),绝不用 Data API 现价。
         """
-        _, _, best_bid, _ = self._sell_book(asset_id)
+        _, tick_str, best_bid, _ = self._sell_book(asset_id)
         if best_bid is None or best_bid <= 0:
             # 无买盘 / 买一≤0(或盘口拉取失败):市价单吃不到任何流动性(卖不出),且
             # market_fill_price 仅当 best_bid>0 才取买一、否则退回被禁的 Data API 现价
@@ -946,6 +949,7 @@ class OrderMonitor:
             tag="结算",
             reason="市场结果已提交/进入 UMA 结算 → 市价清仓（无视盈亏）",
             expose_on_fail=True,
+            tick_str=tick_str,
         )
 
     def _market_dump(
@@ -961,6 +965,7 @@ class OrderMonitor:
         tag,
         reason,
         expose_on_fail=False,
+        tick_str="0.01",
     ):
         """市价清仓一个持仓(撤挂卖→FAK 市价卖→记账),覆盖「永不低于成本」。tag=短标签
         (结算/低余额),reason=record_action 理由。成功返成交价 fill、被拒返 None。
@@ -995,7 +1000,7 @@ class OrderMonitor:
                     "Cancel sells %s failed (proceed to %s dump): %s", asset_id, tag, e
                 )
         try:
-            resp = self.api.place_market_sell(asset_id, size)
+            resp = self.api.place_market_sell(asset_id, size, tick_size=tick_str)
         except Exception as e:
             logger.error("%s dump failed asset=%s: %s", tag, asset_id, e)
             self._status_add(
@@ -1477,6 +1482,50 @@ class OrderMonitor:
                 cur_price,
                 rmin,
                 rmax,
+            )
+            return
+
+        # 悬崖复查：奖励区间下沿往下 N¢ 内无买档支撑 → 撤买单不重挂（cancel-only）。
+        # 与下单时的判定共用 has_cliff_below，两处口径不会漂。之所以在挂单也要复查：下单轮
+        # 在预算被持仓吃空时会整市场 continue（manager.py 的「预算不足：活跃侧保持不动」），
+        # 那条路径下在挂买单永远走不到下单轮的悬崖判定，只有这里够得着。
+        cliff_cents = float(settings.get("cliff_probe_cents", 2) or 0)
+        if has_cliff_below(bids, rmin, cliff_cents):
+            reason = f"奖励区间下方 {cliff_cents:g}¢ 内无买档支撑（悬崖），撤买单不重挂"
+            try:
+                self.api.cancel_orders([o.get("id")])
+            except Exception as e:
+                logger.warning("Cliff cancel %s failed: %s", o.get("id"), e)
+                return
+            self._record_action(
+                market_id=cid,
+                action_type="cliff_cancel",
+                side="-",
+                price=-1,
+                size=osize,
+                reason=reason,
+                price_basis=(
+                    f"奖励区间下沿={rmin:.4f}；探测带"
+                    f"[{rmin - cliff_cents * 0.01:.4f},{rmin:.4f}) 内无买档；"
+                    f"来源：CLOB get_orderbook"
+                ),
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price=f"{cur_price:.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="撤单(悬崖)",
+                detail=reason,
+            )
+            logger.info(
+                "[Step3] cliff cancel %s market %s | 下沿 %.4f 往下 %g¢ 无买档",
+                o.get("id"),
+                cid,
+                rmin,
+                cliff_cents,
             )
             return
 

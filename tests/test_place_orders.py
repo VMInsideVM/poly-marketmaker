@@ -74,6 +74,18 @@ def test_skips_market_in_uma_resolution():
     api.place_limit_buy.assert_not_called()
 
 
+def test_balance_failure_skips_only_that_market():
+    # get_balance 是市场循环里唯一没保护的网络调用,一次抖动就把整轮下单掀了:后面的
+    # 市场既不下单也不撤单。市场顺序固定(按竞争度排序),所以排在后面的会被系统性饿死
+    # ——2026-07-29 实盘 159 次整轮早退,每次前一行都是同钱包的 get_balance failed。
+    worker, api, db = _make_worker()
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    api.get_balance.side_effect = [RuntimeError("proxy down"), 10000.0]
+    worker.place_orders([_elig("A", "A-y", "Yes"), _elig("B", "B-y", "Yes")])
+    assert api.place_limit_buy.call_count == 1
+    assert api.place_limit_buy.call_args[0][0] == "B-y"
+
+
 def test_places_normally_when_not_in_resolution():
     # 正常市场(umaResolutionStatus=None)照常下单,守卫不误伤。
     worker, api, db = _make_worker()

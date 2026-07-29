@@ -26,6 +26,27 @@ def amount_value(price, table):
     return None
 
 
+def has_cliff_below(bids, reward_range_min, cliff_probe_cents):
+    """奖励区间下沿往下 cliff_probe_cents 美分内有没有买档支撑;True = 那段是真空(悬崖)。
+
+    带子 [reward_range_min − N·0.01, reward_range_min):下界闭、上界开——恰好落在下沿
+    上的档属于区间内档,不算「下方支撑」。下界按分四舍五入去浮点尘,否则 lo 会算成
+    0.09000000000000001,把恰落在 9¢ 的支撑档误判成带外(悬崖假阳性)。
+    N<=0 = 关闭;空买单簿 = 无从判断,两者都返 False(不否决、不撤单)。
+
+    下单判定(explain_gap_single_order)与在挂单复查(monitor Step 3)共用这一个函数,
+    两处口径不会漂。
+    """
+    if not cliff_probe_cents or cliff_probe_cents <= 0 or not bids:
+        return False
+    lo = reward_range_min - cliff_probe_cents * 0.01
+    return not any(
+        round((float(b["price"]) - lo) * 100.0, 6) >= 0
+        and float(b["price"]) < reward_range_min
+        for b in bids
+    )
+
+
 def explain_gap_single_order(
     bids,
     reward_range_min,
@@ -90,20 +111,12 @@ def explain_gap_single_order(
     if not in_range:
         d["skip_reason"] = "奖励区间内无买档"
         return d
-    if cliff_probe_cents and cliff_probe_cents > 0:
-        lo = reward_range_min - cliff_probe_cents * 0.01
-        # 下界去浮点尘(同 max_gap 的按分四舍五入手法):否则 lo 算成 0.09000000000000001,
-        # 把恰好落在 9¢ 的支撑档误判成不在 [lo, reward_range_min) 内,悬崖假阳性。
-        if not any(
-            round((float(b["price"]) - lo) * 100.0, 6) >= 0
-            and float(b["price"]) < reward_range_min
-            for b in bids
-        ):
-            d["cliff"] = True
-            d["skip_reason"] = (
-                f"奖励区间下方 {cliff_probe_cents:g}¢ 内无买档支撑(悬崖)→ 不挂"
-            )
-            return d
+    if has_cliff_below(bids, reward_range_min, cliff_probe_cents):
+        d["cliff"] = True
+        d["skip_reason"] = (
+            f"奖励区间下方 {cliff_probe_cents:g}¢ 内无买档支撑(悬崖)→ 不挂"
+        )
+        return d
     for lv in in_range:
         av = amount_value(lv["price"], amount_value_table)
         lv["coeff"] = (lv["size"] / (min_size * av)) if (av and av > 0) else 0.0
