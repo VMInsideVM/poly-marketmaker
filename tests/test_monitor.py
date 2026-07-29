@@ -1118,6 +1118,27 @@ class TestCostHelper:
         monitor._cost_lots("tok1", 361, "mkt1")
         assert api.get_trades.call_count == 1  # 同 tick 只取一次
 
+    def test_cost_retries_self_fetch_when_prefetch_failed(self):
+        # 预取表里键在、值是 None = 那一路取数失败。不能直接判成本未知:2026-07-29 实盘
+        # 810 次 ⚠️裸奔跳过里有 789 次(97.4%)紧跟着一次 [离场预取] get_trades 失败,
+        # 一次网络抖动就被直接翻译成整仓无保护。回退自取一次,真取不到才算成本未知。
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._trades_by_cid = {"mkt1": None}
+        api.get_trades.return_value = [self._buy_trade("tok1", 0.28, 361)]
+        cost, lots = monitor._cost_lots("tok1", 361, "mkt1")
+        assert cost == pytest.approx(0.28)
+        assert api.get_trades.call_count == 1
+
+    def test_cost_none_when_prefetch_failed_and_self_fetch_also_fails(self):
+        # 自取也失败 -> 成本仍然未知(跳过 + ⚠️裸奔),绝不拿不确定的成本去卖。
+        monitor, api, db = _make_monitor()
+        monitor.begin_status_tick()
+        monitor._trades_by_cid = {"mkt1": None}
+        api.get_trades.side_effect = Exception("boom")
+        cost, lots = monitor._cost_lots("tok1", 361, "mkt1")
+        assert cost is None
+
     def test_cost_none_when_get_trades_fails(self):
         monitor, api, db = _make_monitor()
         api.get_trades.side_effect = Exception("boom")
@@ -2414,13 +2435,17 @@ class TestExitPrefetch:
         monitor._cost_lots("tokA", 100.0, "cid1")
         assert api.get_trades.call_count == 1
 
-    def test_cost_lots_prefetch_failure_means_cost_unknown(self):
-        # 预取那轮取数失败 -> 与自取失败同样的结果:成本未知,调用方跳过 + ⚠️裸奔
+    def test_cost_lots_prefetch_failure_retries_self_fetch(self):
+        # 预取值 None(没取到)与空列表(确实没成交)必须区别对待:空列表不自取(上一个
+        # 用例),None 自取重试一次。这里原先断言的是「不重试、直接判成本未知」,实盘代价
+        # 是 2026-07-29 那天 810 次 ⚠️裸奔里有 789 次(97.4%)其实只是一次网络抖动。
+        # 自取也失败时仍然成本未知——不确定的成本绝不拿去卖,那条不变量没变。
         monitor, api, db = _make_monitor()
         monitor.begin_status_tick()
         monitor._trades_by_cid["cid1"] = None
+        api.get_trades.side_effect = Exception("boom")
         assert monitor._cost_lots("tokA", 100.0, "cid1") == (None, [])
-        assert api.get_trades.call_count == 0
+        assert api.get_trades.call_count == 1
 
     def test_sell_book_uses_prefetched_orderbook(self):
         monitor, api, db = _make_monitor()

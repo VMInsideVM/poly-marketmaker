@@ -203,8 +203,12 @@ class OrderMonitor:
             return self._cost_cache[asset_id]
         funder = self._funder()
         trades = self._trades_by_cid.get(condition_id, _MISSING)
-        if trades is _MISSING:
-            # 没走预取的调用点(_resolution_dump 等)照旧自取,行为不变。
+        if trades is _MISSING or trades is None:
+            # _MISSING = 没走预取的调用点(_resolution_dump 等),照旧自取。
+            # None = 预取那一路取数失败(已在预取里 WARNING 过)——同样自取重试一次,
+            # 不能直接判成本未知:成本未知 = 整仓跳过 + ⚠️裸奔,等于把一次网络抖动
+            # 翻译成一段无保护窗口(2026-07-29 实盘 810 次裸奔里 789 次紧跟一次预取
+            # 失败)。自取走的是新连接,瞬时抖动多半能过;真取不到才认成本未知。
             try:
                 trades = self.api.get_trades(TradeParams(market=condition_id))
             except Exception as e:
@@ -214,7 +218,6 @@ class OrderMonitor:
                 self._cost_cache[asset_id] = (None, [])
                 return None, []
         if trades is None:
-            # 预取那轮取数失败(已在预取里 WARNING 过),等价于自取失败:成本未知。
             self._cost_cache[asset_id] = (None, [])
             return None, []
         fills = extract_fills(trades, funder, asset_id)
