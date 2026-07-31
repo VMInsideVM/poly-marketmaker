@@ -1103,12 +1103,14 @@ class TestPrefilterForTemplate:
         assert self._ids(scanner, pool, tmpl) == {"NEW"}
 
     def test_any_tag_hit_protects(self):
-        # 多标签市场:命中保护名单里任一个就跳过
+        # 多标签市场:命中保护名单里任一个就跳过(两个 tag 都在做市名单内,
+        # 保护名单与做市名单取交集(I1)不影响这条用例)
         scanner = self._scanner()
         pool = [self._aged("NEW", 5, tags=["politics", "crypto"])]
         tmpl = self._template(
             skip_new_markets=True,
             new_market_hours=24,
+            included_categories=["politics", "crypto"],
             skip_new_categories=["crypto"],
         )
         assert self._ids(scanner, pool, tmpl) == set()
@@ -1130,6 +1132,48 @@ class TestPrefilterForTemplate:
         )
         assert self._ids(scanner, pool, on) == set()
         assert self._ids(scanner, pool, off) == {"NEW"}
+
+    def test_leaked_untraded_tag_does_not_protect(self):
+        # I1:市场同时带 politics(做市中)+ elections(没做市)两个标签——
+        # elections 会遗留在 skip_new_categories 里是常态(配置页「跳过新市场」勾选
+        # 只置灰不清值,见 updateSkipNewCol 注释),与做市名单取交集后 elections 该
+        # 被滤掉,不能靠这个不相关的标签保护这条市场。
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5, tags=["politics", "elections"])]
+        tmpl = self._template(
+            skip_new_markets=True,
+            new_market_hours=24,
+            skip_new_categories=["elections"],
+        )
+        assert self._ids(scanner, pool, tmpl) == {"NEW"}
+
+    def test_untagged_market_excluded_by_whitelist_not_new_check(self):
+        # I1 的 skip_new_other/include_other 取与在这一层其实不可观察:未分类市场想被
+        # 「跳过新市场」保护,前提是模板本来就收「其他」(include_other=True)——否则
+        # market_wanted 在新市场判定之前就已经把它排除了,与 skip_new 无关。这里钉住
+        # 的是这个既有的、不因 I1 改变的行为(真正体现 include_other 取与效果的是
+        # 发现阶段 loosest_new_market_hours 的等价用例,那里 market_wanted 用的是
+        # 跨模板并集,可能与单模板自己的 include_other 不一致)。
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5)]
+        tmpl = self._template(
+            skip_new_markets=True,
+            new_market_hours=24,
+            skip_new_categories=[],
+            skip_new_other=True,
+            include_other=False,
+        )
+        assert self._ids(scanner, pool, tmpl) == set()
+
+    def test_missing_category_keys_treated_as_unprotected(self):
+        # M8:缺 skip_new_categories/skip_new_other 时 fail-open 到「不保护」——
+        # loosest_new_market_hours 已有等价用例,prefilter_for_template 这边补齐。
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5, tags=["politics"])]
+        tmpl = self._template(skip_new_markets=True, new_market_hours=24)
+        del tmpl["skip_new_categories"]
+        del tmpl["skip_new_other"]
+        assert self._ids(scanner, pool, tmpl) == {"NEW"}
 
 
 class TestDiscoveryTierWindowGating:
@@ -1402,12 +1446,18 @@ class TestLoosestNewMarketHours:
     「会排除」现在是两个条件的合取：模板开了开关，且该市场的品类在这个模板的保护名单里。
     """
 
-    def _t(self, on, hrs, cats=None, other=True):
+    def _t(self, on, hrs, cats=None, other=True, included=None, include_other=True):
         return {
             "skip_new_markets": on,
             "new_market_hours": hrs,
             "skip_new_categories": ["politics"] if cats is None else cats,
             "skip_new_other": other,
+            # 保护名单要与做市名单取交集(I1),故这里默认给足所有用例会用到的品类,
+            # 免得默认值本身把保护判定narrow 掉,搅乱既有用例的语义。
+            "included_categories": (
+                ["politics", "crypto"] if included is None else included
+            ),
+            "include_other": include_other,
         }
 
     def test_all_on_takes_min(self):
@@ -1457,6 +1507,23 @@ class TestLoosestNewMarketHours:
         # 缺 skip_new_categories/skip_new_other 时 fail-open 到「不保护」(= 不排除)
         tmpls = [{"skip_new_markets": True, "new_market_hours": 24}]
         assert loosest_new_market_hours(tmpls, ["politics"]) == 0
+
+    def test_protects_only_traded_category(self):
+        # I1:保护名单里的品类模板自己根本没做(不在 included_categories 内)
+        # -> 交集为空,不保护(不能让保护判定随一个不相关的品类漂移)
+        tmpls = [self._t(True, 24, cats=["crypto"], included=["politics"])]
+        assert loosest_new_market_hours(tmpls, ["crypto"]) == 0
+
+    def test_narrowed_protection_still_protects_traded_category(self):
+        # I1:保护名单被交集缩窄,但市场命中的那个品类仍在做市名单内 -> 照样保护
+        tmpls = [self._t(True, 24, cats=["politics", "crypto"], included=["politics"])]
+        assert loosest_new_market_hours(tmpls, ["politics"]) == 24
+
+    def test_untagged_protection_requires_include_other(self):
+        # I1:skip_new_other 与 include_other 取与——模板不收「其他」市场时,
+        # 「跳过新市场」对未分类市场也不该生效
+        tmpls = [self._t(True, 24, other=True, include_other=False)]
+        assert loosest_new_market_hours(tmpls, []) == 0
 
 
 class TestDiscoverySkipNewMarkets:
@@ -1580,3 +1647,17 @@ class TestDiscoverySkipNewMarkets:
             self._cat_tmpl(skip_new_categories=["crypto"], skip_new_other=False),
         ]
         assert self._pool_ids(api, tmpls) == {"NEW"}
+
+    def test_composed_template_defaults_still_protect_tagged_market(self):
+        # M7:钉住「升级零行为变化」这个组合结果——用真实 TEMPLATE_DEFAULTS 的四个品类
+        # 键(而不是手写的测试值)组模板,I1 的交集写法不能让默认配置下的保护失效。
+        from config import TEMPLATE_DEFAULTS
+
+        api = self._api_tagged([self._mkt("NEW", 5), self._mkt("OLD", 100)], "politics")
+        tmpl = self._tmpl(
+            included_categories=TEMPLATE_DEFAULTS["included_categories"],
+            include_other=TEMPLATE_DEFAULTS["include_other"],
+            skip_new_categories=TEMPLATE_DEFAULTS["skip_new_categories"],
+            skip_new_other=TEMPLATE_DEFAULTS["skip_new_other"],
+        )
+        assert self._pool_ids(api, [tmpl]) == {"OLD"}

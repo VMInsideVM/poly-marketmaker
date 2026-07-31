@@ -167,6 +167,10 @@ def loosest_new_market_hours(templates, tags) -> float:
     排除(否则会把没排除它的模板要的市场也一起剔掉);此时取各模板 N 的最小值(最宽松)。
     任一模板没开开关、或没把该市场的品类列进自己的保护名单 -> 0(不排除)。空列表 -> 0。
     缺保护名单的键按「不保护」处理(fail-open,与 created_at 解析不出即保留同方向)。
+    保护名单(skip_new_categories)与「其他」开关(skip_new_other)先分别与该模板自己的
+    做市名单(included_categories/include_other)取交集/取与:发现阶段的 tag_pool 只按
+    included_categories 打标签,不勾「其他」时 tags 可能残缺,不取交集的话保护判定会随
+    include_other 翻面——同一份保护意图因为一个不相关的开关得出相反结果。
     """
     hours = []
     for t in templates:
@@ -174,8 +178,9 @@ def loosest_new_market_hours(templates, tags) -> float:
             return 0.0
         if not market_in_categories(
             tags,
-            t.get("skip_new_categories") or [],
-            bool(t.get("skip_new_other")),
+            set(t.get("skip_new_categories") or [])
+            & set(t.get("included_categories") or []),
+            bool(t.get("skip_new_other")) and bool(t.get("include_other")),
         ):
             return 0.0
         hours.append(_new_market_hours(t))
@@ -201,6 +206,8 @@ class MarketScanner:
         union = included_union(templates)
         inc_other = any_include_other(templates)
         # 只查用得上的品类:收「其他」时判其他绕不开、必须查全 14;否则只需 included 并集。
+        # 注意:只按 included_categories 打标签,故 tags 可能残缺;新市场保护判定因此与
+        # 做市名单取交集(见 loosest_new_market_hours),改这行前先确认那边仍成立。
         slugs_needed = set(CATALOG_SLUGS) if inc_other else (union & set(CATALOG_SLUGS))
         floors = [t.get("min_reward_usd", 0) for t in templates]
         min_floor = min(floors) if floors else 0
@@ -529,8 +536,11 @@ class MarketScanner:
         tier_sizes = enabled_sizes(template.get("size_tiers") or [])
         skip_new = bool(template.get("skip_new_markets"))
         new_hours = _new_market_hours(template)
-        skip_cats = set(template.get("skip_new_categories", []) or [])
-        skip_other = bool(template.get("skip_new_other", False))
+        # 保护名单与做市名单取交集，因为发现阶段的 tag_pool 只按 included_categories 打
+        # 标签（不勾「其他」时 tags 是残缺的），不取交集的话保护判定会随 include_other 翻
+        # 面；这也正是配置页「做市」未勾时把「跳过新市场」置灰的含义。
+        skip_cats = set(template.get("skip_new_categories", []) or []) & included
+        skip_other = bool(template.get("skip_new_other", False)) and include_other
         now = time.time()
 
         survivors = []
