@@ -31,7 +31,7 @@
     </details>
     <table class="data-table" id="wallet-config-table">
         <thead>
-            <tr><th>地址</th><th>存款地址</th><th>代理</th><th>备注</th><th>模板</th><th>状态</th><th>操作</th></tr>
+            <tr><th>地址</th><th>余额</th><th>存款地址</th><th>代理</th><th>备注</th><th>模板</th><th>状态</th><th>操作</th></tr>
         </thead>
         <tbody id="wallet-config-body"></tbody>
     </table>
@@ -655,6 +655,7 @@ function loadWallets() {
             return `
             <tr>
                 <td title="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</td>
+                <td>${w.balance != null ? '$' + w.balance.toFixed(2) : '-'}</td>
                 <td title="${w.funder || ''}">${w.funder ? w.funder.slice(0,6)+'...'+w.funder.slice(-4) : '-'}</td>
                 <td title="${w.proxy || ''}">${proxyLabel(w.proxy)}</td>
                 <td title="${escapeHtml(w.address)}">${escapeHtml(w.remark || '')}</td>
