@@ -182,7 +182,8 @@ pytest tests/test_strategy.py     # 单个文件
 | `max_spread_cents` | 3.0 | 最大买卖价差（美分） |
 | `min_price_cents` / `max_price_cents` | 10.0 / 50.0 | 单价区间（美分，含端点） |
 | `min_settlement_days` / `max_settlement_days` | 4 / 不限 | 结算窗口（整天；上限留空 = 只卡下限） |
-| `skip_new_markets` / `new_market_hours` | `false` / 24.0 | 跳过最近 N 小时内创建的新市场（默认关；0 小时 = 不筛）。所有模板都开启时判定前移到市场发现阶段，实际生效可能比 N 晚一个「市场发现间隔」；只要有模板未开启，各模板按下单轮精确卡在 N |
+| `skip_new_markets` / `new_market_hours` | `false` / 24.0 | 跳过最近 N 小时内创建的新市场（默认关；0 小时 = 不筛）。只对下面勾中的品类生效 |
+| `skip_new_categories` / `skip_new_other` | 全部品类 / `true` | 新市场保护对哪些做市品类生效（tag slug）；`skip_new_other` 管「其他/未分类」。默认全部，等同升级前的一刀切行为 |
 | `included_categories` | 除 sports/esports/weather 外全部 | 做市品类白名单（勾中的才做，tag slug） |
 | `include_other` | `true` | 是否做市「其他/未分类」（不属于任何 curated 品类的市场） |
 | `size_tiers` | （空） | **档位模块**：按市场最低奖励份额**精确匹配**。每档配 启用 / 挂单份数（≥档位值）/ 规则 1-3 选档门槛 / 高位系数和门槛 / 金额数值表。**没有任何已启用模块对得上的市场不挂单** |
