@@ -71,7 +71,7 @@ by default), so the effective protection window is N to N + one discovery interv
 some template does not protect it, the market stays in the pool and each template's
 `prefilter_for_template` cuts at exactly N on the 30-second placement round. Narrowing the
 protected categories therefore lets more new markets back into the pool, which costs one
-precise-reward fetch each per discovery round. Turning the switch on drops now-excluded
+precise-reward fetch for each that also passes the tier/window gate. Turning the switch on drops now-excluded
 markets out of the pool, so the usual dropout pass cancels their resting buys — except in a
 market the wallet is still cooling down on, which the dropout pass skips.
 - `engine/strategy.py` (`determine_order_price`) is pure, fully unit-tested, and the core IP. It picks a buy price from orderbook bid depth using three different rules depending on tick size and `rewards_max_spread`. Change behavior here only with corresponding test updates.

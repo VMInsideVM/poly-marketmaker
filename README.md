@@ -182,7 +182,7 @@ pytest tests/test_strategy.py     # 单个文件
 | `max_spread_cents` | 3.0 | 最大买卖价差（美分） |
 | `min_price_cents` / `max_price_cents` | 10.0 / 50.0 | 单价区间（美分，含端点） |
 | `min_settlement_days` / `max_settlement_days` | 4 / 不限 | 结算窗口（整天；上限留空 = 只卡下限） |
-| `skip_new_markets` / `new_market_hours` | `false` / 24.0 | 跳过最近 N 小时内创建的新市场（默认关；0 小时 = 不筛）。只对下面勾中的品类生效 |
+| `skip_new_markets` / `new_market_hours` | `false` / 24.0 | 跳过最近 N 小时内创建的新市场（默认关；0 小时 = 不筛）。只对下面勾中的品类生效，实际生效可能比 N 晚最多一个「市场发现间隔」 |
 | `skip_new_categories` / `skip_new_other` | 全部品类 / `true` | 新市场保护对哪些做市品类生效（tag slug）；`skip_new_other` 管「其他/未分类」。默认全部，等同升级前的一刀切行为 |
 | `included_categories` | 除 sports/esports/weather 外全部 | 做市品类白名单（勾中的才做，tag slug） |
 | `include_other` | `true` | 是否做市「其他/未分类」（不属于任何 curated 品类的市场） |
