@@ -529,11 +529,14 @@ class MarketScanner:
         tier_sizes = enabled_sizes(template.get("size_tiers") or [])
         skip_new = bool(template.get("skip_new_markets"))
         new_hours = _new_market_hours(template)
+        skip_cats = set(template.get("skip_new_categories", []) or [])
+        skip_other = bool(template.get("skip_new_other", False))
         now = time.time()
 
         survivors = []
         for market in candidate_pool:
-            if not market_wanted(market.get("tags", []), included, include_other):
+            tags = market.get("tags", [])
+            if not market_wanted(tags, included, include_other):
                 continue
             total_rate = _batch_rate(market)
             market_reward = market.get("market_reward", total_rate)
@@ -543,8 +546,13 @@ class MarketScanner:
             # 结算窗口 [min_days, max_days](整天)。无法解析结算日 -> 保留(fail-open)。
             if end_ts and not _in_settlement_window(end_ts, min_days, max_days):
                 continue
-            if skip_new and new_hours:
-                # 创建不足 new_hours 小时的市场不做;created_at 取不到 -> fail-open 保留。
+            if (
+                skip_new
+                and new_hours
+                and market_in_categories(tags, skip_cats, skip_other)
+            ):
+                # 该品类开了保护:创建不足 new_hours 小时的市场不做;
+                # created_at 取不到 -> fail-open 保留。
                 age = market_age_hours(market.get("created_at", ""), now)
                 if age is not None and age < new_hours:
                     continue

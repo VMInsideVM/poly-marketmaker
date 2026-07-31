@@ -995,6 +995,8 @@ class TestPrefilterForTemplate:
             "included_categories": ["politics"],
             "include_other": True,
             "size_tiers": [_tier(100)],
+            "skip_new_categories": ["politics"],
+            "skip_new_other": True,
         }
         t.update(over)
         return t
@@ -1079,6 +1081,55 @@ class TestPrefilterForTemplate:
         loose = self._template(skip_new_markets=True, new_market_hours=24)
         assert self._ids(scanner, pool, strict) == set()
         assert self._ids(scanner, pool, loose) == {"M48"}
+
+    def test_drops_new_market_in_protected_category(self):
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5, tags=["politics"])]
+        tmpl = self._template(
+            skip_new_markets=True,
+            new_market_hours=24,
+            skip_new_categories=["politics"],
+        )
+        assert self._ids(scanner, pool, tmpl) == set()
+
+    def test_keeps_new_market_in_unprotected_category(self):
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5, tags=["politics"])]
+        tmpl = self._template(
+            skip_new_markets=True,
+            new_market_hours=24,
+            skip_new_categories=["crypto"],
+        )
+        assert self._ids(scanner, pool, tmpl) == {"NEW"}
+
+    def test_any_tag_hit_protects(self):
+        # 多标签市场:命中保护名单里任一个就跳过
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5, tags=["politics", "crypto"])]
+        tmpl = self._template(
+            skip_new_markets=True,
+            new_market_hours=24,
+            skip_new_categories=["crypto"],
+        )
+        assert self._ids(scanner, pool, tmpl) == set()
+
+    def test_untagged_new_market_follows_skip_new_other(self):
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5)]
+        on = self._template(
+            skip_new_markets=True,
+            new_market_hours=24,
+            skip_new_categories=[],
+            skip_new_other=True,
+        )
+        off = self._template(
+            skip_new_markets=True,
+            new_market_hours=24,
+            skip_new_categories=[],
+            skip_new_other=False,
+        )
+        assert self._ids(scanner, pool, on) == set()
+        assert self._ids(scanner, pool, off) == {"NEW"}
 
 
 class TestDiscoveryTierWindowGating:
