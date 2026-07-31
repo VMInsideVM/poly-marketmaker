@@ -26,6 +26,7 @@ from engine.categories import (
     included_union,
     any_include_other,
     tag_pool,
+    market_in_categories,
     market_wanted,
     count_by_category,
 )
@@ -159,16 +160,23 @@ def market_age_hours(created_at: str, now: float):
     return (now - ts) / 3600.0
 
 
-def loosest_new_market_hours(templates) -> float:
-    """发现阶段可安全排除的「新市场」门槛（小时）。
+def loosest_new_market_hours(templates, tags) -> float:
+    """发现阶段可安全排除该市场的门槛(小时);tags 是该市场命中的 curated 品类。
 
-    发现阶段是钱包无关的共享阶段，只有**每个**模板都开了 skip_new_markets 才能在这里
-    排除（否则会把没开该开关的模板要的市场也一起剔掉）；此时取各模板 N 的最小值（最
-    宽松）。任一模板没开 -> 0（不排除任何市场）；空列表 -> 0。
+    发现阶段是钱包无关的共享阶段,只有**每个**模板都会因「太新」排除这个市场才能在这里
+    排除(否则会把没排除它的模板要的市场也一起剔掉);此时取各模板 N 的最小值(最宽松)。
+    任一模板没开开关、或没把该市场的品类列进自己的保护名单 -> 0(不排除)。空列表 -> 0。
+    缺保护名单的键按「不保护」处理(fail-open,与 created_at 解析不出即保留同方向)。
     """
     hours = []
     for t in templates:
         if not t.get("skip_new_markets"):
+            return 0.0
+        if not market_in_categories(
+            tags,
+            t.get("skip_new_categories") or [],
+            bool(t.get("skip_new_other")),
+        ):
             return 0.0
         hours.append(_new_market_hours(t))
     return min(hours) if hours else 0.0
@@ -243,9 +251,9 @@ class MarketScanner:
         pool = tag_pool(list(by_cid.values()), category_ids, slugs_needed)
         blacklist = self.db.get_blacklist_ids()
 
-        # 「新市场」门槛:发现阶段只能用最宽松值(全模板都开才生效),各模板自己的 N 由
-        # prefilter_for_template 精筛。created_at 由奖励端点白拿,判定不发网络请求。
-        min_age_hours = loosest_new_market_hours(templates)
+        # 「新市场」门槛:发现阶段只能排除「每个模板都会因太新排除」的市场,门槛按市场的
+        # 品类逐条算(见 loosest_new_market_hours);各模板自己的 N 由 prefilter_for_template
+        # 精筛。created_at 由奖励端点白拿,判定不发网络请求。
         now = time.time()
 
         # 并集档位 sizes + 各模板结算窗口:精确奖励拉取(每市场一次网络、~0.78s)是发现
@@ -287,6 +295,7 @@ class MarketScanner:
                 continue  # 没被任何模板 include(且非其他)
             if _batch_rate(market) < min_floor:
                 continue  # 比最宽松模板还低,任何模板都不会要
+            min_age_hours = loosest_new_market_hours(templates, market.get("tags", []))
             if min_age_hours:
                 age = market_age_hours(market.get("created_at", ""), now)
                 if age is not None and age < min_age_hours:
