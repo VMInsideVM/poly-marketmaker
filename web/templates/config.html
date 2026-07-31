@@ -172,7 +172,7 @@
                 <tbody id="included-categories"></tbody>
             </table>
         </div>
-        <p class="hint" style="color:#888;font-size:12px">「做市」勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。「跳过新市场」只在上面的总开关打开时生效：勾中的品类里，创建时间不足保护期的市场不做；没勾的品类照常做新市场。计数是当前该品类的市场数，每次「扫描市场」后自动更新，也可点上方「刷新计数」手动拉取；没有计数不影响勾选。</p>
+        <p class="hint" style="color:#888;font-size:12px">「做市」勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。「跳过新市场」只在上面的总开关打开时生效：勾中的品类里，创建时间不足保护期的市场不做（实际生效可能比保护期晚最多一个「市场发现间隔」，默认 4 小时）；没勾的品类照常做新市场。计数是当前该品类的市场数，每次「扫描市场」后自动更新，也可点上方「刷新计数」手动拉取；没有计数不影响勾选。</p>
 
         <h3>档位模块（按市场最低奖励份额精确匹配）</h3>
         <div id="size-tiers"></div>
@@ -546,6 +546,13 @@ function deleteTemplate() {
 
 document.getElementById('strategy-form').addEventListener('submit', function(e) {
     e.preventDefault();
+    // 品类表格还在「加载中…/刷新中…」占位状态时保存会把四组品类勾选清空成
+    // included_categories=[]+include_other=false,导致下次引擎启动这个钱包
+    // 什么都不挂——先拦住,等表格真正渲染出品类行再放行。
+    if (document.querySelectorAll('#included-categories input.cat-make').length === 0) {
+        alert('品类列表尚未加载完，请稍候再保存');
+        return;
+    }
     const data = {};
     this.querySelectorAll('input[type=number][name]').forEach(inp => {
         data[inp.name] = parseFloat(inp.value);
