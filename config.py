@@ -29,6 +29,11 @@ DEFAULT_INCLUDED_CATEGORIES = [
     c["slug"] for c in CATEGORY_CATALOG if c["slug"] not in _DEFAULT_EXCLUDED
 ]
 
+# 新市场保护的默认名单:全部 curated 品类。默认全保护 = 升级后与「整模板一刀切」时期
+# 逐字同行为。取自 CATEGORY_CATALOG 而非 frozenset CATALOG_SLUGS:要存进 DB、要进
+# _active_templates 去重键,顺序必须确定。
+ALL_CATEGORY_SLUGS = [c["slug"] for c in CATEGORY_CATALOG]
+
 # 引擎级参数:全局单值,所有钱包共用,存 settings 表。
 ENGINE_DEFAULTS = {
     "scan_interval_sec": 30,
@@ -67,6 +72,10 @@ TEMPLATE_DEFAULTS = {
     # new_market_hours=0 视同不筛。判定在 scanner 的发现阶段与 prefilter 各做一次。
     "skip_new_markets": False,
     "new_market_hours": 24.0,
+    # 新市场保护只对勾选的品类生效(默认全部,升级零行为变化)。判定口径=任一 tag 命中;
+    # skip_new_other 管「其他/未分类」,与 include_other 同形。
+    "skip_new_categories": ALL_CATEGORY_SLUGS,
+    "skip_new_other": True,
     "theta_loss_cents": 2,
     # 强平止损阈值:可按比例(占成本%)或按固定金额(美分)。默认按比例 20%。
     "stop_loss_mode": "percent",  # "percent" | "fixed"

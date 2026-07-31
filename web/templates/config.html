@@ -31,7 +31,7 @@
     </details>
     <table class="data-table" id="wallet-config-table">
         <thead>
-            <tr><th>地址</th><th>存款地址</th><th>代理</th><th>备注</th><th>模板</th><th>状态</th><th>操作</th></tr>
+            <tr><th>地址</th><th>余额</th><th>存款地址</th><th>代理</th><th>备注</th><th>模板</th><th>状态</th><th>操作</th></tr>
         </thead>
         <tbody id="wallet-config-body"></tbody>
     </table>
@@ -78,15 +78,6 @@
                 <label>最长结算天数（留空=不限）</label>
                 <input type="number" name="max_settlement_days" step="1">
                 <span class="hint">与上项合成结算窗口：只做今天填 0/0，今天+明天填 0/1，只做明天填 1/1，两天以后填 2/空</span>
-            </div>
-            <div class="form-group">
-                <label><input type="checkbox" id="skip-new-markets"> 跳过新建市场</label>
-                <span class="hint">勾选后，创建时间不足下方小时数的市场不做市</span>
-            </div>
-            <div class="form-group">
-                <label>新市场保护期（小时）</label>
-                <input type="number" name="new_market_hours" step="1" min="0">
-                <span class="hint">市场创建满这么多小时之后才做；0=不筛。所有模板都开启本开关时，实际生效可能晚一个「市场发现间隔」</span>
             </div>
             <div class="form-group">
                 <label>止损方式</label>
@@ -167,9 +158,21 @@
             <a href="#" onclick="refreshCategories(event)" style="font-size:13px;font-weight:normal">刷新计数</a>
             <span id="cat-updated" class="hint" style="color:#888;font-size:12px;font-weight:normal"></span>
         </h3>
-        <div id="included-categories" class="form-inline"></div>
-        <label class="cat-other"><input type="checkbox" id="include-other"> 其他/未分类<span id="other-count"></span></label>
-        <p class="hint" style="color:#888;font-size:12px">括号内是当前该品类的市场数：每次「扫描市场」后自动更新，也可点上方「刷新计数」手动拉取；没有计数不影响勾选。勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。</p>
+        <div class="form-inline" style="align-items:center;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:6px;white-space:nowrap">
+                <input type="checkbox" id="skip-new-markets" onchange="updateSkipNewCol()" style="flex:none;width:auto"> 跳过新建市场
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;white-space:nowrap">
+                保护期 <input type="number" name="new_market_hours" step="1" min="0" style="flex:none;width:80px"> 小时
+            </label>
+        </div>
+        <div class="table-scroll">
+            <table class="data-table">
+                <thead><tr><th>品类</th><th>计数</th><th>做市</th><th>跳过新市场</th></tr></thead>
+                <tbody id="included-categories"></tbody>
+            </table>
+        </div>
+        <p class="hint" style="color:#888;font-size:12px">「做市」勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。「跳过新市场」只在上面的总开关打开时生效：勾中的品类里，创建时间不足保护期的市场不做（实际生效可能比保护期晚最多一个「市场发现间隔」，默认 4 小时）；没勾的品类照常做新市场。计数是当前该品类的市场数，每次「扫描市场」后自动更新，也可点上方「刷新计数」手动拉取；没有计数不影响勾选。</p>
 
         <h3>档位模块（按市场最低奖励份额精确匹配）</h3>
         <div id="size-tiers"></div>
@@ -253,40 +256,83 @@ function loadTemplates() {
     });
 }
 
-function renderCategories(catalog, selected, includeOther) {
+function makeCatRow(slug, label, count, make, skip, isOther) {
+    const tr = document.createElement('tr');
+    const nameTd = document.createElement('td');
+    nameTd.textContent = label;
+    const cntTd = document.createElement('td');
+    cntTd.textContent = (count == null) ? '—' : count;
+    const makeTd = document.createElement('td');
+    const makeCb = document.createElement('input');
+    makeCb.type = 'checkbox';
+    makeCb.checked = !!make;
+    makeCb.onchange = updateSkipNewCol;
+    if (isOther) { makeCb.id = 'include-other'; }
+    else { makeCb.className = 'cat-make'; makeCb.value = slug; }
+    makeTd.appendChild(makeCb);
+    const skipTd = document.createElement('td');
+    const skipCb = document.createElement('input');
+    skipCb.type = 'checkbox';
+    skipCb.checked = !!skip;
+    if (isOther) { skipCb.id = 'skip-new-other'; }
+    else { skipCb.className = 'cat-skip'; skipCb.value = slug; }
+    skipTd.appendChild(skipCb);
+    tr.append(nameTd, cntTd, makeTd, skipTd);
+    return tr;
+}
+
+function renderCategories(catalog, selected, includeOther, skipSelected, skipOther) {
     const box = document.getElementById('included-categories');
     box.innerHTML = '';
     const sel = new Set(selected || []);
+    const skipSel = new Set(skipSelected || []);
     const cats = catalog.categories || [];
     const known = new Set(cats.map(c => c.slug));
     // 全部品类都显示(不再按计数隐藏,0 个市场的也在);计数只作点缀
     const shown = cats.slice();
-    // 已选但目录里没有的(极少)补上
-    (selected || []).forEach(s => { if (!known.has(s)) shown.push({slug: s, label: s, count: 0}); });
-    shown.forEach(c => {
-        const cnt = catalog.ready ? ' (' + (c.count || 0) + ')' : '';
-        const lab = document.createElement('label');
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.value = c.slug;
-        cb.checked = sel.has(c.slug);
-        lab.appendChild(cb);
-        lab.appendChild(document.createTextNode(' ' + c.label + cnt));
-        box.appendChild(lab);
+    // 已选但目录里没有的(极少)补上:做市名单与保护名单都要补,否则勾选会在下次保存时丢失
+    (selected || []).concat(skipSelected || []).forEach(s => {
+        if (!known.has(s) && !shown.some(c => c.slug === s)) {
+            shown.push({slug: s, label: s, count: 0});
+        }
     });
-    if (box.children.length === 0) {
-        box.innerHTML = '<span class="hint" style="color:#888">'
-            + (catalog.ready ? '当前无匹配品类' : '启用一个钱包后显示各品类数量')
-            + '</span>';
-    }
-    const other = document.getElementById('include-other');
-    if (other) other.checked = !!includeOther;
-    const oc = document.getElementById('other-count');
-    if (oc) oc.textContent = catalog.ready ? ' (' + (catalog.other_count || 0) + ')' : '';
+    shown.forEach(c => box.appendChild(makeCatRow(
+        c.slug, c.label, catalog.ready ? (c.count || 0) : null,
+        sel.has(c.slug), skipSel.has(c.slug), false
+    )));
+    // 「其他/未分类」固定作最后一行
+    box.appendChild(makeCatRow(
+        '', '其他/未分类', catalog.ready ? (catalog.other_count || 0) : null,
+        !!includeOther, !!skipOther, true
+    ));
     const upd = document.getElementById('cat-updated');
     if (upd) upd.textContent = catalog.updated_at
         ? '· 计数更新于 ' + relTimeCat(catalog.updated_at)
         : (catalog.ready ? '' : '· 计数待扫描或刷新');
+    updateSkipNewCol();
+}
+
+// 「跳过新市场」列的置灰:总开关关着、或该品类根本不做市时,这个勾选没有意义。
+// 只置灰不清值——disabled 的 checkbox 依然会被 :checked 选中并保存,取消再勾回来不丢配置。
+function updateSkipNewCol() {
+    const on = !!(document.getElementById('skip-new-markets') || {}).checked;
+    document.querySelectorAll('#included-categories tr').forEach(tr => {
+        const make = tr.querySelector('input.cat-make, #include-other');
+        const skip = tr.querySelector('input.cat-skip, #skip-new-other');
+        if (!make || !skip) return;
+        skip.disabled = !on || !make.checked;
+    });
+}
+
+// 四组勾选一处读齐:刷新计数与保存两条路径共用,不会漏读某一组。
+function collectCategorySelections() {
+    const q = s => Array.from(document.querySelectorAll(s)).map(cb => cb.value);
+    return {
+        included: q('#included-categories input.cat-make:checked'),
+        other: !!(document.getElementById('include-other') || {}).checked,
+        skip: q('#included-categories input.cat-skip:checked'),
+        skipOther: !!(document.getElementById('skip-new-other') || {}).checked,
+    };
 }
 
 function relTimeCat(sec) {
@@ -297,23 +343,21 @@ function relTimeCat(sec) {
     return Math.floor(d / 86400) + ' 天前';
 }
 
-// 手动刷新:只更新计数,不动用户当前勾选。联网重算期间显示「刷新中…」。
+// 手动刷新:只更新计数,不动用户当前勾选(四组都保住)。联网重算期间显示「刷新中…」。
 function refreshCategories(ev) {
     if (ev) ev.preventDefault();
-    const sel = Array.from(
-        document.querySelectorAll('#included-categories input[type=checkbox]:checked')
-    ).map(cb => cb.value);
-    const inclOther = document.getElementById('include-other').checked;
+    const cur = collectCategorySelections();
+    const empty = {ready: false, categories: [], other_count: 0};
     document.getElementById('included-categories').innerHTML =
-        '<span class="hint" style="color:#888">刷新中…</span>';
-    fetch('/api/categories?refresh=1').then(r => r.json())
-        .then(catalog => renderCategories(catalog, sel, inclOther))
-        .catch(() => renderCategories({ready: false, categories: [], other_count: 0}, sel, inclOther));
+        '<tr><td colspan="4" class="hint" style="color:#888">刷新中…</td></tr>';
+    const draw = catalog => renderCategories(
+        catalog, cur.included, cur.other, cur.skip, cur.skipOther);
+    fetch('/api/categories?refresh=1').then(r => r.json()).then(draw).catch(() => draw(empty));
 }
 
 function loadStrategy(tid) {
     document.getElementById('included-categories').innerHTML =
-        '<span class="hint" style="color:#888">加载中…</span>';
+        '<tr><td colspan="4" class="hint" style="color:#888">加载中…</td></tr>';
 
     const tmplP = fetch(`/api/templates/${tid}`).then(r => r.json());
     const catP = fetch('/api/categories').then(r => r.json())
@@ -330,12 +374,19 @@ function loadStrategy(tid) {
         // checkbox 不能靠上面的 input.value 回填（那只会设 value 属性，不动 checked）
         const skipNew = document.getElementById('skip-new-markets');
         if (skipNew) skipNew.checked = !!data.skip_new_markets;
+        updateSkipNewCol();
         updateStopMode();
     });
 
     // 品类勾选要「模板(哪些已选)+ 目录(列表/计数)」都到齐再渲染,期间显示加载中
     Promise.all([tmplP, catP]).then(([data, catalog]) => {
-        renderCategories(catalog, data.included_categories || [], data.include_other);
+        renderCategories(
+            catalog,
+            data.included_categories || [],
+            data.include_other,
+            data.skip_new_categories || [],
+            data.skip_new_other
+        );
     });
 }
 
@@ -495,6 +546,13 @@ function deleteTemplate() {
 
 document.getElementById('strategy-form').addEventListener('submit', function(e) {
     e.preventDefault();
+    // 品类表格还在「加载中…/刷新中…」占位状态时保存会把四组品类勾选清空成
+    // included_categories=[]+include_other=false,导致下次引擎启动这个钱包
+    // 什么都不挂——先拦住,等表格真正渲染出品类行再放行。
+    if (document.querySelectorAll('#included-categories input.cat-make').length === 0) {
+        alert('品类列表尚未加载完，请稍候再保存');
+        return;
+    }
     const data = {};
     this.querySelectorAll('input[type=number][name]').forEach(inp => {
         data[inp.name] = parseFloat(inp.value);
@@ -516,10 +574,11 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     const st = serializeTiers();
     if (st.error) { alert(st.error); return; }
     data.size_tiers = st.tiers;
-    data.included_categories = Array.from(
-        document.querySelectorAll('#included-categories input[type=checkbox]:checked')
-    ).map(cb => cb.value);
-    data.include_other = !!document.getElementById('include-other').checked;
+    const cats = collectCategorySelections();
+    data.included_categories = cats.included;
+    data.include_other = cats.other;
+    data.skip_new_categories = cats.skip;
+    data.skip_new_other = cats.skipOther;
     fetch(`/api/templates/${currentTemplateId}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data),
@@ -603,6 +662,7 @@ function loadWallets() {
             return `
             <tr>
                 <td title="${w.address}">${w.address.slice(0,6)}...${w.address.slice(-4)}</td>
+                <td>${w.balance != null ? '$' + w.balance.toFixed(2) : '-'}</td>
                 <td title="${w.funder || ''}">${w.funder ? w.funder.slice(0,6)+'...'+w.funder.slice(-4) : '-'}</td>
                 <td title="${w.proxy || ''}">${proxyLabel(w.proxy)}</td>
                 <td title="${escapeHtml(w.address)}">${escapeHtml(w.remark || '')}</td>

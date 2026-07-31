@@ -3,7 +3,8 @@
 采集器对整份 curated 名单给市场打标签(tag_pool),再按白名单判定(market_wanted):
 - included_union: 所有模板 included_categories 的并集(发现阶段预筛用的"想要"集)。
 - any_include_other: 是否有模板收「其他/未分类」(决定预筛是否保留无 curated 标签者)。
-- market_wanted: 命中 included,或(空 tags 且 include_other)。空 tags 恒指"无 curated
+- market_in_categories: 市场是否落在某个品类集合内(命中任一 slug,或空 tags 且收未分类)。
+  做市白名单 market_wanted 与新市场保护名单共用它。空 tags 恒指"无 curated
   标签"——故打标签必须覆盖整份 catalog,否则未勾选品类会被误判成「其他」。
 """
 
@@ -38,11 +39,23 @@ def tag_pool(full_markets: list[dict], category_ids: dict, catalog_slugs) -> lis
     return pool
 
 
-def market_wanted(tags, included, include_other: bool) -> bool:
+def market_in_categories(tags, slugs, include_untagged: bool) -> bool:
+    """市场是否落在给定品类集合内。
+
+    命中任一 slug -> True;空 tags(= 无 curated 标签,即「其他/未分类」)且
+    include_untagged -> True;其余 False。
+
+    做市白名单(market_wanted)与新市场保护名单共用这一份口径,两处判定不会漂
+    (同 has_cliff_below 被下单与 Step3 共用)。
+    """
     tags = tags or []
-    if set(included) & set(tags):
+    if set(slugs) & set(tags):
         return True
-    return bool(include_other) and not tags
+    return bool(include_untagged) and not tags
+
+
+def market_wanted(tags, included, include_other: bool) -> bool:
+    return market_in_categories(tags, included, include_other)
 
 
 def count_by_category(full_ids, category_ids: dict, catalog_slugs):
