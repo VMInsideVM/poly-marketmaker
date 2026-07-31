@@ -869,3 +869,20 @@ def test_skip_new_markets_defaults():
 
     assert TEMPLATE_DEFAULTS["skip_new_markets"] is False
     assert TEMPLATE_DEFAULTS["new_market_hours"] == 24.0
+
+
+def test_skip_new_categories_defaults():
+    """新市场保护默认覆盖全部 curated 品类 + 「其他」——升级后行为与一刀切时期一致。"""
+    from config import TEMPLATE_DEFAULTS, CATALOG_SLUGS
+
+    assert set(TEMPLATE_DEFAULTS["skip_new_categories"]) == set(CATALOG_SLUGS)
+    assert TEMPLATE_DEFAULTS["skip_new_other"] is True
+
+
+def test_skip_new_categories_default_is_ordered_list():
+    """默认值必须是有确定顺序的 list(不是 frozenset):要存进 DB、要进去重键。"""
+    from config import TEMPLATE_DEFAULTS, CATEGORY_CATALOG
+
+    assert TEMPLATE_DEFAULTS["skip_new_categories"] == [
+        c["slug"] for c in CATEGORY_CATALOG
+    ]

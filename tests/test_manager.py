@@ -864,6 +864,26 @@ class TestActiveTemplatesDedupKey:
 
         assert len(self._mgr_with(tmpl_for)._active_templates()) == 1
 
+    def test_skip_new_categories_variants_not_deduped(self):
+        def tmpl_for(addr):
+            return self._base(
+                skip_new_markets=True,
+                new_market_hours=24,
+                skip_new_categories=["politics"] if addr == "0xA" else ["crypto"],
+            )
+
+        assert len(self._mgr_with(tmpl_for)._active_templates()) == 2
+
+    def test_skip_new_other_variants_not_deduped(self):
+        def tmpl_for(addr):
+            return self._base(
+                skip_new_markets=True,
+                new_market_hours=24,
+                skip_new_other=(addr == "0xA"),
+            )
+
+        assert len(self._mgr_with(tmpl_for)._active_templates()) == 2
+
 
 class TestUpdateMarketReward:
     """实时奖励写回候选池:内存池条目就地改写 + DB 同步,失败不外抛。"""

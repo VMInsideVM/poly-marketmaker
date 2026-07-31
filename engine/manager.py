@@ -1039,9 +1039,9 @@ class EngineManager:
                 continue
             tmpl = self.db.get_template_for(w["address"])
             # 去重键须含采集器实际用到的每个维度:品类包含集 + 是否含其他 + 奖励下限
-            # (决定预筛 min_floor) + 结算窗口 + 档位 sizes + 新市场开关/小时数(后三者
-            # 决定发现阶段的并集门控:窗口/档位/新市场门槛不同的模板不能被去重成一个,
-            # 否则另一个的门槛没进并集就会误剔)。
+            # (决定预筛 min_floor) + 结算窗口 + 档位 sizes + 新市场开关/小时数/保护品类
+            # (后四者决定发现阶段的并集门控:窗口/档位/新市场门槛不同的模板不能被去重
+            # 成一个,否则另一个的门槛没进并集就会误剔)。
             key = (
                 tuple(sorted(tmpl.get("included_categories", []) or [])),
                 bool(tmpl.get("include_other", False)),
@@ -1051,6 +1051,8 @@ class EngineManager:
                 tuple(sorted(enabled_sizes(tmpl.get("size_tiers") or []))),
                 bool(tmpl.get("skip_new_markets", False)),
                 tmpl.get("new_market_hours"),
+                tuple(sorted(tmpl.get("skip_new_categories", []) or [])),
+                bool(tmpl.get("skip_new_other", False)),
             )
             seen[key] = tmpl
         if seen:
