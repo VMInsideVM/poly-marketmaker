@@ -93,3 +93,37 @@ def test_validate_rejects_infinity_size():
         [{"size": float("inf"), "enabled": True, "shares": float("inf")}]
     )
     assert tiers is None and "整数" in err
+
+
+def test_validate_accepts_rule2_rule3_high_coeff_gates():
+    # 规则2/3 的高位系数和门槛与规则1 的 gap_high_coeff_sum_min 同级,逐档配置。
+    out, err = validate_size_tiers(
+        [
+            {
+                "size": 20,
+                "shares": 20,
+                "gap_high_coeff_sum_min": 20,
+                "rule2_high_coeff_sum_min": 8,
+                "rule3_high_coeff_sum_min": 3,
+            }
+        ]
+    )
+    assert err is None
+    assert out[0]["rule2_high_coeff_sum_min"] == 8.0
+    assert out[0]["rule3_high_coeff_sum_min"] == 3.0
+
+
+def test_validate_rule2_rule3_gates_default_zero():
+    # 缺省 = 0 = 不拦,老配置升级后行为不变。
+    out, err = validate_size_tiers([{"size": 20, "shares": 20}])
+    assert err is None
+    assert out[0]["rule2_high_coeff_sum_min"] == 0.0
+    assert out[0]["rule3_high_coeff_sum_min"] == 0.0
+
+
+def test_validate_rejects_negative_rule2_gate():
+    out, err = validate_size_tiers(
+        [{"size": 20, "shares": 20, "rule2_high_coeff_sum_min": -1}]
+    )
+    assert out is None
+    assert "rule2_high_coeff_sum_min" in err

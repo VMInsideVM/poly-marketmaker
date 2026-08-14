@@ -102,6 +102,8 @@ def _tier_payload(**over):
         "rule2_min_coeff": 0,
         "rule3_min_coeff": 0,
         "gap_high_coeff_sum_min": 20,
+        "rule2_high_coeff_sum_min": 8,
+        "rule3_high_coeff_sum_min": 3,
         "amount_value_table": [{"upper": 0.2, "value": 1}],
     }
     t.update(over)
@@ -115,6 +117,8 @@ def test_size_tiers_roundtrip_via_template_put(tmp_path, monkeypatch):
     assert r.status_code == 200
     saved = db.get_template(tid)["size_tiers"]
     assert saved[0]["size"] == 20 and saved[0]["shares"] == 40
+    assert saved[0]["rule2_high_coeff_sum_min"] == 8
+    assert saved[0]["rule3_high_coeff_sum_min"] == 3
 
 
 def test_size_tiers_invalid_rejected_400(tmp_path, monkeypatch):

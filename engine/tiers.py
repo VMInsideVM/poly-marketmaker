@@ -4,11 +4,17 @@
 选档参数(规则1/2/3门槛、高位系数和门槛、金额数值表)。无匹配 -> 不挂。
 """
 
+# 逐档配置的系数类参数(统一按 float 归一化、不得为负)。
+# 注意 gap_high_coeff_sum_min 就是「规则1」的高位系数和门槛,名字里没有 rule1:
+# 它早于规则2/3 的门槛存在,已带值跑在生产配置的 size_tiers JSON 里,改名要写迁移,
+# 而迁移写漏会让闸门静默变成 0(不拦),代价比命名不对称大得多。
 _TIER_COEFF_KEYS = (
     "rule1_min_coeff",
     "rule2_min_coeff",
     "rule3_min_coeff",
     "gap_high_coeff_sum_min",
+    "rule2_high_coeff_sum_min",
+    "rule3_high_coeff_sum_min",
 )
 
 
