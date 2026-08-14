@@ -19,6 +19,12 @@ from engine.monitor import OrderMonitor
 from engine.positions import held_side_info
 from engine.resolution import in_resolution
 from engine.tiers import tier_for
+from engine.legacy_wall import (
+    compute_market_legacy_orders,
+    explain_legacy_order,
+    legacy_price_basis,
+    legacy_reason,
+)
 from engine.pnl import beijing_day, beijing_hour, weekly_window
 from engine.pnl_ledger import rebuild_wallet_pnl
 from engine.notify import build_report_payload, send_report
@@ -348,6 +354,11 @@ class WalletWorker:
             # shares 缺失/0 -> None:laddering 回退按 min_size 挂(奖励资格安全),
             # 绝不能把 0 当合法份数(plan 为空 -> reconcile 撤掉现有买单且不补,静默摘牌)。
             tier_shares = int(tier.get("shares", 0) or 0) or None
+            placement_mode = str(tmpl.get("placement_mode", "gap_single"))
+            legacy_wall_threshold = int(tmpl.get("legacy_wall_threshold", 2000))
+            legacy_cum_threshold = int(tmpl.get("legacy_cumulative_threshold", 6000))
+            order_size_mode = str(tmpl.get("order_size_mode", "min"))
+            order_size_custom_usd = float(tmpl.get("order_size_custom_usd", 0))
             if (
                 mid not in markets_with_open
                 and len(markets_with_open) >= max_concurrent
@@ -380,6 +391,7 @@ class WalletWorker:
                         "outcome": e.get("outcome", ""),
                         "neg_risk": e.get("neg_risk", False),
                         "tick_size_str": ob.get("tick_size", "0.01"),
+                        "tick_size": float(ob.get("tick_size", "0.01") or 0.01),
                         "min_size": int(e.get("rewards_min_size", 0) or 0),
                         "bids": bids,
                         "reward_range_min": rmin,
@@ -414,42 +426,70 @@ class WalletWorker:
             if budget_ok:
                 ca = None if side_a["token_id"] in held_assets else side_a
                 cb = None if (side_b and side_b["token_id"] in held_assets) else side_b
-                ladders = compute_market_single_orders(
-                    ca,
-                    cb,
-                    budget,
-                    shares_budget,
-                    amount_value_table,
-                    gap_wide_cents,
-                    gap_mid_cents,
-                    gap_high_coeff_sum_min,
-                    rule1_min_coeff,
-                    rule2_min_coeff,
-                    rule3_min_coeff,
-                    cliff_probe_cents,
-                    shares=tier_shares,
-                    rule2_high_coeff_sum_min=rule2_high_gate,
-                    rule3_high_coeff_sum_min=rule3_high_gate,
-                )
-                for gkey, gside in (("a", ca), ("b", cb)):
-                    if gside is not None:
-                        gap_explains[gkey] = explain_gap_single_order(
-                            gside["bids"],
-                            gside["reward_range_min"],
-                            gside["reward_range_max"],
-                            gside["min_size"],
-                            amount_value_table,
-                            gap_wide_cents,
-                            gap_mid_cents,
-                            gap_high_coeff_sum_min,
-                            rule1_min_coeff,
-                            rule2_min_coeff,
-                            rule3_min_coeff,
-                            cliff_probe_cents,
-                            shares=tier_shares,
-                            rule2_high_coeff_sum_min=rule2_high_gate,
-                            rule3_high_coeff_sum_min=rule3_high_gate,
-                        )
+                if placement_mode == "legacy_wall":
+                    ladders = compute_market_legacy_orders(
+                        ca,
+                        cb,
+                        budget,
+                        shares_budget,
+                        balance,
+                        order_size_mode,
+                        order_size_custom_usd,
+                        wall_threshold=legacy_wall_threshold,
+                        cumulative_threshold=legacy_cum_threshold,
+                    )
+                    for gkey, gside in (("a", ca), ("b", cb)):
+                        if gside is not None:
+                            gap_explains[gkey] = explain_legacy_order(
+                                gside["bids"],
+                                int(gside["max_spread"]),
+                                gside["tick_size"],
+                                gside["reward_range_min"],
+                                gside["reward_range_max"],
+                                gside["min_size"],
+                                order_size_mode,
+                                balance,
+                                order_size_custom_usd,
+                                wall_threshold=legacy_wall_threshold,
+                                cumulative_threshold=legacy_cum_threshold,
+                            )
+                else:
+                    ladders = compute_market_single_orders(
+                        ca,
+                        cb,
+                        budget,
+                        shares_budget,
+                        amount_value_table,
+                        gap_wide_cents,
+                        gap_mid_cents,
+                        gap_high_coeff_sum_min,
+                        rule1_min_coeff,
+                        rule2_min_coeff,
+                        rule3_min_coeff,
+                        cliff_probe_cents,
+                        shares=tier_shares,
+                        rule2_high_coeff_sum_min=rule2_high_gate,
+                        rule3_high_coeff_sum_min=rule3_high_gate,
+                    )
+                    for gkey, gside in (("a", ca), ("b", cb)):
+                        if gside is not None:
+                            gap_explains[gkey] = explain_gap_single_order(
+                                gside["bids"],
+                                gside["reward_range_min"],
+                                gside["reward_range_max"],
+                                gside["min_size"],
+                                amount_value_table,
+                                gap_wide_cents,
+                                gap_mid_cents,
+                                gap_high_coeff_sum_min,
+                                rule1_min_coeff,
+                                rule2_min_coeff,
+                                rule3_min_coeff,
+                                cliff_probe_cents,
+                                shares=tier_shares,
+                                rule2_high_coeff_sum_min=rule2_high_gate,
+                                rule3_high_coeff_sum_min=rule3_high_gate,
+                            )
 
             for key, side in (("a", side_a), ("b", side_b)):
                 if side is None:
@@ -505,13 +545,17 @@ class WalletWorker:
                         self._touch_active()
                         markets_with_open.add(mid)
                         if gap_d and gap_d.get("action") == "place":
+                            if placement_mode == "legacy_wall":
+                                r_fn, b_fn = legacy_reason, legacy_price_basis
+                            else:
+                                r_fn, b_fn = gap_single_reason, gap_single_price_basis
                             self._record_place_buy_tier(
                                 mid,
                                 side,
                                 price,
                                 shares,
-                                reason=gap_single_reason(gap_d),
-                                price_basis=gap_single_price_basis(
+                                reason=r_fn(gap_d),
+                                price_basis=b_fn(
                                     gap_d,
                                     side["reward_range_min"],
                                     side["reward_range_max"],
@@ -525,7 +569,9 @@ class WalletWorker:
                     except Exception as ex:
                         logger.error("place_limit_buy failed %s: %s", token_id, ex)
                 # ② 判成不挂:记 gap_skip(按 token 去重,判断变化才记)。
-                self._maybe_record_gap_skip(mid, side, gap_explains.get(key))
+                self._maybe_record_gap_skip(
+                    mid, side, gap_explains.get(key), placement_mode
+                )
 
     def _touch_active(self):
         """记一次「上次活跃」(纯展示)。写失败绝不能打断下单,吞掉只打 warning。"""
@@ -558,10 +604,20 @@ class WalletWorker:
         except Exception as e:
             logger.warning("record_action(place_buy) failed: %s", e)
 
-    def _maybe_record_gap_skip(self, market_id, side, decision):
-        """gap_single 判成不挂时记一条 gap_skip(按 token 去重:同一原因只记一次,
-        避免每轮下单往历史刷同一条)。decision=None/非 skip -> 不记。"""
+    def _maybe_record_gap_skip(
+        self, market_id, side, decision, placement_mode="gap_single"
+    ):
+        """判成不挂时记一条 gap_skip(按 token 去重:同一原因只记一次,避免每轮下单
+        往历史刷同一条)。decision=None/非 skip -> 不记。两种挂单模式共用这一条动作
+        类型,只是价格依据的格式化函数不同。"""
         from engine.laddering import gap_single_price_basis
+        from engine.legacy_wall import legacy_price_basis
+
+        basis_fn = (
+            legacy_price_basis
+            if placement_mode == "legacy_wall"
+            else gap_single_price_basis
+        )
 
         token_id = side["token_id"]
         if not decision or decision.get("action") != "skip":
@@ -579,7 +635,7 @@ class WalletWorker:
                 price=-1,
                 size=0,
                 reason=reason,
-                price_basis=gap_single_price_basis(
+                price_basis=basis_fn(
                     decision,
                     side["reward_range_min"],
                     side["reward_range_max"],

@@ -531,3 +531,91 @@ def test_place_orders_rule2_gate_records_gap_skip_reason():
     skips = _actions(db, "gap_skip")
     assert len(skips) == 1
     assert "规则2" in skips[0].kwargs["reason"]
+
+
+def _legacy_template(**over):
+    # 老策略模板:档位模块只用来做选品门控(size=20),shares/系数在老策略下被忽略。
+    t = _gap_template()
+    t["placement_mode"] = "legacy_wall"
+    t["legacy_wall_threshold"] = 2000
+    t["legacy_cumulative_threshold"] = 6000
+    t["order_size_mode"] = "min"
+    t["order_size_custom_usd"] = 0
+    t.update(over)
+    return t
+
+
+def test_legacy_mode_places_below_the_wall():
+    # 买一 3000 > 2000 -> 挂买二 0.29,份数 min 模式 = min_size 20。
+    worker, api, db = _make_worker(template=_legacy_template())
+    api.get_orderbook.return_value = _ob([(0.30, 3000), (0.29, 500)], [(0.32, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    assert api.place_limit_buy.call_count == 1
+    c = api.place_limit_buy.call_args_list[0]
+    assert round(c.args[1], 2) == 0.29 and c.args[2] == 20
+
+
+def test_legacy_mode_thin_wall_skips_and_records():
+    # 买一 1500 <= 2000 -> 整个市场不挂,并记一条 gap_skip 说明阈值。
+    worker, api, db = _make_worker(template=_legacy_template())
+    api.get_orderbook.return_value = _ob([(0.30, 1500), (0.29, 500)], [(0.32, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    api.place_limit_buy.assert_not_called()
+    skips = _actions(db, "gap_skip")
+    assert len(skips) == 1
+    assert "2000" in skips[0].kwargs["reason"]
+
+
+def test_legacy_mode_place_buy_reason_is_legacy_not_gap():
+    worker, api, db = _make_worker(template=_legacy_template())
+    api.get_orderbook.return_value = _ob([(0.30, 3000), (0.29, 500)], [(0.32, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    calls = _actions(db, "place_buy")
+    assert len(calls) == 1
+    reason = calls[0].kwargs["reason"]
+    assert "厚墙" in reason
+    assert "断层" not in reason
+
+
+def test_legacy_wall_threshold_is_read_from_template():
+    # 阈值降到 1000 -> 同一副 1500 的盘口这次挂得出来。
+    worker, api, db = _make_worker(
+        template=_legacy_template(legacy_wall_threshold=1000)
+    )
+    api.get_orderbook.return_value = _ob([(0.30, 1500), (0.29, 500)], [(0.32, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    assert api.place_limit_buy.call_count == 1
+
+
+def test_legacy_order_size_mode_balance_is_read_from_template():
+    # balance 模式:余额由 _make_worker 的 balance 决定,份数 = floor(balance/0.29),
+    # 再被 max_exposure_shares / 市场预算封顶。断言比 min_size 大即可证明模式生效。
+    worker, api, db = _make_worker(
+        balance=100.0, template=_legacy_template(order_size_mode="balance")
+    )
+    api.get_orderbook.return_value = _ob([(0.30, 3000), (0.29, 500)], [(0.32, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    assert api.place_limit_buy.call_count == 1
+    assert api.place_limit_buy.call_args_list[0].args[2] > 20
+
+
+def test_legacy_mode_ignores_tier_shares():
+    # 老策略下档位模块只用 size 做选品门控,shares 被忽略:档位配 shares=40,
+    # 但 order_size_mode="min" 应该挂 min_size=20 份而不是 40。
+    tmpl = _legacy_template()
+    tmpl["size_tiers"] = [_tier(20, shares=40, av=[{"upper": 1.0, "value": 1}])]
+    worker, api, db = _make_worker(template=tmpl)
+    api.get_orderbook.return_value = _ob([(0.30, 3000), (0.29, 500)], [(0.32, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    assert api.place_limit_buy.call_count == 1
+    assert api.place_limit_buy.call_args_list[0].args[2] == 20
+
+
+def test_gap_single_mode_unaffected_by_legacy_keys():
+    # 回归:默认模板(gap_single)行为不变——同一副盘口仍按断层单档判,原因含「规则」。
+    worker, api, db = _make_worker(template=_gap_template())
+    api.get_orderbook.return_value = _ob([(0.28, 50), (0.27, 40)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    calls = _actions(db, "place_buy")
+    assert len(calls) == 1
+    assert "规则3" in calls[0].kwargs["reason"]
