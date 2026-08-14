@@ -230,7 +230,8 @@ def gap_single_reason(d):
     if d.get("action") != "place" or d.get("chosen_index") is None:
         return d.get("skip_reason") or "不挂"
     parts = [f"{_GAP_RULE_LABEL.get(d['rule'], '规则?')}·最大断层{d['max_gap']:g}¢"]
-    if d["rule"] == 1 and d.get("high_sum") is not None:
+    # 三级都有高位系数和闸门,但门槛为 0 = 没开这道闸,写出来只是噪音。
+    if d.get("gate_min") and d.get("high_sum") is not None:
         parts.append(f"高位系数和{d['high_sum']:g}(过闸)")
     lv = d["levels"][d["chosen_index"]]
     parts.append(
@@ -271,7 +272,7 @@ def gap_single_price_basis(d, reward_range_min, reward_range_max):
             f"买单簿(价降序):{per}",
             f"最大断层 {d['max_gap']:g}¢→{_GAP_RULE_LABEL.get(d['rule'], '')}",
         ]
-        if d.get("rule") == 1 and not d.get("gate_passed"):
+        if not d.get("gate_passed"):
             addends = "+".join(
                 f"{lv['coeff']:g}" for lv in levels if lv.get("high_side")
             )
@@ -280,7 +281,7 @@ def gap_single_price_basis(d, reward_range_min, reward_range_max):
                 f" → 整市场不挂"
             )
         else:
-            if d.get("rule") == 1 and d.get("high_sum") is not None:
+            if d.get("gate_min") and d.get("high_sum") is not None:
                 parts.append(f"高位系数和{d['high_sum']:g}(过闸)")
             parts.append(f"各档系数均 ≤ 选档门槛{d['min_coeff']:g}")
         parts.append("系数=挂量÷(最低份数×金额数值)")

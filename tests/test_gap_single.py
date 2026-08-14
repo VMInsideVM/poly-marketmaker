@@ -865,3 +865,35 @@ def test_single_level_book_gate_uses_that_level():
     # 系数 50/(20*2)=1.25:门槛 2 拦下,门槛 1 放行。
     assert _plan([_b(0.28, 50)], gate3=2) is None
     assert _plan([_b(0.28, 50)], gate3=1) == (0.28, 20)
+
+
+def test_reason_rule2_shows_high_sum_when_gate_enabled():
+    # 规则2 闸门开着且过闸 -> 原因里带高位系数和(旧版只有规则1 带)。
+    d = _explain([_b(0.28, 50), _b(0.21, 400)], gate2=1)
+    r = gap_single_reason(d)
+    assert "规则2(中断层)" in r
+    assert "高位系数和1.25(过闸)" in r
+
+
+def test_reason_rule2_omits_high_sum_when_gate_off():
+    # 门槛 0 = 闸没开 -> 不写高位系数和,默认配置文案零回归。
+    d = _explain([_b(0.28, 50), _b(0.21, 400)])
+    r = gap_single_reason(d)
+    assert "高位系数和" not in r
+
+
+def test_price_basis_rule2_gate_fail_shows_addends():
+    # 规则2 被闸门拦下:逐档证据 + 高位系数和加数展开 + 门槛。
+    d = _explain([_b(0.28, 50), _b(0.21, 400)], gate2=5)
+    b = gap_single_price_basis(d, 0.10, 0.31)
+    assert "规则2(中断层)" in b
+    assert "高位系数和 1.25=1.25 < 门槛5" in b
+    assert "整市场不挂" in b
+
+
+def test_price_basis_rule3_gate_fail_shows_addends():
+    d = _explain([_b(0.28, 50), _b(0.27, 40)], gate3=3)
+    b = gap_single_price_basis(d, 0.10, 0.31)
+    assert "规则3(密盘)" in b
+    assert "< 门槛3" in b
+    assert "整市场不挂" in b
