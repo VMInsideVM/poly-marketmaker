@@ -1204,6 +1204,7 @@ def api_market_ladder(market_id):
 
 def _ladder_payload(market_id):
     from engine.laddering import preview_gap_single_market
+    from engine.legacy_wall import explain_legacy_order
     from engine.strategy import reward_price_range
     from engine.positions import held_side_info
     from engine.tiers import tier_for
@@ -1217,6 +1218,7 @@ def _ladder_payload(market_id):
     size_tiers = tmpl.get("size_tiers") or []
     max_exposure_usd = float(tmpl.get("max_exposure_usd", 250))
     max_exposure_shares = int(tmpl.get("max_exposure_shares", 500))
+    placement_mode = str(tmpl.get("placement_mode", "gap_single"))
 
     src = (
         manager.eligible_markets
@@ -1258,7 +1260,8 @@ def _ladder_payload(market_id):
             continue
         bb, ba = float(bids[0]["price"]), float(asks[0]["price"])
         mid = (bb + ba) / 2
-        rmin, rmax = reward_price_range(mid, float(market.get("rewards_max_spread", 2)))
+        max_spread = float(market.get("rewards_max_spread", 2))
+        rmin, rmax = reward_price_range(mid, max_spread)
         sides_in.append(
             {
                 "outcome": tok.get("outcome", ""),
@@ -1270,6 +1273,8 @@ def _ladder_payload(market_id):
                 "best_ask": ba,
                 "spread_cents": (ba - bb) * 100,
                 "bids": bids,
+                "tick_size": float(ob.get("tick_size", "0.01") or 0.01),
+                "max_spread": max_spread,
             }
         )
     a = sides_in[0] if sides_in else None
@@ -1303,6 +1308,45 @@ def _ladder_payload(market_id):
             }
             for s in sides_in
         ]
+    elif placement_mode == "legacy_wall":
+        legacy_wall_threshold = int(tmpl.get("legacy_wall_threshold", 2000))
+        legacy_cum_threshold = int(tmpl.get("legacy_cumulative_threshold", 6000))
+        order_size_mode = str(tmpl.get("order_size_mode", "min"))
+        order_size_custom_usd = float(tmpl.get("order_size_custom_usd", 0))
+        sides = []
+        for s in sides_in:
+            d = explain_legacy_order(
+                s["bids"],
+                int(s["max_spread"]),
+                s["tick_size"],
+                s["reward_range_min"],
+                s["reward_range_max"],
+                s["min_size"],
+                order_size_mode,
+                balance,
+                order_size_custom_usd,
+                wall_threshold=legacy_wall_threshold,
+                cumulative_threshold=legacy_cum_threshold,
+            )
+            sides.append(
+                {
+                    "outcome": s.get("outcome", ""),
+                    "token_id": s.get("token_id", ""),
+                    "best_bid": s.get("best_bid"),
+                    "best_ask": s.get("best_ask"),
+                    "spread_cents": s.get("spread_cents"),
+                    "reward_range": [s["reward_range_min"], s["reward_range_max"]],
+                    "rule": d["rule"],
+                    "threshold": d["threshold"],
+                    "hit_index": d["hit_index"],
+                    "cumulative": d["cumulative"],
+                    "action": d["action"],
+                    "chosen_price": d["price"],
+                    "chosen_shares": d["shares"],
+                    "skip_reason": d["skip_reason"],
+                    "levels": d["levels"],
+                }
+            )
     else:
         preview = preview_gap_single_market(
             a,
@@ -1327,7 +1371,7 @@ def _ladder_payload(market_id):
             "budget_usd": budget,
             "shares_budget": shares_budget,
             "sides": sides,
-            "placement_mode": "gap_single",
+            "placement_mode": placement_mode,
         }
     )
 

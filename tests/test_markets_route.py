@@ -96,6 +96,39 @@ def test_ladder_preview_route(client):
     assert "levels" in side and side["levels"][0]["price"] == 0.54
 
 
+def test_ladder_preview_uses_legacy_when_mode_is_legacy_wall(monkeypatch):
+    # 模板切到老策略 -> 预演走厚墙定价而非断层分级。
+    # 买单簿 0.54/150、0.52/300:把厚墙阈值降到 100 让 0.54 那档算墙(默认 2000 会
+    # 判不挂),目标价 = 墙的下一档 0.52。奖励区间按盘口现算:
+    # midpoint=(0.54+0.56)/2=0.55,max_spread=4 -> [0.51,0.59],0.52 在区间内。
+    class _LegacyDB(_FakeDB):
+        def get_template_for(self, addr):
+            t = super().get_template_for(addr)
+            t["placement_mode"] = "legacy_wall"
+            t["legacy_wall_threshold"] = 100
+            t["legacy_cumulative_threshold"] = 6000
+            t["order_size_mode"] = "min"
+            t["order_size_custom_usd"] = 0
+            return t
+
+    routes.app.config["TESTING"] = True
+    monkeypatch.setattr(routes, "db", _LegacyDB())
+    monkeypatch.setattr(routes, "manager", None)
+    monkeypatch.setattr(routes, "_wallet_apis", lambda only=None: {"0xw": _FakeAPI()})
+    monkeypatch.setattr(routes, "_enrich_rows", lambda rows, key: None)
+    with routes.app.test_client() as c:
+        with c.session_transaction() as s:
+            s["logged_in"] = True
+        r = c.get("/api/markets/c1/ladder?wallet=0xw")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["placement_mode"] == "legacy_wall"
+    side = data["sides"][0]
+    assert side["rule"] == "wall"
+    assert side["action"] == "place"
+    assert side["chosen_price"] == 0.52
+
+
 def test_ladder_reads_tokens_from_pool_shape(client, monkeypatch):
     # 内存候选池形态:一条市场 + tokens 列表、无顶层 token_id —— 不能 KeyError,
     # 要按 tokens 迭代出各侧。
