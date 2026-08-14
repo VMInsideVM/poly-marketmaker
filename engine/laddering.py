@@ -309,6 +309,8 @@ def compute_market_single_orders(
     rule3_min_coeff,
     cliff_probe_cents=0,
     shares=None,
+    rule2_high_coeff_sum_min=0.0,
+    rule3_high_coeff_sum_min=0.0,
 ):
     """两边共享敞口的网关式单档计划(每边至多一单)。
 
@@ -337,6 +339,8 @@ def compute_market_single_orders(
             rule3_min_coeff,
             cliff_probe_cents=cliff_probe_cents,
             shares=shares,
+            rule2_high_coeff_sum_min=rule2_high_coeff_sum_min,
+            rule3_high_coeff_sum_min=rule3_high_coeff_sum_min,
         )
         if plan is None:
             continue
@@ -402,6 +406,8 @@ def preview_gap_single_market(
     rule3_min_coeff,
     cliff_probe_cents=0,
     shares=None,
+    rule2_high_coeff_sum_min=0.0,
+    rule3_high_coeff_sum_min=0.0,
 ):
     """两边的网关式单档只读预演:对每边调 explain_gap_single_order,组装展示用 side。
 
@@ -431,6 +437,8 @@ def preview_gap_single_market(
             rule3_min_coeff,
             cliff_probe_cents=cliff_probe_cents,
             shares=shares,
+            rule2_high_coeff_sum_min=rule2_high_coeff_sum_min,
+            rule3_high_coeff_sum_min=rule3_high_coeff_sum_min,
         )
         out[key] = {
             "outcome": side.get("outcome", ""),

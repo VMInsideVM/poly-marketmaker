@@ -1315,6 +1315,8 @@ def _ladder_payload(market_id):
             float(tier.get("rule3_min_coeff", 0)),
             float(tmpl.get("cliff_probe_cents", 2)),
             shares=int(tier.get("shares", 0) or 0) or None,
+            rule2_high_coeff_sum_min=float(tier.get("rule2_high_coeff_sum_min", 0)),
+            rule3_high_coeff_sum_min=float(tier.get("rule3_high_coeff_sum_min", 0)),
         )
         sides = [preview[k] for k in ("a", "b") if preview.get(k)]
     return jsonify(

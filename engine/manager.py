@@ -343,6 +343,8 @@ class WalletWorker:
             rule1_min_coeff = float(tier.get("rule1_min_coeff", 0))
             rule2_min_coeff = float(tier.get("rule2_min_coeff", 0))
             rule3_min_coeff = float(tier.get("rule3_min_coeff", 0))
+            rule2_high_gate = float(tier.get("rule2_high_coeff_sum_min", 0))
+            rule3_high_gate = float(tier.get("rule3_high_coeff_sum_min", 0))
             # shares 缺失/0 -> None:laddering 回退按 min_size 挂(奖励资格安全),
             # 绝不能把 0 当合法份数(plan 为空 -> reconcile 撤掉现有买单且不补,静默摘牌)。
             tier_shares = int(tier.get("shares", 0) or 0) or None
@@ -426,6 +428,8 @@ class WalletWorker:
                     rule3_min_coeff,
                     cliff_probe_cents,
                     shares=tier_shares,
+                    rule2_high_coeff_sum_min=rule2_high_gate,
+                    rule3_high_coeff_sum_min=rule3_high_gate,
                 )
                 for gkey, gside in (("a", ca), ("b", cb)):
                     if gside is not None:
@@ -443,6 +447,8 @@ class WalletWorker:
                             rule3_min_coeff,
                             cliff_probe_cents,
                             shares=tier_shares,
+                            rule2_high_coeff_sum_min=rule2_high_gate,
+                            rule3_high_coeff_sum_min=rule3_high_gate,
                         )
 
             for key, side in (("a", side_a), ("b", side_b)):

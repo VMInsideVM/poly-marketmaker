@@ -500,3 +500,22 @@ def test_tier_shares_zero_falls_back_to_min_size():
     worker.place_orders([_elig("A", "A-y", "Yes")])
     assert api.place_limit_buy.call_count == 1
     assert api.place_limit_buy.call_args_list[0].args[2] == 100
+
+
+def test_place_orders_threads_rule2_high_coeff_gate():
+    # 档位模块配了规则2 高位门槛 -> 该市场被闸门拦下,不下单。
+    # 断层 0.28->0.21 = 7¢ -> 规则2;高位={0.28} 系数 50/(20*2)=1.25 < 5。
+    tmpl = _gap_template()
+    tmpl["size_tiers"][0]["rule2_high_coeff_sum_min"] = 5
+    worker, api, db = _make_worker(template=tmpl)
+    api.get_orderbook.return_value = _ob([(0.28, 50), (0.21, 400)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    api.place_limit_buy.assert_not_called()
+
+
+def test_place_orders_rule2_gate_default_still_places():
+    # 同一副盘口,不配门槛(默认0)-> 照常下单,证明上一条是闸门拦的而非别的原因。
+    worker, api, db = _make_worker(template=_gap_template())
+    api.get_orderbook.return_value = _ob([(0.28, 50), (0.21, 400)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    assert api.place_limit_buy.call_count == 1

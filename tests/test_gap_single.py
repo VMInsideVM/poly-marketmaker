@@ -897,3 +897,26 @@ def test_price_basis_rule3_gate_fail_shows_addends():
     assert "规则3(密盘)" in b
     assert "< 门槛3" in b
     assert "整市场不挂" in b
+
+
+def test_compute_threads_rule2_gate():
+    # compute 必须把规则2 门槛透下去,否则整层闸门形同虚设。
+    side = {
+        "bids": [_b(0.28, 50), _b(0.21, 400)],
+        "reward_range_min": 0.10,
+        "reward_range_max": 0.31,
+        "min_size": 20,
+    }
+    out = compute_market_single_orders(
+        side, None, 1000, 500, AV, 10, 5, 20, 0, 0, 0, rule2_high_coeff_sum_min=5
+    )
+    assert out["a"] == []
+
+
+def test_preview_threads_rule3_gate():
+    side = _pside([_b(0.28, 50), _b(0.27, 40)])
+    out = preview_gap_single_market(
+        side, None, AV, 10, 5, 20, 0, 0, 0, rule3_high_coeff_sum_min=3
+    )
+    assert out["a"]["action"] == "skip"
+    assert "规则3" in out["a"]["skip_reason"]
