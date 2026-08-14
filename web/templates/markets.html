@@ -174,8 +174,9 @@ function renderGapSingle(data) {
                 <td>${L.in_range === false ? '区间外' : '区间内'}</td>
                 <td>${L.high_side ? '高位' : '—'}</td>
                 <td>${L.chosen ? '✓ 选中' : ''}</td></tr>`).join('');
-        const gateTxt = s.rule === 1
-            ? ` · 高位系数和 ${s.high_sum != null ? s.high_sum.toFixed(2) : '—'} ${s.gate_passed ? '≥ 闸门(过闸)' : '< 闸门(拦下)'}`
+        // 三级都可能有高位系数和闸门;门槛为 0 表示这级没开闸,不显示。
+        const gateTxt = s.gate_min
+            ? ` · 高位系数和 ${s.high_sum != null ? s.high_sum.toFixed(2) : '—'} ${s.gate_passed ? `≥ 闸门${s.gate_min}(过闸)` : `< 闸门${s.gate_min}(拦下)`}`
             : '';
         const minCoeff = s.min_coeff != null ? s.min_coeff : '—';
         const result = s.action === 'place'

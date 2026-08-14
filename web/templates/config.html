@@ -116,7 +116,7 @@
                 <div class="form-group"><label>中断层阈值 (美分，≥此值走规则2)</label><input type="number" name="gap_mid_cents" step="0.1"></div>
                 <div class="form-group"><label>悬崖探测 (美分，区间下沿往下此距离内无买档则该侧不挂；0=关)</label><input type="number" name="cliff_probe_cents" step="0.1"></div>
             </div>
-            <p class="hint" style="color:#888;font-size:12px">按<b>整个买单簿</b>「相邻档最大价差」把整个市场归到三级之一：&gt;宽断层→规则1（再查断层上方各档风险系数之和≥门槛，不过则整市场不挂）；中~宽→规则2；&lt;中→规则3。分级和高位系数和看全簿（含奖励区间外的档，那里的深坑才判得出来）；挂单价仍只在奖励区间内选。各级的「选档系数门槛」「高位系数和门槛」「金额数值表」按下方档位模块逐档配置。风险系数＝盘口量÷(最低份数×金额数值)。</p>
+            <p class="hint" style="color:#888;font-size:12px">按<b>整个买单簿</b>「相邻档最大价差」把整个市场归到三级之一：&gt;宽断层→规则1；中~宽→规则2；&lt;中→规则3。三级各有一道「高位风险系数和」市场闸门：断层上方到买一那一段的风险系数之和 ≥ 该级门槛才继续，否则整市场不挂。规则1 默认 20，规则2/3 默认 0（0=不设这道闸）。分级和高位系数和看全簿（含奖励区间外的档，那里的深坑才判得出来）；挂单价仍只在奖励区间内选。各级的「选档系数门槛」「高位系数和门槛」「金额数值表」按下方档位模块逐档配置。风险系数＝盘口量÷(最低份数×金额数值)。</p>
         </div>
         <div class="form-group">
             <label>止盈方式</label>
@@ -430,6 +430,8 @@ function makeTierCard(t) {
         <div class="form-group"><label>规则2 选档系数门槛（中断层）</label><input type="number" class="st-r2" step="0.1" value="${t.rule2_min_coeff ?? 0}"></div>
         <div class="form-group"><label>规则3 选档系数门槛（密盘）</label><input type="number" class="st-r3" step="0.1" value="${t.rule3_min_coeff ?? 0}"></div>
         <div class="form-group"><label>规则1 高位风险系数和门槛</label><input type="number" class="st-gate" step="0.1" value="${t.gap_high_coeff_sum_min ?? 20}"></div>
+        <div class="form-group"><label>规则2 高位风险系数和门槛（0=不拦）</label><input type="number" class="st-gate2" step="0.1" value="${t.rule2_high_coeff_sum_min ?? 0}"></div>
+        <div class="form-group"><label>规则3 高位风险系数和门槛（0=不拦）</label><input type="number" class="st-gate3" step="0.1" value="${t.rule3_high_coeff_sum_min ?? 0}"></div>
       </div>
       <div class="form-group"><label>金额数值表（价格档[美分] → 数值）</label>
         <div class="st-amount-rows"></div>
@@ -486,6 +488,8 @@ function serializeTiers() {
             rule2_min_coeff: parseFloat(card.querySelector('.st-r2').value) || 0,
             rule3_min_coeff: parseFloat(card.querySelector('.st-r3').value) || 0,
             gap_high_coeff_sum_min: parseFloat(card.querySelector('.st-gate').value) || 0,
+            rule2_high_coeff_sum_min: parseFloat(card.querySelector('.st-gate2').value) || 0,
+            rule3_high_coeff_sum_min: parseFloat(card.querySelector('.st-gate3').value) || 0,
             amount_value_table: rows,
         });
     });
