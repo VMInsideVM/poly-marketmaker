@@ -165,11 +165,13 @@ function renderGapSingle(data) {
         return '<span class="metric-note">无可预演的方向（订单簿缺失）</span>';
     }
     return data.sides.map(s => {
-        const rows = s.levels.map((L, i) => `<tr class="${L.chosen ? 'profit' : ''}">
+        // levels 是整个买单簿(断层按全簿算),区间外的档不可挂,标出来并压暗。
+        const rows = s.levels.map((L, i) => `<tr class="${L.chosen ? 'profit' : ''}"${L.in_range === false ? ' style="opacity:.55"' : ''}>
                 <td>买${i + 1}档</td>
                 <td>${fmtP(L.price)}</td>
                 <td>${L.size}</td>
                 <td>${L.coeff != null ? L.coeff.toFixed(2) : '—'}</td>
+                <td>${L.in_range === false ? '区间外' : '区间内'}</td>
                 <td>${L.high_side ? '高位' : '—'}</td>
                 <td>${L.chosen ? '✓ 选中' : ''}</td></tr>`).join('');
         const gateTxt = s.rule === 1
@@ -184,7 +186,7 @@ function renderGapSingle(data) {
         <div style="margin-bottom:6px">${result}</div>
         <table class="data-table">
             <thead><tr>
-                <th>档位</th><th>价格</th><th>盘口量</th><th>风险系数</th><th>高位</th><th>选档</th>
+                <th>档位</th><th>价格</th><th>盘口量</th><th>风险系数</th><th>奖励区间</th><th>高位</th><th>选档</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>`;

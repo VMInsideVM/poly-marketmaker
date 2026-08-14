@@ -1,7 +1,9 @@
 """engine/laddering.py — 网关式单档挂单纯函数引擎(不触网)。
 
-v4 用户策略:每侧在奖励区间内按相邻价差分级(宽/中/密断层),选一个系数超门槛的
+v4 用户策略:每侧按买单簿相邻价差分级(宽/中/密断层),在奖励区间内选一个系数超门槛的
 买档挂一单;整市场敞口两边共享。含金额数值查表与买单撤改收敛。
+
+分级看整个买单簿(含奖励区间外的档),选档只在奖励区间内 —— 两者的范围不同,别合并。
 """
 
 
@@ -73,13 +75,15 @@ def explain_gap_single_order(
       high_sum: 规则1 高位系数和;非规则1 为 None
       gate_min: 规则1 高位系数和门槛(=gap_high_coeff_sum_min);非规则1 为 None
       gate_passed: 规则1 闸门是否通过;规则2/3 恒 True;rule=None 为 False
-      levels: 区间内买档(价降序),每项 {price,size,coeff,high_side,chosen}
+      levels: 全部买档(价降序),每项 {price,size,coeff,in_range,high_side,chosen};
+              断层/高位按全簿算,故区间外的档也在列(标 in_range=False),选档只认 in_range
       chosen_index: 选中档在 levels 的下标;跳过为 None
       price/shares: 选中档价 / int(shares)(缺省=min_size,即档位模块的挂单份数);跳过为 None
       skip_reason: 跳过原因(中文);挂单为 None
       cliff: 是否因奖励区间下方悬崖(无买档支撑)否决;默认 False
     归级口径:价差 10/5 归中一级(规则1 严格 >宽、规则3 严格 <中);高位系数和 ==
     门槛放行;选档严格 > 门槛。价差按分四舍五入去浮点尘。
+    断层与高位取值范围 = 整个买单簿(含区间外的档);选档范围 = 奖励区间内。
     """
     d = {
         "action": "skip",
@@ -99,16 +103,14 @@ def explain_gap_single_order(
     if min_size <= 0 or not bids:
         d["skip_reason"] = "无买单簿或最低份数<=0"
         return d
-    in_range = sorted(
-        (
-            {"price": float(b["price"]), "size": float(b["size"])}
-            for b in bids
-            if reward_range_min <= float(b["price"]) <= reward_range_max
-        ),
+    levels = sorted(
+        ({"price": float(b["price"]), "size": float(b["size"])} for b in bids),
         key=lambda lv: lv["price"],
         reverse=True,
     )
-    if not in_range:
+    for lv in levels:
+        lv["in_range"] = reward_range_min <= lv["price"] <= reward_range_max
+    if not any(lv["in_range"] for lv in levels):
         d["skip_reason"] = "奖励区间内无买档"
         return d
     if has_cliff_below(bids, reward_range_min, cliff_probe_cents):
@@ -117,29 +119,32 @@ def explain_gap_single_order(
             f"奖励区间下方 {cliff_probe_cents:g}¢ 内无买档支撑(悬崖)→ 不挂"
         )
         return d
-    for lv in in_range:
+    for lv in levels:
         av = amount_value(lv["price"], amount_value_table)
         lv["coeff"] = (lv["size"] / (min_size * av)) if (av and av > 0) else 0.0
-    # 最大相邻价差 + 劈分点:高位 = in_range[0 .. split_idx](价差上方一侧)。
+    # 最大相邻价差 + 劈分点:高位 = levels[0 .. split_idx](价差上方一侧)。
+    # 断层与高位在「整个买单簿」上算,含奖励区间外的档:区间内只剩一档时,区间外的深坑
+    # 才判得出来(旧口径只看区间内,那种形状 max_gap 恒为 0、永远落到最松的规则3)。
+    # 选档另算,仍只在区间内顺延——区间外的档不是可挂的价位。
     max_gap = 0.0
-    split_idx = len(in_range) - 1
-    for i in range(len(in_range) - 1):
+    split_idx = len(levels) - 1
+    for i in range(len(levels) - 1):
         # 按分四舍五入去浮点尘:否则 0.28-0.18 会算成 10.000000000000002,把恰 10¢ 的
         # 价差误判成 >10¢ 宽断层;并列价差也会被尘埃打破而选错劈分点。
-        gap = round((in_range[i]["price"] - in_range[i + 1]["price"]) * 100.0, 6)
+        gap = round((levels[i]["price"] - levels[i + 1]["price"]) * 100.0, 6)
         if gap > max_gap:
             max_gap = gap
             split_idx = i
-    for idx, lv in enumerate(in_range):
+    for idx, lv in enumerate(levels):
         lv["high_side"] = idx <= split_idx
         lv["chosen"] = False
     d["max_gap"] = max_gap
-    d["levels"] = in_range
+    d["levels"] = levels
 
     # 按最大价差归级,取该级的选档门槛;仅规则1(宽断层)加「高位风险系数和」市场闸门。
     if max_gap > gap_wide_cents:
         rule, min_coeff = 1, rule1_min_coeff
-        high_sum = sum(lv["coeff"] for lv in in_range[: split_idx + 1])
+        high_sum = sum(lv["coeff"] for lv in levels[: split_idx + 1])
         d["rule"], d["min_coeff"], d["high_sum"] = 1, min_coeff, high_sum
         d["gate_min"] = gap_high_coeff_sum_min
         if high_sum < gap_high_coeff_sum_min:
@@ -156,9 +161,10 @@ def explain_gap_single_order(
         rule, min_coeff = 3, rule3_min_coeff
         d["rule"], d["min_coeff"], d["gate_passed"] = 3, min_coeff, True
 
-    # 顺延:自上而下第一个 coeff > 该级门槛。
-    for idx, lv in enumerate(in_range):
-        if lv["coeff"] > min_coeff:
+    # 顺延:自上而下第一个 coeff > 该级门槛;只在奖励区间内的档里选(区间外不可挂)。
+    # idx 是 levels(全簿)的下标,chosen_index 据此取值,前端/记账按同一份 levels 索引。
+    for idx, lv in enumerate(levels):
+        if lv["in_range"] and lv["coeff"] > min_coeff:
             lv["chosen"] = True
             d["action"] = "place"
             d["chosen_index"] = idx
@@ -249,10 +255,13 @@ def gap_single_price_basis(d, reward_range_min, reward_range_max):
         per = " · ".join(
             f"{lv['price']:.4f}×{lv['size']:g}→系数{lv['coeff']:g}"
             + ("[高位]" if lv.get("high_side") else "")
+            + ("" if lv.get("in_range", True) else "[区间外]")
             for lv in levels
         )
         parts = [
-            f"区间内买档(价降序):{per}",
+            # 断层按整个买单簿算,所以这里列的是全簿而非只有区间内的档;区间外的档标出来,
+            # 免得看的人以为奖励区间被算错了。
+            f"买单簿(价降序):{per}",
             f"最大断层 {d['max_gap']:g}¢→{_GAP_RULE_LABEL.get(d['rule'], '')}",
         ]
         if d.get("rule") == 1 and not d.get("gate_passed"):

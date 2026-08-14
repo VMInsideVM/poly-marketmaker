@@ -51,10 +51,11 @@ def test_normal_market_picks_highest_in_range():
     assert out == (0.28, 20)
 
 
-def test_out_of_range_levels_ignored():
-    # 0.05 低于 rmin 0.10,剔除;仍挂 0.28。
+def test_out_of_range_levels_join_gap_but_not_selection():
+    # 0.05 低于 rmin 0.10:不进选档,但参与断层。0.28->0.05 断层 23¢ > 10 -> 规则1,
+    # 高位仅{0.28}系数 50/(20*2)=1.25 < 20 -> 整市场不挂。
     out = _plan([_b(0.28, 50), _b(0.05, 9999)])
-    assert out == (0.28, 20)
+    assert out is None
 
 
 def test_wide_gap_gate_fail_skips_market():
@@ -506,8 +507,10 @@ def test_cliff_boundary_9c_support_not_dusted():
 
 
 def test_cliff_disabled_places_despite_void():
-    # 下方真空但 cliff=0 → 照常挂(零回归)
-    out = _plan([_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)], cliff=0)
+    # 下方真空但 cliff=0 → 悬崖不否决,照常挂。
+    # gate=0 是为了隔离变量:全簿口径下 0.17->0.02 是 15¢ 断层 -> 规则1,高位{0.18,0.17}
+    # 系数和 4.5 会被默认闸门 20 拦下,那样就测不出悬崖开关本身了。
+    out = _plan([_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)], cliff=0, gate=0)
     assert out == (0.18, 20)
 
 
@@ -718,3 +721,74 @@ def test_compute_shares_param_survives_side_a_budget_cap():
     )
     assert out["a"] == [(0.30, 31)]
     assert out["b"] == [(0.005, 40)]
+
+
+# --- 断层口径 = 整个买单簿(2026-08-14) ---------------------------------------
+# 断层分级与高位系数和在「全部买档」上算(含奖励区间外的档),选档仍只在区间内顺延。
+# 起因:区间内只剩一档的市场 max_gap 恒为 0,永远落到最松的规则3,区间下方的深坑
+# 完全不参与判定(实盘 0xe457df06… 地震市场按规则3 挂进了 21¢)。
+
+
+def test_gap_spans_whole_book_single_in_range_level():
+    # 实盘形状:区间内只有 0.21 一档,下方 0.19->0.08 是 11¢ 深坑。
+    # 旧口径:区间内不足 2 档 -> max_gap=0 -> 规则3 -> 挂。
+    # 新口径:全簿断层 11¢ > 10 -> 规则1;高位{0.21,0.19}系数和
+    #        236.24/(20*1.5)=7.87 + 120/(20*1)=6.0 = 13.87 < 20 -> 整市场不挂。
+    bids = [_b(0.21, 236.24), _b(0.19, 120), _b(0.08, 9.14), _b(0.07, 16.35)]
+    assert _plan(bids, rmin=0.195, rmax=0.275) is None
+
+
+def test_high_side_includes_out_of_range_levels():
+    # 最大断层 0.18->0.02 落在区间下沿(0.20)以下,高位={0.28,0.22,0.18},其中 0.18 在区间外。
+    # 系数 1.25 + 2.0 + 15.0 = 18.25;闸门 18 -> 过闸挂 0.28。
+    # 若高位漏掉区间外的 0.18(系数 15),和只有 3.25 < 18 会误判不挂。
+    bids = [_b(0.28, 50), _b(0.22, 60), _b(0.18, 300), _b(0.02, 10)]
+    assert _plan(bids, rmin=0.20, rmax=0.31, gate=18) == (0.28, 20)
+
+
+def test_high_side_out_of_range_gate_still_can_fail():
+    # 同一副买单簿,闸门抬到 20:18.25 < 20 -> 整市场不挂(证明上一条是真过闸,不是没算闸门)。
+    bids = [_b(0.28, 50), _b(0.22, 60), _b(0.18, 300), _b(0.02, 10)]
+    assert _plan(bids, rmin=0.20, rmax=0.31, gate=20) is None
+
+
+def test_out_of_range_thick_level_never_selected():
+    # 闸门放到 0 必过闸;区间外 0.05 挂着 9999 的超厚档,选档只在区间内 -> 仍挂 0.28。
+    out = _plan([_b(0.28, 50), _b(0.05, 9999)], gate=0)
+    assert out == (0.28, 20)
+
+
+def test_whole_book_single_level_still_rule3():
+    # 全簿只有一档:无相邻价差可算 -> max_gap=0 -> 规则3(维持现状,不因口径改动而变)。
+    d = _explain([_b(0.28, 50)])
+    assert d["rule"] == 3
+    assert d["max_gap"] == 0.0
+    assert d["action"] == "place"
+
+
+def test_in_range_dense_book_unaffected_by_out_of_range_gap():
+    # 区间内 0.28/0.27 密盘,但区间外 0.05 制造 22¢ 断层 -> 新口径判规则1。
+    # 高位仅{0.28}系数 1.25;闸门 1 -> 过闸,选档 x1=0 -> 挂 0.28。
+    d = _explain([_b(0.28, 50), _b(0.27, 40), _b(0.05, 10)], gate=1)
+    assert d["rule"] == 1
+    assert d["max_gap"] == 22.0
+    assert d["action"] == "place"
+    assert d["price"] == 0.28
+
+
+def test_levels_carry_whole_book_with_in_range_flag():
+    # levels 展开全簿(价降序)并标 in_range,供预演/价格依据看清高位系数和的构成。
+    d = _explain([_b(0.28, 50), _b(0.05, 9999)], gate=0)
+    assert [lv["price"] for lv in d["levels"]] == [0.28, 0.05]
+    assert [lv["in_range"] for lv in d["levels"]] == [True, False]
+    assert [lv["high_side"] for lv in d["levels"]] == [True, False]
+
+
+def test_chosen_index_points_into_whole_book_levels():
+    # chosen_index 是 levels(全簿)的下标:区间外的 0.30 排在前面时不能把下标错位到它身上。
+    d = _explain(
+        [_b(0.30, 10), _b(0.28, 50), _b(0.27, 40)], rmin=0.10, rmax=0.29, gate=0
+    )
+    assert d["action"] == "place"
+    assert d["price"] == 0.28
+    assert d["levels"][d["chosen_index"]]["price"] == 0.28

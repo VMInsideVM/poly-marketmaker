@@ -450,7 +450,7 @@ def test_gap_single_skip_records_reason_and_dedups():
     assert len(skips) == 1
     assert "规则3" in skips[0].kwargs["reason"]
     basis = skips[0].kwargs["price_basis"]
-    assert "区间内买档" in basis
+    assert "买单簿" in basis  # 断层按全簿算,逐档展开的是整个买单簿
     assert "各档系数均 ≤ 选档门槛100" in basis
     assert "get_orderbook" in basis
     assert "断层单档判定不挂" not in basis  # 旧通用串已弃用
