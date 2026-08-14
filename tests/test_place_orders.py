@@ -564,6 +564,10 @@ def test_legacy_mode_thin_wall_skips_and_records():
     skips = _actions(db, "gap_skip")
     assert len(skips) == 1
     assert "2000" in skips[0].kwargs["reason"]
+    # price_basis 也要走老策略的格式化函数(legacy_price_basis),不是 gap_single 的
+    # 通用串——只断言 reason 保护不了「placement_mode 传进 _maybe_record_gap_skip」
+    # 这条接线,因为两套格式化函数在这个用例下恰好长得像。
+    assert "阈值" in skips[0].kwargs["price_basis"]
 
 
 def test_legacy_mode_place_buy_reason_is_legacy_not_gap():
@@ -609,6 +613,22 @@ def test_legacy_mode_ignores_tier_shares():
     worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
     assert api.place_limit_buy.call_count == 1
     assert api.place_limit_buy.call_args_list[0].args[2] == 20
+
+
+def test_legacy_mode_cliff_below_reward_range_skips():
+    # 悬崖否决与监控 Step 3 共用同一口径(has_cliff_below):老策略模板配了悬崖探测
+    # (cliff_probe_cents>0)后,即便厚墙判断本会通过,买单簿下方真空的市场也不下单
+    # ——不然会「下单轮挂→监控 tick 撤→下一轮再挂」无限往复。
+    tmpl = _legacy_template(cliff_probe_cents=2)
+    worker, api, db = _make_worker(template=tmpl)
+    # rewards_max_spread=6(_elig 默认),best_bid/ask=0.30/0.32 -> midpoint=0.31,
+    # 奖励区间=[0.25,0.37]。买一 3000>2000 是墙,下一档 0.29 本在区间内可挂;但
+    # 区间下沿 0.25 往下 2¢ 内([0.23,0.25))没有买档支撑(只有远处的 0.05)-> 悬崖。
+    api.get_orderbook.return_value = _ob(
+        [(0.30, 3000), (0.29, 500), (0.05, 9999)], [(0.32, 1000)]
+    )
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    api.place_limit_buy.assert_not_called()
 
 
 def test_gap_single_mode_unaffected_by_legacy_keys():

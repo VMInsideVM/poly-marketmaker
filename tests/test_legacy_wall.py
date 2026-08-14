@@ -264,6 +264,7 @@ def _explain(
     custom=0.0,
     wall=2000,
     cum=6000,
+    cliff=0,
 ):
     return explain_legacy_order(
         bids,
@@ -277,6 +278,7 @@ def _explain(
         custom,
         wall_threshold=wall,
         cumulative_threshold=cum,
+        cliff_probe_cents=cliff,
     )
 
 
@@ -417,3 +419,78 @@ def test_explain_ge3_does_not_claim_hit_below_min_price():
     assert d["action"] == "skip"
     assert d["hit_index"] is None
     assert "5000" not in d["skip_reason"]
+
+
+def test_explain_hit_uses_int_truncated_size_not_raw_float():
+    # 挂量含小数(Polymarket 实盘挂量确实有小数,如 236.24):命中判定必须按 int
+    # 截断后比较,与真实定价口径(_spread_ge3_coarse 的 int(float(size)) >
+    # wall_threshold)对齐,否则会把定价函数根本没判为墙的档报成命中,连带
+    # hit_index/reason 都指向一个从未挂过的价位。
+    # 买档 0.30/2000.5(int=2000,不是墙)、0.29/100、0.28/3000(真正的墙)、0.27/100;
+    # 真实定价挂在 0.28 的下一档 0.27。
+    bids = _make_bids([(0.30, 2000.5), (0.29, 100), (0.28, 3000), (0.27, 100)])
+    d = _explain(bids, max_spread=3, rmin=0.20, rmax=0.35)
+    assert d["action"] == "place"
+    assert d["price"] == 0.27
+    assert d["hit_index"] == 2
+    # 命中档的下一档必须就是真正挂出去的价,定价与解释不能分叉。
+    assert d["price"] == d["levels"][d["hit_index"] + 1]["price"]
+
+
+def test_explain_cumulative_hit_skip_reason_uses_cumulative_not_size():
+    # 累计路径命中但下一档不可挂(这里是没有下一档):skip_reason 必须报累计值
+    # 6500,而不是单档挂量 3500 —「3500 > 阈值 6000」是假的不等式,真值是
+    # 「第2档累计 6500 > 阈值 6000」。
+    bids = _make_bids([(0.300, 3000), (0.299, 3500)])
+    d = _explain(bids, max_spread=2, tick=0.001, rmin=0.290, rmax=0.310, cum=6000)
+    assert d["action"] == "skip"
+    assert d["hit_index"] == 1
+    assert d["cumulative"] == 6500
+    assert "6500" in d["skip_reason"]
+    assert "3500 >" not in d["skip_reason"]
+
+
+def test_explain_cumulative_no_hit_skip_reason_uses_total_not_max_size():
+    # 累计路径无命中:skip_reason 该报累计总量(1900),不是单档最厚(1000)。
+    bids = _make_bids([(0.300, 1000), (0.299, 900)])
+    d = _explain(bids, max_spread=2, tick=0.001, rmin=0.290, rmax=0.310, cum=6000)
+    assert d["action"] == "skip"
+    assert d["hit_index"] is None
+    assert "1900" in d["skip_reason"]
+    assert "1000" not in d["skip_reason"]
+
+
+def test_explain_cliff_below_reward_range_vetoes_before_pricing():
+    # 买档跳空到远低于探测带的位置(0.05):奖励区间下沿(0.28)往下 2¢ 内
+    # ([0.26,0.28))没有买档支撑 -> 悬崖否决,不再进入定价(即便真实定价本来
+    # 会挂在 0.29)。
+    bids = _make_bids([(0.30, 3000), (0.29, 500), (0.05, 9999)])
+    baseline = _explain(bids)  # cliff 默认 0,不否决
+    assert baseline["action"] == "place"
+
+    d = _explain(bids, cliff=2)
+    assert d["action"] == "skip"
+    assert d["cliff"] is True
+    assert "悬崖" in d["skip_reason"]
+
+
+def test_explain_cliff_probe_zero_never_vetoes():
+    # cliff_probe_cents=0(v1.0.15 原始行为的默认值)-> 不否决,即便下方是真空。
+    bids = _make_bids([(0.30, 3000), (0.29, 500), (0.05, 9999)])
+    d = _explain(bids, cliff=0)
+    assert d["action"] == "place"
+    assert d["cliff"] is False
+
+
+def test_compute_market_legacy_orders_respects_cliff_probe():
+    # compute_market_legacy_orders 的 cliff_probe_cents 必须透传给 explain_legacy_order,
+    # 悬崖市场即便预算/份数都够也不挂。
+    side = _side(_make_bids([(0.30, 3000), (0.29, 500), (0.05, 9999)]))
+    out_no_cliff = compute_market_legacy_orders(
+        side, None, 1000.0, 500, 1000.0, "min", 0.0
+    )
+    assert out_no_cliff["a"] == [(0.29, 20)]
+    out_cliff = compute_market_legacy_orders(
+        side, None, 1000.0, 500, 1000.0, "min", 0.0, cliff_probe_cents=2
+    )
+    assert out_cliff["a"] == []

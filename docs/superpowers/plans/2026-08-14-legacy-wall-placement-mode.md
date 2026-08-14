@@ -707,6 +707,8 @@ Expected: 新用例 FAIL（`ImportError: cannot import name 'explain_legacy_orde
 
 追加到 `engine/legacy_wall.py`：
 
+⚠️ 此代码样本已被后续修复取代，最终实现以 `engine/legacy_wall.py` 为准。
+
 ```python
 from engine.order_sizing import compute_order_size
 

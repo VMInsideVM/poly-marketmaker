@@ -1327,6 +1327,7 @@ def _ladder_payload(market_id):
                 order_size_custom_usd,
                 wall_threshold=legacy_wall_threshold,
                 cumulative_threshold=legacy_cum_threshold,
+                cliff_probe_cents=float(tmpl.get("cliff_probe_cents", 2)),
             )
             sides.append(
                 {

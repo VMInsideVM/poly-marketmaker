@@ -111,6 +111,7 @@ def _spread_ge3_coarse(
     return None
 
 
+from engine.laddering import has_cliff_below
 from engine.order_sizing import compute_order_size
 
 _RULE_LABEL = {"wall": "厚墙", "cumulative": "累计厚度"}
@@ -128,11 +129,15 @@ def explain_legacy_order(
     custom_usd,
     wall_threshold=2000,
     cumulative_threshold=6000,
+    cliff_probe_cents=0,
 ):
     """老策略的完整判断(纯函数,不下单)。
 
     既驱动 compute_market_legacy_orders,也供记账/预演展示完整依据。字段见
     plan 的 Interfaces 段;levels 逐档带累计值 cum,便于看清累计路径怎么触发。
+    cliff_probe_cents>0 时,先按 has_cliff_below(与 gap_single/监控 Step 3 的
+    cliff_cancel 共用同一个纯函数)否决奖励区间下方无支撑的悬崖市场;命中时
+    d["cliff"]=True、不再进入定价。
     """
     d = {
         "action": "skip",
@@ -145,6 +150,7 @@ def explain_legacy_order(
         "shares": None,
         "levels": [],
         "skip_reason": None,
+        "cliff": False,
     }
     if not bids or min_size <= 0:
         d["skip_reason"] = "无买单簿或最低份数<=0"
@@ -156,6 +162,13 @@ def explain_legacy_order(
         running += int(size)
         levels.append({"price": float(b["price"]), "size": size, "cum": running})
     d["levels"] = levels
+
+    if has_cliff_below(bids, reward_range_min, cliff_probe_cents):
+        d["cliff"] = True
+        d["skip_reason"] = (
+            f"奖励区间下方 {cliff_probe_cents:g}¢ 内无买档支撑(悬崖) → 不挂"
+        )
+        return d
 
     is_fine_tick = tick_size < 0.01
     d["rule"] = "cumulative" if is_fine_tick else "wall"
@@ -189,10 +202,15 @@ def explain_legacy_order(
             scanned.append(lv)
 
     for i, lv in enumerate(scanned):
+        # 厚墙分支必须按 int 截断后比较,与 _spread2_coarse/_spread_ge3_coarse
+        # 的真实定价口径(int(float(bid["size"])) > wall_threshold)对齐 —— 否则
+        # 挂量为小数(Polymarket 挂量确实有小数,如 2000.5)时,这里未截断的浮点比较
+        # 会把定价函数根本没判定为墙的档报成命中,连带 hit_index/reason 全部指向
+        # 一个从未挂过的价位。累计分支的 cum 本来就是 int 累加,已经对齐,不用动。
         hit = (
             lv["cum"] > cumulative_threshold
             if is_fine_tick
-            else lv["size"] > wall_threshold
+            else int(lv["size"]) > wall_threshold
         )
         if hit:
             d["hit_index"] = i
@@ -202,16 +220,32 @@ def explain_legacy_order(
 
     if price is None:
         if d["hit_index"] is None:
-            d["skip_reason"] = (
-                f"{_RULE_LABEL[d['rule']]}:无档达到阈值 {d['threshold']:g}"
-                f"(扫描范围内最厚 {max(lv['size'] for lv in scanned):g}) → 不挂"
-            )
+            if is_fine_tick:
+                # 累计路径该比的是累计总量,不是单档最厚(scanned 范围内最后一档
+                # 的 cum 就是全部扫描范围的累计总量)。
+                total = scanned[-1]["cum"]
+                d["skip_reason"] = (
+                    f"{_RULE_LABEL[d['rule']]}:无档达到阈值 {d['threshold']:g}"
+                    f"(扫描范围内累计 {total:g}) → 不挂"
+                )
+            else:
+                d["skip_reason"] = (
+                    f"{_RULE_LABEL[d['rule']]}:无档达到阈值 {d['threshold']:g}"
+                    f"(扫描范围内最厚 {max(lv['size'] for lv in scanned):g}) → 不挂"
+                )
         else:
-            d["skip_reason"] = (
-                f"{_RULE_LABEL[d['rule']]}:第{d['hit_index'] + 1}档挂量"
-                f" {d['hit_size']:g} > 阈值 {d['threshold']:g},但下一档不可挂"
-                f"(无下一档/超出可挂范围/出奖励区间) → 不挂"
-            )
+            if is_fine_tick:
+                d["skip_reason"] = (
+                    f"{_RULE_LABEL[d['rule']]}:第{d['hit_index'] + 1}档累计"
+                    f" {d['cumulative']:g} > 阈值 {d['threshold']:g},但下一档不可挂"
+                    f"(无下一档/超出可挂范围/出奖励区间) → 不挂"
+                )
+            else:
+                d["skip_reason"] = (
+                    f"{_RULE_LABEL[d['rule']]}:第{d['hit_index'] + 1}档挂量"
+                    f" {d['hit_size']:g} > 阈值 {d['threshold']:g},但下一档不可挂"
+                    f"(无下一档/超出可挂范围/出奖励区间) → 不挂"
+                )
         return d
 
     shares = compute_order_size(
@@ -277,6 +311,7 @@ def compute_market_legacy_orders(
     order_size_custom_usd,
     wall_threshold=2000,
     cumulative_threshold=6000,
+    cliff_probe_cents=0,
 ):
     """两边共享敞口的老策略计划(每边至多一单)。
 
@@ -303,6 +338,7 @@ def compute_market_legacy_orders(
             order_size_custom_usd,
             wall_threshold=wall_threshold,
             cumulative_threshold=cumulative_threshold,
+            cliff_probe_cents=cliff_probe_cents,
         )
         if d["action"] != "place":
             continue

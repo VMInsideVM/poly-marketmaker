@@ -437,6 +437,7 @@ class WalletWorker:
                         order_size_custom_usd,
                         wall_threshold=legacy_wall_threshold,
                         cumulative_threshold=legacy_cum_threshold,
+                        cliff_probe_cents=cliff_probe_cents,
                     )
                     for gkey, gside in (("a", ca), ("b", cb)):
                         if gside is not None:
@@ -452,6 +453,7 @@ class WalletWorker:
                                 order_size_custom_usd,
                                 wall_threshold=legacy_wall_threshold,
                                 cumulative_threshold=legacy_cum_threshold,
+                                cliff_probe_cents=cliff_probe_cents,
                             )
                 else:
                     ladders = compute_market_single_orders(
@@ -611,7 +613,6 @@ class WalletWorker:
         往历史刷同一条)。decision=None/非 skip -> 不记。两种挂单模式共用这一条动作
         类型,只是价格依据的格式化函数不同。"""
         from engine.laddering import gap_single_price_basis
-        from engine.legacy_wall import legacy_price_basis
 
         basis_fn = (
             legacy_price_basis
