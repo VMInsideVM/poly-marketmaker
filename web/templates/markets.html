@@ -194,11 +194,40 @@ function renderGapSingle(data) {
     }).join('<div style="height:12px"></div>');
 }
 
+function renderLegacyWall(data) {
+    // 老策略预演:找厚墙、挂墙下一档。逐档展示挂量与累计,标出命中的那堵墙。
+    return data.sides.map(s => {
+        const hit = s.hit_index;
+        const rows = (s.levels || []).map((L, i) => `<tr class="${i === hit ? 'profit' : ''}">
+                <td>买${i + 1}档</td>
+                <td>${fmtP(L.price)}</td>
+                <td>${L.size}</td>
+                <td>${L.cum}</td>
+                <td>${i === hit ? '✓ 命中' : ''}</td></tr>`).join('');
+        const ruleTxt = s.rule === 'cumulative' ? '累计厚度（0.1 美分盘）' : '厚墙（1 美分盘）';
+        const result = s.action === 'place'
+            ? `<span class="profit">✓ 挂一单 @ ${fmtP(s.chosen_price)} × ${s.chosen_shares != null ? s.chosen_shares : '?'} 份（挂在第 ${hit + 1} 档这堵墙的下一档）</span>`
+            : `<span class="loss">✗ 不挂：${escapeHtml(s.skip_reason || '')}</span>`;
+        return `<div class="metric-note" style="margin-bottom:6px">${escapeHtml(s.outcome)} 方向 · 奖励范围 [${s.reward_range[0].toFixed(2)}, ${s.reward_range[1].toFixed(2)}] · 盘口价差 ${s.spread_cents != null ? s.spread_cents.toFixed(0) : '—'}¢</div>
+        <div style="margin-bottom:6px"><b>${ruleTxt}</b> · 阈值 ${s.threshold != null ? s.threshold : '—'}${hit != null ? ` · 命中第 ${hit + 1} 档` : ' · 无档达标'}</div>
+        <div style="margin-bottom:6px">${result}</div>
+        <table class="data-table">
+            <thead><tr>
+                <th>档位</th><th>价格</th><th>盘口量</th><th>累计</th><th>命中</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    }).join('<div style="height:12px"></div>');
+}
+
 function renderLadder(data) {
     if (!data.sides || !data.sides.length) {
         return '<span class="metric-note">无可预演的方向（订单簿缺失或预算为 0）</span>';
     }
-    return renderGapSingle(data);
+    // 按顶层 placement_mode 分派:两套策略的 side 字段结构不同,不能共用渲染。
+    return data.placement_mode === 'legacy_wall'
+        ? renderLegacyWall(data)
+        : renderGapSingle(data);
 }
 
 async function toggleLadder(mid, i) {

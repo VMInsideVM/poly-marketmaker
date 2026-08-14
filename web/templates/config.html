@@ -109,7 +109,14 @@
             </div>
         </div>
 
-        <h3>挂单参数（断层单档选一档）</h3>
+        <h3>挂单参数</h3>
+        <div class="form-group">
+            <label>挂单模式</label>
+            <select name="placement_mode" id="placement-mode" onchange="updatePlacementMode()">
+                <option value="gap_single">断层单档（现行策略）</option>
+                <option value="legacy_wall">厚墙（v1.0.15 老策略）</option>
+            </select>
+        </div>
         <div id="gap-single-params">
             <div class="form-grid">
                 <div class="form-group"><label>宽断层阈值 (美分，&gt;此值走规则1)</label><input type="number" name="gap_wide_cents" step="0.1"></div>
@@ -117,6 +124,22 @@
                 <div class="form-group"><label>悬崖探测 (美分，区间下沿往下此距离内无买档则该侧不挂；0=关)</label><input type="number" name="cliff_probe_cents" step="0.1"></div>
             </div>
             <p class="hint" style="color:#888;font-size:12px">按<b>整个买单簿</b>「相邻档最大价差」把整个市场归到三级之一：&gt;宽断层→规则1；中~宽→规则2；&lt;中→规则3。三级各有一道「高位风险系数和」市场闸门：断层上方到买一那一段的风险系数之和 ≥ 该级门槛才继续，否则整市场不挂。规则1 默认 20，规则2/3 默认 0（0=不设这道闸）。分级和高位系数和看全簿（含奖励区间外的档，那里的深坑才判得出来）；挂单价仍只在奖励区间内选。各级的「选档系数门槛」「高位系数和门槛」「金额数值表」按下方档位模块逐档配置。风险系数＝盘口量÷(最低份数×金额数值)。</p>
+        </div>
+        <div id="legacy-wall-params">
+            <div class="form-grid">
+                <div class="form-group"><label>厚墙阈值（1 美分盘，某档挂量 &gt;此值算一堵墙）</label><input type="number" name="legacy_wall_threshold" step="1"></div>
+                <div class="form-group"><label>累计阈值（0.1 美分盘，从买一累加 &gt;此值即停）</label><input type="number" name="legacy_cumulative_threshold" step="1"></div>
+                <div class="form-group">
+                    <label>挂单份数</label>
+                    <select name="order_size_mode" id="order-size-mode" onchange="updatePlacementMode()">
+                        <option value="min">最低合格份额（拿奖励的最小量）</option>
+                        <option value="custom">按美元上限</option>
+                        <option value="balance">全额余额</option>
+                    </select>
+                </div>
+                <div class="form-group" id="order-size-custom-group"><label>金额上限（美元，仅「按美元上限」用）</label><input type="number" name="order_size_custom_usd" step="1"></div>
+            </div>
+            <p class="hint" style="color:#888;font-size:12px">v1.0.15 的老策略：在买单簿里找到第一堵够厚的墙，把买单挂在<b>它下面一档</b>，让那堵墙替你挡住砸盘。1 美分盘看单档挂量是否超「厚墙阈值」；0.1 美分盘从买一往下累加，累计超「累计阈值」即停。<b>找到第一堵墙就定死</b>——若它的下一档超出可挂范围或出了奖励区间，整个市场就不挂，不会再往下找第二堵墙。挂单价必须落在奖励区间内。<br>老策略下<b>档位模块只用来圈定做哪些份额档的市场</b>（只看「档位值」和「启用」），它的挂单份数、三级选档门槛、高位系数和门槛、金额数值表<b>全部忽略</b>；份数改由上面的「挂单份数」决定。<br>⚠️ 监控侧的悬崖复查、实时奖励复查、盘口价差复查在老策略下仍然生效（它们与定价无关）。想要纯 v1.0.15 行为，把上面的「悬崖探测」配成 0。</p>
         </div>
         <div class="form-group">
             <label>止盈方式</label>
@@ -376,6 +399,7 @@ function loadStrategy(tid) {
         if (skipNew) skipNew.checked = !!data.skip_new_markets;
         updateSkipNewCol();
         updateStopMode();
+        updatePlacementMode();
     });
 
     // 品类勾选要「模板(哪些已选)+ 目录(列表/计数)」都到齐再渲染,期间显示加载中
@@ -388,6 +412,18 @@ function loadStrategy(tid) {
             data.skip_new_other
         );
     });
+}
+
+// 挂单模式切换:两套策略的参数块互斥显示。份数「按美元上限」时才显示金额上限框。
+function updatePlacementMode() {
+    const mode = (document.getElementById('placement-mode') || {}).value || 'gap_single';
+    const gap = document.getElementById('gap-single-params');
+    const legacy = document.getElementById('legacy-wall-params');
+    if (gap) gap.style.display = (mode === 'gap_single') ? '' : 'none';
+    if (legacy) legacy.style.display = (mode === 'legacy_wall') ? '' : 'none';
+    const sizeMode = (document.getElementById('order-size-mode') || {}).value || 'min';
+    const custom = document.getElementById('order-size-custom-group');
+    if (custom) custom.style.display = (mode === 'legacy_wall' && sizeMode === 'custom') ? '' : 'none';
 }
 
 // 止损方式切换:按比例只显示「比例」框,按固定金额只显示「固定美分」框。
@@ -571,6 +607,8 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     data.stop_loss_mode = (document.getElementById('stop-loss-mode') || {}).value || 'percent';
     data.take_profit_mode = (document.getElementById('take-profit-mode') || {}).value || 'maker';
     data.liquidate_target_mode = (document.getElementById('liquidate-target-mode') || {}).value || 'balance';
+    data.placement_mode = (document.getElementById('placement-mode') || {}).value || 'gap_single';
+    data.order_size_mode = (document.getElementById('order-size-mode') || {}).value || 'min';
     // checkbox 同 select，不在 input[type=number] 里，单独收。
     data.skip_new_markets = !!(document.getElementById('skip-new-markets') || {}).checked;
     // 小时数留空 -> parseFloat('')=NaN，归 0（= 不筛），别让 NaN 变成 JSON null。
