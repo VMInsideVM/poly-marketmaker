@@ -145,3 +145,36 @@ def test_dead_template_keys_no_longer_stored(tmp_path, monkeypatch):
     client.post("/api/settings", json={"rule1_min_coeff": 9, "amount_value_table": []})
     tmpl = db.get_template(db.get_default_template_id())
     assert "rule1_min_coeff" not in tmpl and "amount_value_table" not in tmpl
+
+
+def test_placement_mode_defaults_to_gap_single(tmp_path, monkeypatch):
+    client, db = _client_with_db(tmp_path, monkeypatch)
+    tid = db.get_default_template_id()
+    tmpl = db.get_template(tid)
+    assert tmpl["placement_mode"] == "gap_single"
+    assert tmpl["legacy_wall_threshold"] == 2000
+    assert tmpl["legacy_cumulative_threshold"] == 6000
+    assert tmpl["order_size_mode"] == "min"
+    assert tmpl["order_size_custom_usd"] == 0
+
+
+def test_legacy_keys_roundtrip_via_template_put(tmp_path, monkeypatch):
+    client, db = _client_with_db(tmp_path, monkeypatch)
+    tid = db.get_default_template_id()
+    r = client.put(
+        f"/api/templates/{tid}",
+        json={
+            "placement_mode": "legacy_wall",
+            "legacy_wall_threshold": 1500,
+            "legacy_cumulative_threshold": 5000,
+            "order_size_mode": "balance",
+            "order_size_custom_usd": 25,
+        },
+    )
+    assert r.status_code == 200
+    saved = db.get_template(tid)
+    assert saved["placement_mode"] == "legacy_wall"
+    assert saved["legacy_wall_threshold"] == 1500
+    assert saved["legacy_cumulative_threshold"] == 5000
+    assert saved["order_size_mode"] == "balance"
+    assert saved["order_size_custom_usd"] == 25

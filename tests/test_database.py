@@ -58,13 +58,16 @@ def test_template_defaults_has_exposure_keys():
     assert TEMPLATE_DEFAULTS["max_exposure_shares"] == 500
     assert TEMPLATE_DEFAULTS["max_concurrent_markets"] == 10
     assert TEMPLATE_DEFAULTS["cliff_probe_cents"] == 2
-    assert "order_size_mode" not in TEMPLATE_DEFAULTS
-    assert "order_size_custom_usd" not in TEMPLATE_DEFAULTS
+    # 老策略五个模板键:placement_mode 与四个老策略参数(已恢复)
+    assert TEMPLATE_DEFAULTS["placement_mode"] == "gap_single"
+    assert TEMPLATE_DEFAULTS["legacy_wall_threshold"] == 2000
+    assert TEMPLATE_DEFAULTS["legacy_cumulative_threshold"] == 6000
+    assert TEMPLATE_DEFAULTS["order_size_mode"] == "min"
+    assert TEMPLATE_DEFAULTS["order_size_custom_usd"] == 0
     assert "max_buy_orders_per_wallet" not in TEMPLATE_DEFAULTS
     # laddering / 单份奖励阈值 已删:确保不再回归默认值
     for k in (
         "tier_rules",
-        "placement_mode",
         "min_price_double_cents",
         "tier_match_var",
         "per_share_reward_enabled",

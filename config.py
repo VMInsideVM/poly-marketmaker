@@ -100,6 +100,16 @@ TEMPLATE_DEFAULTS = {
     "small_position_shares": 20.0,
     "liquidate_target_mode": "balance",  # "balance"=卖到余额线 | "next_order"=卖到够下一单
     "liquidate_target_usd": 4.0,
+    # 挂单模式:gap_single=断层单档(现行);legacy_wall=v1.0.15 老策略「找厚墙、挂墙
+    # 下一档」。默认 gap_single,升级零行为变化。模板级,可让部分钱包跑老策略做对比。
+    "placement_mode": "gap_single",
+    # 老策略的两个阈值(默认值即 v1.0.15 的写死常量,不改即等价原版)。
+    "legacy_wall_threshold": 2000,  # 1 美分盘:某档挂量 > 此值算一堵墙
+    "legacy_cumulative_threshold": 6000,  # 0.1 美分盘:累计挂量 > 此值即停
+    # 老策略的挂单份数:min=最低合格份额 | custom=按美元上限 | balance=全额。
+    # gap_single 模式用档位模块的 shares,不看这两个键。
+    "order_size_mode": "min",
+    "order_size_custom_usd": 0,
     # 档位模块:按市场最低奖励份额(rewards_min_size)精确匹配的挂单参数组,取代了
     # 原先的奖励最低份额范围筛选、选档系数门槛与金额数值表(均已下沉到每个档位内)。
     # 每项 {size, enabled, shares, rule1/2/3_min_coeff, gap_high_coeff_sum_min,
