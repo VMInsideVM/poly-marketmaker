@@ -1,0 +1,84 @@
+# 三级各自的高位系数和闸门
+
+日期：2026-08-14
+状态：设计已确认，待实现
+
+## 背景
+
+网关式单档挂单按买单簿相邻价差把市场归到三级（规则1 宽断层 / 规则2 中断层 / 规则3 密盘），但「断层上方到买一的厚度够不够」这道市场级闸门只有规则1 有（`gap_high_coeff_sum_min`，默认 20）。规则2 和规则3 直接进选档，不看厚度。
+
+用户要求规则2 也有这道闸：中断层（5 到 10¢）的市场，也得先满足「断层上方到买一」的厚度要求，才用规则2 的选档系数门槛去挂单。既然要加，三级就配齐，规则3 一并加上，默认关闭。
+
+配套背景：2026-08-14 同日已把断层口径从「奖励区间内」改成「整个买单簿」（见 `2026-07-03-gap-single-placement-design.md` 文末追加）。本设计基于那个口径，「高位」指全簿上断层上方那一侧的全部买档，含奖励区间外的档。
+
+## 设计
+
+三级结构完全统一：
+
+```
+按全簿相邻价差归级
+  → 该级的「高位系数和门槛」闸门（不过 = 整个 token 侧不挂）
+  → 该级的「选档系数门槛」自上而下顺延选一档
+```
+
+「高位」的定义三级共用，就是 `levels[0 .. split_idx]`，即最大断层上方那一侧到买一的全部买档。系数和的算法不变：`Σ 挂量 ÷ (最低份数 × 金额数值)`。
+
+判闸口径沿用规则1 现有约定：`high_sum < 门槛` 才拦，`== 门槛` 放行。
+
+边界：全簿只有一档时 `max_gap = 0`、`split_idx = 0`，归规则3，高位就是那唯一一档，闸门拿它的系数去比。这是既有 `split_idx` 逻辑的自然结果，不额外特判。
+
+规则1 的行为一字不改。规则2 和规则3 的新门槛默认 0，而 `high_sum` 恒 ≥ 0，所以 `high_sum < 0` 永不成立，默认状态下这道闸对规则2/3 是空操作。
+
+### 参数
+
+三个门槛都放在档位模块（`size_tiers`）里，与三级选档门槛 `rule1/2/3_min_coeff` 同级，逐档配置。
+
+| 键 | 默认 | 对应 |
+|---|---|---|
+| `gap_high_coeff_sum_min` | 20 | 规则1 |
+| `rule2_high_coeff_sum_min` | 0 | 规则2（新增） |
+| `rule3_high_coeff_sum_min` | 0 | 规则3（新增） |
+
+规则1 那个键**保留现有名字**，不改成 `rule1_high_coeff_sum_min`。命名不对称是已知代价，换来的是零迁移：这个键已经带着值跑在生产配置里（`size_tiers` 是存在 `template_settings` 表里的 JSON），改名意味着要写迁移代码去改用户已有的配置。这条是资金路径，迁移写漏会让闸门静默变成 0（不拦），后果比命名难看严重得多。`engine/tiers.py` 的 `_TIER_COEFF_KEYS` 旁边注明「`gap_high_coeff_sum_min` 就是规则1 的那个」。
+
+### 兼容性
+
+新键默认 0 等于不拦，所以升级后不改配置，行为与升级前完全一致。要生效需要用户去配置页填值。这不是行为改变型发布。
+
+## 语义变化
+
+决策 dict 里 `high_sum` / `gate_min` 目前只有规则1 有值，规则2/3 是 `None`。改完三级都有值。
+
+连带影响两处：
+
+- `markets.html` 预演页的「高位系数和 X ≥ 闸门」那行现在用 `s.rule === 1` 判断是否显示，改成三级都显示。
+- `gap_single_reason` / `gap_single_price_basis` 目前也按 `rule == 1` 分支输出高位系数和，改成三级统一输出。
+
+现有测试 `test_explain_non_rule1_gate_min_none` 断言的正是旧语义（规则2/3 的 `gate_min` 为 `None`），需要跟着改成断言新语义。
+
+## 改动落点
+
+- `engine/tiers.py`：`_TIER_COEFF_KEYS` 加两个键，校验逻辑（非负、数字）自动覆盖。
+- `engine/laddering.py`：`explain_gap_single_order` 签名加两个参数；三级归级后统一算 `high_sum` 并与该级门槛比对；`plan_gap_single_order` / `compute_market_single_orders` / `preview_gap_single_market` 三个透传层同步；两个文案函数去掉 `rule == 1` 分支。
+- `engine/manager.py`：`place_orders` 从 tier 读两个新值并透传。
+- `web/routes.py`：ladder 预览路由同样透传。
+- `web/templates/config.html`：档位模块卡片加两个输入框，读写与现有 `.st-gate` 同模式。
+- `web/templates/markets.html`：闸门行不再限规则1。
+- `web/templates/help.html`：「规则1 的额外闸门」一节改写为三级通用。
+
+## 测试
+
+纯函数为主，`tests/test_gap_single.py`：
+
+- 规则2 高位系数和低于门槛 → 不挂；等于门槛 → 放行（边界与规则1 同约定）。
+- 规则3 同上两条。
+- 规则2/3 门槛为 0（默认）时，无论 `high_sum` 多小都放行，证明零回归。
+- 三个门槛互不串用：给规则2 设高门槛、规则1/3 设 0，验证只有规则2 的市场被拦，反之亦然。
+- `gate_min` / `high_sum` 在三级都有值。
+- 文案：规则2/3 被闸门拦下时，`skip_reason` 和 `price_basis` 说明是哪一级的高位系数和不够。
+
+契约层：`tests/test_tiers.py` 补两个新键的校验用例；`tests/test_settings_routes.py` 确认新键能存取。
+
+## 未决
+
+无。
