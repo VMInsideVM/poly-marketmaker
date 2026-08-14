@@ -394,3 +394,26 @@ def test_compute_both_sides_share_budget():
     out = compute_market_legacy_orders(a, b, 6.0, 500, 1000.0, "min", 0.0)
     assert out["a"] == [(0.29, 20)]
     assert out["b"] == []
+
+
+def test_explain_spread2_does_not_claim_hit_beyond_bid1():
+    # max_spread=2 只看买一:买一 1000 不够厚 -> 不挂。第2档虽有 3000,
+    # 但这条规则根本不看它,不能把它报成「命中」。
+    d = _explain(_make_bids([(0.30, 1000), (0.29, 3000)]), rmin=0.20, rmax=0.35)
+    assert d["action"] == "skip"
+    assert d["hit_index"] is None
+    assert "3000" not in d["skip_reason"]
+
+
+def test_explain_ge3_does_not_claim_hit_below_min_price():
+    # max_spread=5、tick=0.01 -> min_price=0.25;0.20 那档定价函数扫都没扫到,
+    # 不能报成命中。
+    d = _explain(
+        _make_bids([(0.30, 100), (0.29, 100), (0.20, 5000)]),
+        max_spread=5,
+        rmin=0.10,
+        rmax=0.35,
+    )
+    assert d["action"] == "skip"
+    assert d["hit_index"] is None
+    assert "5000" not in d["skip_reason"]

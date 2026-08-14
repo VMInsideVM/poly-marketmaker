@@ -170,8 +170,25 @@ def explain_legacy_order(
         wall_threshold=wall_threshold,
         cumulative_threshold=cumulative_threshold,
     )
-    # 命中档:累计路径=累计首次超阈值那档;厚墙路径=第一个挂量超阈值那档。
-    for i, lv in enumerate(levels):
+    # 命中档必须按「定价函数实际扫过的范围」来找,否则会把定价根本没看过的深档
+    # 标成命中,给出一个从未发生的跳过理由(审计/预演都会被误导)。扫描边界与
+    # determine_order_price 的三条路一一对应:
+    # - 累计路径(is_fine_tick):全簿累加,无边界。
+    # - max_spread==2(对应 _spread2_coarse):只看买一,根本不考虑更深的档。
+    # - max_spread>=3(对应 _spread_ge3_coarse):价格 < min_price 即停止扫描。
+    if is_fine_tick:
+        scanned = levels
+    elif max_spread == 2:
+        scanned = levels[:1]
+    else:
+        min_price = levels[0]["price"] - max_spread * tick_size
+        scanned = []
+        for lv in levels:
+            if lv["price"] < min_price:
+                break
+            scanned.append(lv)
+
+    for i, lv in enumerate(scanned):
         hit = (
             lv["cum"] > cumulative_threshold
             if is_fine_tick
@@ -187,7 +204,7 @@ def explain_legacy_order(
         if d["hit_index"] is None:
             d["skip_reason"] = (
                 f"{_RULE_LABEL[d['rule']]}:无档达到阈值 {d['threshold']:g}"
-                f"(最厚 {max(lv['size'] for lv in levels):g}) → 不挂"
+                f"(扫描范围内最厚 {max(lv['size'] for lv in scanned):g}) → 不挂"
             )
         else:
             d["skip_reason"] = (
