@@ -138,6 +138,23 @@ def test_ladder_uses_tier_shares(client):
     assert side["action"] == "place" and side["chosen_shares"] == 120
 
 
+def test_ladder_gate_min_passthrough(client, monkeypatch):
+    # 档位模块显式配了非零的规则3 高位门槛 -> 路由透传层必须把 gate_min 带到响应里
+    # (Task 4 的透传路径此前完全没有测试覆盖,preview_gap_single_market 漏返回时不会变红)。
+    class GateDB(_FakeDB):
+        def get_template_for(self, addr):
+            t = dict(_FakeDB.get_template_for(self, addr))
+            tier = dict(t["size_tiers"][0])
+            tier["rule3_high_coeff_sum_min"] = 6.0
+            t["size_tiers"] = [tier]
+            return t
+
+    monkeypatch.setattr(routes, "db", GateDB())
+    r = client.get("/api/markets/c1/ladder?wallet=0xw")
+    side = r.get_json()["sides"][0]
+    assert side["gate_min"] == 6.0
+
+
 def test_ladder_no_matching_tier_shows_skip(client, monkeypatch):
     class NoTierDB(_FakeDB):
         def get_template_for(self, addr):

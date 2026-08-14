@@ -1291,6 +1291,7 @@ def _ladder_payload(market_id):
                 "max_gap": 0.0,
                 "min_coeff": None,
                 "high_sum": None,
+                "gate_min": None,
                 "gate_passed": False,
                 "action": "skip",
                 "chosen_index": None,

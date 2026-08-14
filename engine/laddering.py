@@ -452,6 +452,7 @@ def preview_gap_single_market(
             "max_gap": d["max_gap"],
             "min_coeff": d["min_coeff"],
             "high_sum": d["high_sum"],
+            "gate_min": d["gate_min"],
             "gate_passed": d["gate_passed"],
             "action": d["action"],
             "chosen_index": d["chosen_index"],

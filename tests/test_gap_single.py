@@ -461,6 +461,28 @@ def test_preview_both_sides():
     assert out["b"]["action"] == "place"
 
 
+def test_preview_side_carries_rule1_gate_min():
+    # 规则1(宽断层),gap_high_coeff_sum_min=20 -> side["gate_min"] 须等于该门槛。
+    a = _pside(
+        [_b(0.28, 50), _b(0.27, 30), _b(0.15, 400)]
+    )  # 最大断层 12¢ > 10 -> 规则1
+    out = preview_gap_single_market(a, None, AV, 10, 5, 20, 0, 0, 0)
+    sa = out["a"]
+    assert sa["rule"] == 1
+    assert sa["gate_min"] == 20
+
+
+def test_preview_side_carries_rule2_gate_min():
+    # 规则2(中断层),显式传 rule2_high_coeff_sum_min=7.5 -> side["gate_min"] 须回传该值。
+    a = _pside([_b(0.28, 50), _b(0.21, 400)])  # 最大断层 7¢,在 [5,10) -> 规则2
+    out = preview_gap_single_market(
+        a, None, AV, 10, 5, 20, 0, 0, 0, rule2_high_coeff_sum_min=7.5
+    )
+    sa = out["a"]
+    assert sa["rule"] == 2
+    assert sa["gate_min"] == 7.5
+
+
 from engine.laddering import (
     explain_gap_single_order,
     compute_market_single_orders,
