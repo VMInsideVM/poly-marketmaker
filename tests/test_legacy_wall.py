@@ -228,3 +228,19 @@ def test_ge3_wall_at_last_level_has_no_next():
         reward_range_max=0.32,
     )
     assert result is None
+
+
+def test_ge3_does_not_search_second_wall_when_first_next_out_of_reward_range():
+    # 钉住「找到第一堵墙就定死」:第一堵墙 0.30(3000) 的下一档 0.29 在价格带内
+    # (>= min_price 0.27)但**出了奖励区间上沿 0.285** -> 不挂。
+    # 若实现漏掉那句 return None 而继续往下找,会找到 0.28(5000) 这堵更厚的墙,
+    # 它的下一档 0.27 价格带与奖励区间都合格 -> 会错误地返回 0.27。
+    bids = _make_bids([(0.30, 3000), (0.29, 100), (0.28, 5000), (0.27, 100)])
+    result = determine_order_price(
+        bids=bids,
+        max_spread=3,
+        tick_size=0.01,
+        reward_range_min=0.10,
+        reward_range_max=0.285,
+    )
+    assert result is None
