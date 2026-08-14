@@ -27,6 +27,8 @@ def _plan(
     x3=0,
     cliff=0,
     shares=None,
+    gate2=0,
+    gate3=0,
 ):
     return plan_gap_single_order(
         bids,
@@ -42,6 +44,8 @@ def _plan(
         x3,
         cliff_probe_cents=cliff,
         shares=shares,
+        rule2_high_coeff_sum_min=gate2,
+        rule3_high_coeff_sum_min=gate3,
     )
 
 
@@ -152,6 +156,8 @@ def _explain(
     x1=0,
     x2=0,
     x3=0,
+    gate2=0,
+    gate3=0,
 ):
     return explain_gap_single_order(
         bids,
@@ -165,6 +171,8 @@ def _explain(
         x1,
         x2,
         x3,
+        rule2_high_coeff_sum_min=gate2,
+        rule3_high_coeff_sum_min=gate3,
     )
 
 
@@ -174,7 +182,7 @@ def test_explain_normal_market_full_decision():
     assert d["rule"] == 3
     assert d["max_gap"] == 1.0
     assert d["min_coeff"] == 0
-    assert d["high_sum"] is None
+    assert d["high_sum"] == 1.25  # 断层就在这两档之间,高位仅{0.28} 50/(20*2)
     assert d["gate_passed"] is True
     assert d["chosen_index"] == 0
     assert d["price"] == 0.28
@@ -214,7 +222,7 @@ def test_explain_mid_gap_no_gate():
     d = _explain([_b(0.28, 50), _b(0.21, 400)])
     assert d["rule"] == 2
     assert d["max_gap"] == 7.0
-    assert d["high_sum"] is None
+    assert d["high_sum"] == 1.25  # 高位仅{0.28};默认门槛0 -> 不拦
     assert d["gate_passed"] is True
     assert d["chosen_index"] == 0
 
@@ -251,14 +259,17 @@ def test_explain_rule1_carries_gate_min():
     assert d["gate_min"] == 25
 
 
-def test_explain_non_rule1_gate_min_none():
-    d = _explain([_b(0.28, 50), _b(0.21, 400)])  # 断层7¢ -> 规则2
+def test_explain_gate_min_present_on_every_rule():
+    # 三级都带 gate_min/high_sum(旧版只有规则1 有,规则2/3 是 None)。
+    d = _explain([_b(0.28, 50), _b(0.21, 400)], gate2=7)  # 断层7¢ -> 规则2
     assert d["rule"] == 2
-    assert d["gate_min"] is None
-    d3 = _explain([_b(0.28, 50), _b(0.27, 40)])  # 断层1¢ -> 规则3
+    assert d["gate_min"] == 7
+    assert d["high_sum"] is not None
+    d3 = _explain([_b(0.28, 50), _b(0.27, 40)], gate3=2)  # 断层1¢ -> 规则3
     assert d3["rule"] == 3
-    assert d3["gate_min"] is None
-    dn = _explain([_b(0.05, 500)])  # 区间外 -> rule None
+    assert d3["gate_min"] == 2
+    assert d3["high_sum"] is not None
+    dn = _explain([_b(0.05, 500)])  # 区间内无买档 -> rule None
     assert dn["gate_min"] is None
 
 
@@ -792,3 +803,65 @@ def test_chosen_index_points_into_whole_book_levels():
     assert d["action"] == "place"
     assert d["price"] == 0.28
     assert d["levels"][d["chosen_index"]]["price"] == 0.28
+
+
+# --- 规则2/3 各自的高位系数和闸门(2026-08-14) -------------------------------
+
+
+def test_rule2_gate_blocks_when_high_sum_below():
+    # 断层 7¢ -> 规则2。高位={0.28} 系数 50/(20*2)=1.25 < 门槛 5 -> 整市场不挂。
+    assert _plan([_b(0.28, 50), _b(0.21, 400)], gate2=5) is None
+
+
+def test_rule2_gate_passes_at_exactly_threshold():
+    # 高位系数和恰等门槛 -> 放行(与规则1 同约定:< 才拦)。
+    assert _plan([_b(0.28, 50), _b(0.21, 400)], gate2=1.25) == (0.28, 20)
+
+
+def test_rule2_gate_default_zero_never_blocks():
+    # 默认 0:高位再薄也放行,升级零回归。
+    assert _plan([_b(0.28, 1), _b(0.21, 400)]) == (0.28, 20)
+
+
+def test_rule3_gate_blocks_when_high_sum_below():
+    # 断层 1¢ -> 规则3。高位={0.28} 系数 1.25 < 门槛 3 -> 不挂。
+    assert _plan([_b(0.28, 50), _b(0.27, 40)], gate3=3) is None
+
+
+def test_rule3_gate_passes_at_exactly_threshold():
+    assert _plan([_b(0.28, 50), _b(0.27, 40)], gate3=1.25) == (0.28, 20)
+
+
+def test_rule3_gate_default_zero_never_blocks():
+    assert _plan([_b(0.28, 1), _b(0.27, 40)]) == (0.28, 20)
+
+
+def test_gates_do_not_cross_between_rules():
+    # 规则2 的市场(断层7¢)只认 gate2:gate/gate3 抬到 999 也不该拦它。
+    assert _plan([_b(0.28, 50), _b(0.21, 400)], gate=999, gate3=999) == (0.28, 20)
+    # 规则3 的市场(断层1¢)只认 gate3。
+    assert _plan([_b(0.28, 50), _b(0.27, 40)], gate=999, gate2=999) == (0.28, 20)
+    # 规则1 的市场(断层12¢)只认 gate。
+    bids1 = [_b(0.28, 50), _b(0.27, 800), _b(0.15, 400)]
+    assert _plan(bids1, gate2=999, gate3=999) == (0.28, 20)
+
+
+def test_rule1_gate_behavior_unchanged():
+    # 回归:规则1 的闸门与默认 20 一字不动。
+    assert _plan([_b(0.28, 50), _b(0.27, 30), _b(0.15, 400)]) is None
+    assert _plan([_b(0.28, 50), _b(0.27, 800), _b(0.15, 400)]) == (0.28, 20)
+
+
+def test_rule2_gate_skip_reason_names_the_rule():
+    d = _explain([_b(0.28, 50), _b(0.21, 400)], gate2=5)
+    assert d["action"] == "skip"
+    assert "规则2" in d["skip_reason"]
+    assert "高位系数和" in d["skip_reason"]
+    assert "整市场不挂" in d["skip_reason"]
+
+
+def test_single_level_book_gate_uses_that_level():
+    # 边界(spec 明确):全簿只有一档 -> max_gap=0 -> 规则3,高位就是那唯一一档。
+    # 系数 50/(20*2)=1.25:门槛 2 拦下,门槛 1 放行。
+    assert _plan([_b(0.28, 50)], gate3=2) is None
+    assert _plan([_b(0.28, 50)], gate3=1) == (0.28, 20)

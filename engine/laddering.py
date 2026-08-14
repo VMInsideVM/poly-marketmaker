@@ -63,6 +63,8 @@ def explain_gap_single_order(
     rule3_min_coeff,
     cliff_probe_cents=0,
     shares=None,
+    rule2_high_coeff_sum_min=0.0,
+    rule3_high_coeff_sum_min=0.0,
 ):
     """网关式单档挂单的完整判断(纯函数,不下单)。
 
@@ -72,9 +74,9 @@ def explain_gap_single_order(
       rule: 1|2|3|None(None=区间内无买档/无簿)
       max_gap: 最大相邻价差(美分);<2 档时 0
       min_coeff: 该级选档门槛(rule1/2/3 之一);rule=None 时 None
-      high_sum: 规则1 高位系数和;非规则1 为 None
-      gate_min: 规则1 高位系数和门槛(=gap_high_coeff_sum_min);非规则1 为 None
-      gate_passed: 规则1 闸门是否通过;规则2/3 恒 True;rule=None 为 False
+      high_sum: 该级高位系数和(断层上方到买一);rule=None 时 None
+      gate_min: 该级高位系数和门槛(规则1=gap_high_coeff_sum_min,规则2/3 各自的键);rule=None 为 None
+      gate_passed: 该级闸门是否通过;rule=None 为 False
       levels: 全部买档(价降序),每项 {price,size,coeff,in_range,high_side,chosen};
               断层/高位按全簿算,故区间外的档也在列(标 in_range=False),选档只认 in_range
       chosen_index: 选中档在 levels 的下标;跳过为 None
@@ -84,6 +86,7 @@ def explain_gap_single_order(
     归级口径:价差 10/5 归中一级(规则1 严格 >宽、规则3 严格 <中);高位系数和 ==
     门槛放行;选档严格 > 门槛。价差按分四舍五入去浮点尘。
     断层与高位取值范围 = 整个买单簿(含区间外的档);选档范围 = 奖励区间内。
+    三级各有一道高位系数和闸门(规则2/3 默认 0 = 不拦);< 门槛才拦,== 放行。
     """
     d = {
         "action": "skip",
@@ -141,25 +144,25 @@ def explain_gap_single_order(
     d["max_gap"] = max_gap
     d["levels"] = levels
 
-    # 按最大价差归级,取该级的选档门槛;仅规则1(宽断层)加「高位风险系数和」市场闸门。
+    # 按最大价差归级,取该级的选档门槛与高位系数和门槛;三级结构完全一致。
+    # 高位系数和闸门原先只有规则1 有,现在三级各一个(规则2/3 默认 0 = 不拦)。
     if max_gap > gap_wide_cents:
-        rule, min_coeff = 1, rule1_min_coeff
-        high_sum = sum(lv["coeff"] for lv in levels[: split_idx + 1])
-        d["rule"], d["min_coeff"], d["high_sum"] = 1, min_coeff, high_sum
-        d["gate_min"] = gap_high_coeff_sum_min
-        if high_sum < gap_high_coeff_sum_min:
-            d["skip_reason"] = (
-                f"规则1(宽断层,最大断层{max_gap:g}¢):高位系数和 {high_sum:g}"
-                f" < 门槛 {gap_high_coeff_sum_min:g} → 整市场不挂"
-            )
-            return d
-        d["gate_passed"] = True
+        rule, min_coeff, gate_min = 1, rule1_min_coeff, gap_high_coeff_sum_min
     elif max_gap >= gap_mid_cents:
-        rule, min_coeff = 2, rule2_min_coeff
-        d["rule"], d["min_coeff"], d["gate_passed"] = 2, min_coeff, True
+        rule, min_coeff, gate_min = 2, rule2_min_coeff, rule2_high_coeff_sum_min
     else:
-        rule, min_coeff = 3, rule3_min_coeff
-        d["rule"], d["min_coeff"], d["gate_passed"] = 3, min_coeff, True
+        rule, min_coeff, gate_min = 3, rule3_min_coeff, rule3_high_coeff_sum_min
+    # 高位 = 最大断层上方到买一的全部买档(全簿口径,含奖励区间外的档)。
+    high_sum = sum(lv["coeff"] for lv in levels[: split_idx + 1])
+    d["rule"], d["min_coeff"] = rule, min_coeff
+    d["high_sum"], d["gate_min"] = high_sum, gate_min
+    if high_sum < gate_min:
+        d["skip_reason"] = (
+            f"{_GAP_RULE_LABEL[rule].rstrip(')')},最大断层{max_gap:g}¢):"
+            f"高位系数和 {high_sum:g} < 门槛 {gate_min:g} → 整市场不挂"
+        )
+        return d
+    d["gate_passed"] = True
 
     # 顺延:自上而下第一个 coeff > 该级门槛;只在奖励区间内的档里选(区间外不可挂)。
     # idx 是 levels(全簿)的下标,chosen_index 据此取值,前端/记账按同一份 levels 索引。
@@ -191,6 +194,8 @@ def plan_gap_single_order(
     rule3_min_coeff,
     cliff_probe_cents=0,
     shares=None,
+    rule2_high_coeff_sum_min=0.0,
+    rule3_high_coeff_sum_min=0.0,
 ):
     """网关式单档挂单(v4 用户策略)。explain_gap_single_order 的薄壳:
     返回 (price, shares) 或 None(不挂)。完整判断依据见 explain_gap_single_order。"""
@@ -208,6 +213,8 @@ def plan_gap_single_order(
         rule3_min_coeff,
         cliff_probe_cents=cliff_probe_cents,
         shares=shares,
+        rule2_high_coeff_sum_min=rule2_high_coeff_sum_min,
+        rule3_high_coeff_sum_min=rule3_high_coeff_sum_min,
     )
     return (d["price"], d["shares"]) if d["action"] == "place" else None
 
