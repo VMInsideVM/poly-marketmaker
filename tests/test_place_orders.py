@@ -519,3 +519,15 @@ def test_place_orders_rule2_gate_default_still_places():
     api.get_orderbook.return_value = _ob([(0.28, 50), (0.21, 400)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
     assert api.place_limit_buy.call_count == 1
+
+
+def test_place_orders_rule2_gate_records_gap_skip_reason():
+    # explain 那路的透传若漏改:决策仍说 place -> _maybe_record_gap_skip 早退 -> 静默无记录。
+    tmpl = _gap_template()
+    tmpl["size_tiers"][0]["rule2_high_coeff_sum_min"] = 5
+    worker, api, db = _make_worker(template=tmpl)
+    api.get_orderbook.return_value = _ob([(0.28, 50), (0.21, 400)], [(0.31, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    skips = _actions(db, "gap_skip")
+    assert len(skips) == 1
+    assert "规则2" in skips[0].kwargs["reason"]
