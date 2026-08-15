@@ -594,12 +594,18 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
         return;
     }
     const data = {};
+    // 清空的输入框(parseFloat('')=NaN)一律不送:NaN 会被 JSON 序列化成 null 落库,
+    // 下一轮引擎读到 null 就崩在 int(None) 上,而那个异常只被 logger.error 吞掉
+    // ——该钱包每轮静默停止交易,UI 上看不出任何异常。不送则后端保留原值。
     this.querySelectorAll('input[type=number][name]').forEach(inp => {
-        data[inp.name] = parseFloat(inp.value);
+        const v = parseFloat(inp.value);
+        if (!isNaN(v)) data[inp.name] = v;
     });
-    // 最长结算天数留空 -> parseFloat('')=NaN -> JSON null(不限);填了就必须 >= 最短,
-    // 否则结算窗口为空、什么都挂不上。
-    if (!isNaN(data.max_settlement_days) && data.max_settlement_days < data.min_settlement_days) {
+    // 例外:最长结算天数是唯一「留空 = 不限」的键,必须显式送 null 才能把它改回不限。
+    const msd = this.querySelector('[name="max_settlement_days"]');
+    if (msd && msd.value.trim() === '') data.max_settlement_days = null;
+    // 填了就必须 >= 最短,否则结算窗口为空、什么都挂不上。
+    if (data.max_settlement_days != null && data.max_settlement_days < data.min_settlement_days) {
         alert('最长结算天数不能小于最短结算天数（留空表示不限）');
         return;
     }

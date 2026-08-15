@@ -229,9 +229,11 @@ def explain_legacy_order(
                     f"(扫描范围内累计 {total:g}) → 不挂"
                 )
             else:
+                # 挂量按 int 显示,与判定口径(int(size) 比阈值)一致:否则盘口 236.24
+                # 会与「累计236」并排出现,看的人相加对不上。
                 d["skip_reason"] = (
                     f"{_RULE_LABEL[d['rule']]}:无档达到阈值 {d['threshold']:g}"
-                    f"(扫描范围内最厚 {max(lv['size'] for lv in scanned):g}) → 不挂"
+                    f"(扫描范围内最厚 {max(int(lv['size']) for lv in scanned):g}) → 不挂"
                 )
         else:
             if is_fine_tick:
@@ -243,7 +245,7 @@ def explain_legacy_order(
             else:
                 d["skip_reason"] = (
                     f"{_RULE_LABEL[d['rule']]}:第{d['hit_index'] + 1}档挂量"
-                    f" {d['hit_size']:g} > 阈值 {d['threshold']:g},但下一档不可挂"
+                    f" {int(d['hit_size']):g} > 阈值 {d['threshold']:g},但下一档不可挂"
                     f"(无下一档/超出可挂范围/出奖励区间) → 不挂"
                 )
         return d
@@ -287,18 +289,35 @@ def legacy_price_basis(d, reward_range_min, reward_range_max):
     levels = d.get("levels") or []
     if not levels:
         return f"无可评估买档;{src}"
+    hit = d.get("hit_index")
+    if d.get("action") == "place":
+        # 挂单成功:只写命中的那堵墙与实际挂的那一档。全簿展开留给跳过分支——
+        # 挂单是每轮高频动作,把几十档买单簿写进 actions 表会迅速撑爆历史
+        # (实测 40 档要 920 字符,而 gap_single 挂单时只写 102)。
+        hv = levels[hit] if hit is not None and hit < len(levels) else None
+        wall = (
+            f"命中第{hit + 1}档 {hv['price']:.4f}×{int(hv['size']):g}"
+            f"(累计{hv['cum']:g})"
+            if hv
+            else "无命中档"
+        )
+        return ";".join(
+            [
+                wall,
+                f"阈值 {d['threshold']:g}",
+                f"挂下一档 @{d['price']:.4f} × {d['shares']}份",
+                src,
+            ]
+        )
+    # 跳过:逐档展开全簿,这是复盘不挂原因的唯一依据。挂量按 int 显示,与判定
+    # 口径(int(size) 比阈值、累计按 int 累加)一致,免得逐档相加对不上累计。
     per = " · ".join(
-        f"{lv['price']:.4f}×{lv['size']:g}(累计{lv['cum']:g})"
-        + ("[命中]" if i == d.get("hit_index") else "")
+        f"{lv['price']:.4f}×{int(lv['size']):g}(累计{lv['cum']:g})"
+        + ("[命中]" if i == hit else "")
         for i, lv in enumerate(levels)
     )
-    parts = [f"买单簿(价降序):{per}", f"阈值 {d['threshold']:g}"]
-    if d.get("action") == "place":
-        parts.append(f"挂下一档 @{d['price']:.4f} × {d['shares']}份")
-    else:
-        parts.append(d.get("skip_reason") or "不挂")
-    parts.append(src)
-    return ";".join(parts)
+    thr = f"阈值 {d['threshold']:g}" if d.get("threshold") is not None else "阈值 —"
+    return ";".join([f"买单簿(价降序):{per}", thr, d.get("skip_reason") or "不挂", src])
 
 
 def compute_market_legacy_orders(

@@ -942,3 +942,26 @@ def test_preview_threads_rule3_gate():
     )
     assert out["a"]["action"] == "skip"
     assert "规则3" in out["a"]["skip_reason"]
+
+
+from engine.laddering import reconcile_buy_orders
+
+
+def test_reconcile_size_tolerance_is_configurable():
+    # 老策略 balance/custom 模式下目标份数随钱包余额漂移,默认 1% 容差会让余额
+    # 每变动一点点就把在挂买单撤掉重挂,反复丢失队列位置(实测余额 100→95 即触发)。
+    # 放宽容差后小幅漂移应保持不动;价格漂移仍必须撤。
+    resting = [{"id": "o1", "price": 0.29, "original_size": 344, "size_matched": 0}]
+    cancel, place = reconcile_buy_orders([(0.29, 327)], resting)
+    assert cancel == ["o1"]  # 默认 1%:撤
+    cancel2, place2 = reconcile_buy_orders(
+        [(0.29, 327)], resting, size_tolerance_pct=0.10
+    )
+    assert cancel2 == []  # 10%:保持
+    assert place2 == []
+    # 容差只放宽「量」,不放宽「价」:价漂了照撤。
+    cancel3, place3 = reconcile_buy_orders(
+        [(0.28, 344)], resting, size_tolerance_pct=0.10
+    )
+    assert cancel3 == ["o1"]
+    assert place3 == [(0.28, 344)]

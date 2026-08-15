@@ -207,7 +207,11 @@ function renderLegacyWall(data) {
                 <td>${L.cum}</td>
                 <td>${i === hit ? '✓ 命中' : ''}</td>
                 <td>${i === chosenIdx ? '✓ 选中' : ''}</td></tr>`).join('');
-        const ruleTxt = s.rule === 'cumulative' ? '累计厚度（0.1 美分盘）' : '厚墙（1 美分盘）';
+        // 悬崖否决发生在归级之前,此时 rule/threshold 都还是 null —— 不能落到
+        // 「厚墙（1 美分盘）」那一支,否则会对 0.1 美分盘打出确定性的错标签。
+        const ruleTxt = s.rule === 'cumulative' ? '累计厚度（0.1 美分盘）'
+            : s.rule === 'wall' ? '厚墙（1 美分盘）'
+            : '未归级';
         const result = s.action === 'place'
             ? `<span class="profit">✓ 挂一单 @ ${fmtP(s.chosen_price)} × ${s.chosen_shares != null ? s.chosen_shares : '?'} 份（挂在第 ${hit + 1} 档这堵墙的下一档）</span>`
             : `<span class="loss">✗ 不挂：${escapeHtml(s.skip_reason || '')}</span>`;
@@ -216,7 +220,7 @@ function renderLegacyWall(data) {
         <div style="margin-bottom:6px">${result}</div>
         <table class="data-table">
             <thead><tr>
-                <th>档位</th><th>价格</th><th>盘口量</th><th>累计</th><th>命中</th><th>选档</th>
+                <th>档位</th><th>价格</th><th>盘口量</th><th>累计(取整)</th><th>命中</th><th>选档</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>`;

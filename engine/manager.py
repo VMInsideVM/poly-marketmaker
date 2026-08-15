@@ -32,6 +32,28 @@ from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
 
+
+def _tmpl_num(tmpl: dict, key: str, default: float) -> float:
+    """读模板里的数字参数,`None` 兜底成默认值。
+
+    配置页的策略表单把清空的数字输入框送成 `null`(parseFloat('') → NaN →
+    JSON null),后端白名单照单全收落库。不兜底的话下一轮 `int(None)` 抛
+    TypeError,而 place_orders 的调用点只有 logger.error —— 该钱包每轮静默
+    失败,UI 上完全看不出来。
+
+    **只认 None,不能写成 `x or default`**:0 是好几个键的合法取值
+    (cliff_probe_cents=0 关闭悬崖否决、order_size_custom_usd=0),被 `or`
+    吞掉会把用户的显式配置换成默认值。
+    """
+    v = tmpl.get(key, default)
+    if v is None:
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 # 盈亏台账补漏起点(北京日)。启动/重启后从这天补到今天;每日跨天再重算。
 # = 项目首次提交日(27cc9bc, 2026-05-17):全量 activity/trades 本来就全拉,前移只是多写
 # 几十行本地记录,没有网络代价。
@@ -258,15 +280,15 @@ class WalletWorker:
         blacklist = self.db.get_blacklist_ids()
         tmpl = self.db.get_template_for(self.wallet_address)
         size_tiers = tmpl.get("size_tiers") or []
-        gap_wide_cents = float(tmpl.get("gap_wide_cents", 10))
-        gap_mid_cents = float(tmpl.get("gap_mid_cents", 5))
-        cliff_probe_cents = float(tmpl.get("cliff_probe_cents", 2))
+        gap_wide_cents = _tmpl_num(tmpl, "gap_wide_cents", 10)
+        gap_mid_cents = _tmpl_num(tmpl, "gap_mid_cents", 5)
+        cliff_probe_cents = _tmpl_num(tmpl, "cliff_probe_cents", 2)
         # max_exposure_usd 是「单市场」敞口上限(YES+NO 合计);跨市场不设全局
         # 美元锁(maker 买单不锁仓,一笔余额垫付所有挂单),总量由 max_concurrent
         # _markets × 单市场敞口 约束。
-        max_exposure_usd = float(tmpl.get("max_exposure_usd", 250))
-        max_exposure_shares = int(tmpl.get("max_exposure_shares", 500))
-        max_concurrent = int(tmpl.get("max_concurrent_markets", 10))
+        max_exposure_usd = _tmpl_num(tmpl, "max_exposure_usd", 250)
+        max_exposure_shares = int(_tmpl_num(tmpl, "max_exposure_shares", 500))
+        max_concurrent = int(_tmpl_num(tmpl, "max_concurrent_markets", 10))
 
         buy_orders = [o for o in open_orders if o.get("side") == "BUY"]
         buys_by_token, markets_with_open = {}, set()
@@ -355,10 +377,12 @@ class WalletWorker:
             # 绝不能把 0 当合法份数(plan 为空 -> reconcile 撤掉现有买单且不补,静默摘牌)。
             tier_shares = int(tier.get("shares", 0) or 0) or None
             placement_mode = str(tmpl.get("placement_mode", "gap_single"))
-            legacy_wall_threshold = int(tmpl.get("legacy_wall_threshold", 2000))
-            legacy_cum_threshold = int(tmpl.get("legacy_cumulative_threshold", 6000))
+            legacy_wall_threshold = int(_tmpl_num(tmpl, "legacy_wall_threshold", 2000))
+            legacy_cum_threshold = int(
+                _tmpl_num(tmpl, "legacy_cumulative_threshold", 6000)
+            )
             order_size_mode = str(tmpl.get("order_size_mode", "min"))
-            order_size_custom_usd = float(tmpl.get("order_size_custom_usd", 0))
+            order_size_custom_usd = _tmpl_num(tmpl, "order_size_custom_usd", 0)
             if (
                 mid not in markets_with_open
                 and len(markets_with_open) >= max_concurrent
@@ -504,8 +528,20 @@ class WalletWorker:
                     cancel_reason = "成交后单侧暂停:撤掉该侧全部买单,直至该侧持仓平掉"
                     cancel_action = "side_pause_cancel"
                 elif budget_ok:
+                    # 老策略的 balance/custom 份数按实时余额算,做市成交会让余额不断
+                    # 漂移(实测余额 100→95 就够让目标份数跨出 1% 容差)。默认容差会
+                    # 变成「余额动一点就全撤重挂」,反复丢掉队列位置、少吃奖励。这两种
+                    # 模式放宽到 10%;min 模式与 gap_single 的份数是死数,维持 1%。
+                    tol = (
+                        0.10
+                        if (
+                            placement_mode == "legacy_wall"
+                            and order_size_mode in ("balance", "custom")
+                        )
+                        else 0.01
+                    )
                     cancel_ids, to_place = reconcile_buy_orders(
-                        ladders.get(key, []), resting
+                        ladders.get(key, []), resting, size_tolerance_pct=tol
                     )
                     cancel_reason = "撤改收敛:撤掉价漂移/量不符的旧买单(目标挂价已变)"
                     cancel_action = "buy_reconcile_cancel"
@@ -551,14 +587,19 @@ class WalletWorker:
                                 r_fn, b_fn = legacy_reason, legacy_price_basis
                             else:
                                 r_fn, b_fn = gap_single_reason, gap_single_price_basis
+                            # 文案必须报**实际挂出去**的份数:决策 dict 里的 shares 是
+                            # 未经预算/敞口封顶的理论值(老策略 balance 模式下按钱包总
+                            # 余额算,实测能出现「文案 3448 份、实挂 500 份」),写进历史
+                            # 就是审计说谎。用 to_place 里的真实份数覆盖后再格式化。
+                            text_d = dict(gap_d, shares=shares)
                             self._record_place_buy_tier(
                                 mid,
                                 side,
                                 price,
                                 shares,
-                                reason=r_fn(gap_d),
+                                reason=r_fn(text_d),
                                 price_basis=b_fn(
-                                    gap_d,
+                                    text_d,
                                     side["reward_range_min"],
                                     side["reward_range_max"],
                                 ),

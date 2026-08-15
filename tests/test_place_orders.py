@@ -639,3 +639,74 @@ def test_gap_single_mode_unaffected_by_legacy_keys():
     calls = _actions(db, "place_buy")
     assert len(calls) == 1
     assert "规则3" in calls[0].kwargs["reason"]
+
+
+def test_legacy_reason_reports_actual_capped_shares():
+    # balance/custom 模式下 explain 拿钱包总余额算份数,实际挂单份数被市场预算与
+    # 敞口封顶。记账文案必须写实际挂出去的份数——写理论值等于审计说谎
+    # (实测过:reason 写 3448 份而实际只挂 500 份)。
+    tmpl = _legacy_template(order_size_mode="balance")
+    worker, api, db = _make_worker(balance=1000.0, template=tmpl)
+    api.get_orderbook.return_value = _ob([(0.30, 3000), (0.29, 500)], [(0.32, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    actual = api.place_limit_buy.call_args_list[0].args[2]
+    rec = _actions(db, "place_buy")[0].kwargs
+    assert rec["size"] == actual
+    assert f"× {actual}份" in rec["reason"]
+    assert f"× {actual}份" in rec["price_basis"]
+    assert "3448" not in rec["reason"]
+
+
+def test_legacy_min_mode_reason_unchanged():
+    # 回归:min 模式下 explain 与 compute 算出的份数本来就一致,文案不该受影响。
+    worker, api, db = _make_worker(balance=1000.0, template=_legacy_template())
+    api.get_orderbook.return_value = _ob([(0.30, 3000), (0.29, 500)], [(0.32, 1000)])
+    worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    rec = _actions(db, "place_buy")[0].kwargs
+    assert rec["size"] == 20
+    assert "× 20份" in rec["reason"]
+
+
+_NUMERIC_TEMPLATE_KEYS = (
+    "gap_wide_cents",
+    "gap_mid_cents",
+    "cliff_probe_cents",
+    "max_exposure_usd",
+    "max_exposure_shares",
+    "max_concurrent_markets",
+    "legacy_wall_threshold",
+    "legacy_cumulative_threshold",
+    "order_size_custom_usd",
+)
+
+
+def test_none_valued_template_key_does_not_kill_the_round():
+    # 配置页把数字输入框清空会把该键存成 null(strategy-form 早先不过滤 NaN)。
+    # 后端必须兜底,否则 int(None) 抛 TypeError,而 place_orders 的调用点只有
+    # logger.error —— 该钱包每一轮都静默失败,UI 上完全看不出来。
+    for key in _NUMERIC_TEMPLATE_KEYS:
+        tmpl = _legacy_template()
+        tmpl[key] = None
+        worker, api, db = _make_worker(balance=1000.0, template=tmpl)
+        api.get_orderbook.return_value = _ob([(0.30, 3000), (0.29, 500)], [(0.32, 1000)])
+        worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])  # 不得抛异常
+
+
+def test_zero_valued_key_is_preserved_not_treated_as_missing():
+    # 0 是合法配置(cliff_probe_cents=0 表示关闭悬崖否决),兜底不能用 `or 默认`
+    # 把 0 吞掉。这里的买单簿在奖励区间下沿往下没有支撑:悬崖开启会被否决,
+    # 配 0 则应照常挂单。
+    cliff_book = _ob([(0.30, 3000), (0.29, 500), (0.10, 9999)], [(0.32, 1000)])
+    on = _legacy_template()
+    on["cliff_probe_cents"] = 2
+    w1, api1, _ = _make_worker(balance=1000.0, template=on)
+    api1.get_orderbook.return_value = cliff_book
+    w1.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    assert api1.place_limit_buy.call_count == 0
+
+    off = _legacy_template()
+    off["cliff_probe_cents"] = 0
+    w2, api2, _ = _make_worker(balance=1000.0, template=off)
+    api2.get_orderbook.return_value = cliff_book
+    w2.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
+    assert api2.place_limit_buy.call_count == 1

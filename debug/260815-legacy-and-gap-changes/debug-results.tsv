@@ -1,0 +1,14 @@
+iteration	type	hypothesis	result	severity	location	description
+1	hypothesis	老策略记账份数用未封顶值	confirmed	MEDIUM	engine/manager.py legacy分支	reason写3448份实际挂500份
+2	hypothesis	清空数字框存null致int(None)崩	confirmed	HIGH	config.html strategy-form	既有缺陷,本次新增3个入口,钱包静默停止交易
+3	hypothesis	tick_size缺失致老策略走错路径	inconclusive	-	engine/manager.py	离线无法验证生产响应
+4	hypothesis	legacy_price_basis挂单也展开全簿	confirmed	LOW	engine/legacy_wall.py	920字符 vs gap_single的102
+5	hypothesis	custom模式忘填金额静默不挂	disproven	-	-	有清晰gap_skip解释,不算缺陷
+6	hypothesis	历史页gap_skip标签对老策略说谎	confirmed	MEDIUM	history.html:58	显示"断层单档"但实为厚墙策略
+6b	hypothesis	float挂量配int累计显示对不上	confirmed	LOW	engine/legacy_wall.py	236.24+120显示为356
+7	hypothesis	balance模式余额变动致撤单重挂	confirmed	MEDIUM	legacy_wall+reconcile	余额低于封顶线时~1.5%变动即churn
+8	discovery	-	new_lead	HIGH	engine/laddering.py	旧口径下max_spread<=5时规则1结构性不可能触发
+9	discovery	-	new_lead	-	engine/legacy_wall.py	默认阈值2000对实盘盘口(最厚236份)可能过高
+10	hypothesis	切模式瞬间撤光在挂买单	confirmed	-	reconcile_buy_orders	预期语义,但配合阈值偏高冲击大
+11	hypothesis	悬崖否决时预演标签错位	confirmed	LOW	markets.html renderLegacyWall	rule=None落到else显示"厚墙(1美分盘)"
+12	property-test	挂价必在奖励区间内且份数>=最低份额	verified	-	-	4000组随机盘口1399笔挂单零违规

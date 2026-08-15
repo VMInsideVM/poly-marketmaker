@@ -357,13 +357,17 @@ def compute_market_single_orders(
     return out
 
 
-def reconcile_buy_orders(ladder, resting_buys):
+def reconcile_buy_orders(ladder, resting_buys, size_tolerance_pct=0.01):
     """撤改收敛(v4 §6):把某 token 的现挂买单收敛到目标 ladder。
 
     ladder: [(price, shares), ...] 该 token 的目标挂单(gap_single 为至多一档)。
     resting_buys: [{"id","price","original_size"/"size"}, ...] 该 token 当前在挂买单。
     返回 (cancel_ids, to_place):
-      - 现挂单价不在目标、或同价但量不符(容差 max(1,1%)) -> 撤(进 cancel_ids)。
+      - 现挂单价不在目标、或同价但量不符(容差 max(1, size_tolerance_pct×目标量))
+        -> 撤(进 cancel_ids)。
+    size_tolerance_pct: 量的容差比例,默认 1%。gap_single 的目标份数是档位模块里的
+      死数,1% 够用;老策略的 balance/custom 份数模式按实时余额算,做市成交会让余额
+      不断漂,1% 会导致「余额动一点就全撤重挂」、反复丢队列位置,调用方应放宽。
       - 价量都符 -> 保持(不撤不挂)。
       - 目标档里没被任何现挂单保持到的价 -> 挂(进 to_place)。
     """
@@ -383,7 +387,7 @@ def reconcile_buy_orders(ladder, resting_buys):
         if (
             tgt is not None
             and op not in keep
-            and abs(remaining - tgt) <= max(1.0, 0.01 * tgt)
+            and abs(remaining - tgt) <= max(1.0, size_tolerance_pct * tgt)
         ):
             keep.add(op)
         else:

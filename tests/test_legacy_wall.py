@@ -494,3 +494,38 @@ def test_compute_market_legacy_orders_respects_cliff_probe():
         side, None, 1000.0, 500, 1000.0, "min", 0.0, cliff_probe_cents=2
     )
     assert out_cliff["a"] == []
+
+
+# --- 2026-08-15 调查修复 ------------------------------------------------------
+
+
+def test_price_basis_on_place_does_not_dump_whole_book():
+    # 挂单成功时只写命中档与选中档;全簿展开留给跳过分支(对齐 gap_single 的做法)。
+    # 否则每次挂单都往 actions 表写几百上千字符,高频写入撑爆历史。
+    bids = _make_bids(
+        [(0.30, 3000)] + [(round(0.30 - i * 0.005, 3), 100) for i in range(1, 40)]
+    )
+    d = _explain(bids, rmin=0.28, rmax=0.32)
+    assert d["action"] == "place"
+    b = legacy_price_basis(d, 0.28, 0.32)
+    assert "买单簿(价降序)" not in b
+    assert len(b) < 250
+
+
+def test_price_basis_on_skip_still_expands_book():
+    # 跳过时仍要逐档展开,那是复盘不挂原因的唯一依据。
+    d = _explain(_make_bids([(0.30, 100), (0.29, 100)]), rmin=0.28, rmax=0.32)
+    assert d["action"] == "skip"
+    assert "买单簿(价降序)" in legacy_price_basis(d, 0.28, 0.32)
+
+
+def test_text_sizes_use_int_matching_judgement():
+    # 判定拿 int(size) 比阈值、累计也按 int 累加,文案里的挂量必须同口径显示,
+    # 否则 236.24 与「累计236」并排出现,用户相加对不上。
+    d = _explain(_make_bids([(0.21, 236.24), (0.19, 120.0)]), rmin=0.10, rmax=0.30)
+    assert d["action"] == "skip"
+    assert "236.24" not in d["skip_reason"]
+    assert "236" in d["skip_reason"]
+    b = legacy_price_basis(d, 0.10, 0.30)
+    assert "236.24" not in b
+    assert "0.2100×236(累计236)" in b
