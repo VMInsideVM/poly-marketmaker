@@ -283,6 +283,7 @@ class WalletWorker:
         gap_wide_cents = _tmpl_num(tmpl, "gap_wide_cents", 10)
         gap_mid_cents = _tmpl_num(tmpl, "gap_mid_cents", 5)
         cliff_probe_cents = _tmpl_num(tmpl, "cliff_probe_cents", 2)
+        gap_veto_cents = _tmpl_num(tmpl, "gap_veto_cents", 0)
         # max_exposure_usd 是「单市场」敞口上限(YES+NO 合计);跨市场不设全局
         # 美元锁(maker 买单不锁仓,一笔余额垫付所有挂单),总量由 max_concurrent
         # _markets × 单市场敞口 约束。
@@ -496,6 +497,7 @@ class WalletWorker:
                         shares=tier_shares,
                         rule2_high_coeff_sum_min=rule2_high_gate,
                         rule3_high_coeff_sum_min=rule3_high_gate,
+                        gap_veto_cents=gap_veto_cents,
                     )
                     for gkey, gside in (("a", ca), ("b", cb)):
                         if gside is not None:
@@ -515,6 +517,7 @@ class WalletWorker:
                                 shares=tier_shares,
                                 rule2_high_coeff_sum_min=rule2_high_gate,
                                 rule3_high_coeff_sum_min=rule3_high_gate,
+                                gap_veto_cents=gap_veto_cents,
                             )
 
             for key, side in (("a", side_a), ("b", side_b)):

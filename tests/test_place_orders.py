@@ -472,6 +472,30 @@ def test_cliff_below_zone_skips_side():
     assert api.place_limit_buy.call_count == 0
 
 
+def test_gap_veto_skips_side():
+    # 同一个盘口:上限关闭时照常挂,配上上限则整侧不挂 —— 证明拦下它的是断层上限这道
+    # 闸门,而不是别的门槛顺手拦的。全簿最大断层 = 0.29→0.20 = 9¢,归规则2
+    # (规则2 的高位闸门默认 0 不拦;若凑成规则1,_tier 的 gap_high_coeff_sum_min=20
+    # 会先把它拦下,那就测不出上限本身了)。0.20 在奖励区间外,只参与断层不参与选档。
+    book = _ob([(0.30, 3000), (0.29, 500), (0.20, 100)], [(0.32, 1000)])
+    w1, api1, _ = _make_worker(template={"gap_veto_cents": 0})
+    api1.get_orderbook.return_value = book
+    w1.place_orders([_elig("A", "A-y", "Yes")])
+    assert api1.place_limit_buy.call_count == 1
+
+    w2, api2, db2 = _make_worker(template={"gap_veto_cents": 5})
+    api2.get_orderbook.return_value = book
+    w2.place_orders([_elig("A", "A-y", "Yes")])
+    assert api2.place_limit_buy.call_count == 0
+    # 记账路径必须真的走通:归级前否决时 high_sum/gate_min/min_coeff 都是 None,
+    # 价格依据一旦拼 f"{None:g}" 就抛 TypeError —— 而下单轮只 logger.error 吞掉它,
+    # 光断言「没挂单」是看不出来的(不挂和崩掉的表现一模一样)。
+    skips = _actions(db2, "gap_skip")
+    assert len(skips) == 1
+    assert "上限" in skips[0].kwargs["reason"]
+    assert "最大断层 9¢" in skips[0].kwargs["price_basis"]
+
+
 def test_no_matching_tier_market_skipped():
     # 双点防御:eligible 里混进无档市场(配置变更时差)-> 下单层也要跳过。
     worker, api, db = _make_worker()  # 模板只有 100 档
@@ -671,6 +695,7 @@ _NUMERIC_TEMPLATE_KEYS = (
     "gap_wide_cents",
     "gap_mid_cents",
     "cliff_probe_cents",
+    "gap_veto_cents",
     "max_exposure_usd",
     "max_exposure_shares",
     "max_concurrent_markets",
@@ -688,7 +713,9 @@ def test_none_valued_template_key_does_not_kill_the_round():
         tmpl = _legacy_template()
         tmpl[key] = None
         worker, api, db = _make_worker(balance=1000.0, template=tmpl)
-        api.get_orderbook.return_value = _ob([(0.30, 3000), (0.29, 500)], [(0.32, 1000)])
+        api.get_orderbook.return_value = _ob(
+            [(0.30, 3000), (0.29, 500)], [(0.32, 1000)]
+        )
         worker.place_orders([_elig("A", "A-y", "Yes", min_size=20)])  # 不得抛异常
 
 

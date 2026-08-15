@@ -902,6 +902,50 @@ class TestStep3ActionLog:
         monitor.check_sell_orders()
         db.record_action.assert_not_called()
 
+    # 断层上限复查:_ob_cliff(extra_bid="0.46") 的簿是 0.48/0.46/0.02 ——
+    # 悬崖带 [0.45,0.47) 里有 0.46,悬崖闸门放行,于是能单独测出断层上限本身。
+    # 全簿最大断层 = 0.46→0.02 = 44¢。
+    def test_gap_veto_cancels_resting_buy(self):
+        monitor, api, db = _make_monitor({"cliff_probe_cents": 2, "gap_veto_cents": 10})
+        api.get_open_orders.return_value = [self._order(price="0.48")]
+        api.get_orderbook.return_value = self._ob_cliff(extra_bid="0.46")
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        monitor.check_sell_orders()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["gap_veto_cancel"]
+        assert "断层" in db.record_action.call_args_list[0].kwargs["reason"]
+        api.cancel_orders.assert_called_once_with(["o1"])
+        api.place_limit_buy.assert_not_called()  # cancel-only,绝不重挂
+
+    def test_gap_veto_disabled_keeps_resting_buy(self):
+        # 0 = 关闭(也是默认值)-> 44¢ 断层照样不撤,升级零回归。
+        monitor, api, db = _make_monitor({"cliff_probe_cents": 2, "gap_veto_cents": 0})
+        api.get_open_orders.return_value = [self._order(price="0.48")]
+        api.get_orderbook.return_value = self._ob_cliff(extra_bid="0.46")
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        monitor.check_sell_orders()
+        db.record_action.assert_not_called()
+
+    def test_gap_veto_under_limit_keeps_resting_buy(self):
+        # 44¢ 不超过上限 50¢ -> 保持不动。
+        monitor, api, db = _make_monitor({"cliff_probe_cents": 2, "gap_veto_cents": 50})
+        api.get_open_orders.return_value = [self._order(price="0.48")]
+        api.get_orderbook.return_value = self._ob_cliff(extra_bid="0.46")
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        monitor.check_sell_orders()
+        db.record_action.assert_not_called()
+
+    def test_cliff_judged_before_gap_veto(self):
+        # 两道闸门同时命中(簿 0.48/0.02:悬崖 + 46¢ 断层)时,悬崖先判 ——
+        # 它只看下沿紧邻的一小段,判据比全簿 max_gap 精准,理由列该写悬崖。
+        monitor, api, db = _make_monitor({"cliff_probe_cents": 2, "gap_veto_cents": 10})
+        api.get_open_orders.return_value = [self._order(price="0.48")]
+        api.get_orderbook.return_value = self._ob_cliff()
+        api.get_rewards_for_market.return_value = [{"rewards_max_spread": 3}]
+        monitor.check_sell_orders()
+        ats = [c.kwargs["action_type"] for c in db.record_action.call_args_list]
+        assert ats == ["cliff_cancel"]
+
     def test_inband_records_no_action(self):
         # price 0.48 in reward band [0.47, 0.53] → keep, no action recorded
         monitor, api, db = _make_monitor()

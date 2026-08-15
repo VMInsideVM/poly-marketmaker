@@ -14,7 +14,7 @@ from engine.take_profit import (
     ceil_to_tick,
 )
 from engine.eligibility import recheck_resting_buy
-from engine.laddering import has_cliff_below
+from engine.laddering import has_cliff_below, max_gap_cents
 from engine.resolution import in_resolution
 from engine.liquidation import plan_liquidation
 from engine.strategy import reward_price_range
@@ -1532,6 +1532,49 @@ class OrderMonitor:
                 cid,
                 rmin,
                 cliff_cents,
+            )
+            return
+
+        # 断层上限复查：全簿最大断层 > 上限 → 撤买单不重挂（cancel-only）。与下单时的判定
+        # 共用 max_gap_cents，两处口径不会漂。排在悬崖之后：悬崖只看下沿紧邻的一小段，
+        # 判据比全簿 max_gap 精准，同时命中时理由列该写悬崖。
+        gap_veto = float(settings.get("gap_veto_cents", 0) or 0)
+        mg = max_gap_cents(bids) if gap_veto > 0 else 0.0
+        if gap_veto > 0 and mg > gap_veto:
+            reason = f"最大断层 {mg:g}¢ > 上限 {gap_veto:g}¢，撤买单不重挂"
+            try:
+                self.api.cancel_orders([o.get("id")])
+            except Exception as e:
+                logger.warning("Gap-veto cancel %s failed: %s", o.get("id"), e)
+                return
+            self._record_action(
+                market_id=cid,
+                action_type="gap_veto_cancel",
+                side="-",
+                price=-1,
+                size=osize,
+                reason=reason,
+                price_basis=(
+                    f"全簿最大相邻价差={mg:g}¢；上限={gap_veto:g}¢；"
+                    f"来源：CLOB get_orderbook"
+                ),
+            )
+            self._status_add(
+                market=cid,
+                side="买入",
+                price=f"{cur_price:.4f}",
+                size=str(o.get("original_size", "")),
+                matched=str(o.get("size_matched", "0")),
+                stage="Step3",
+                action="撤单(断层过宽)",
+                detail=reason,
+            )
+            logger.info(
+                "[Step3] gap-veto cancel %s market %s | 最大断层 %g¢ > 上限 %g¢",
+                o.get("id"),
+                cid,
+                mg,
+                gap_veto,
             )
             return
 

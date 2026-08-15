@@ -58,6 +58,8 @@ def test_template_defaults_has_exposure_keys():
     assert TEMPLATE_DEFAULTS["max_exposure_shares"] == 500
     assert TEMPLATE_DEFAULTS["max_concurrent_markets"] == 10
     assert TEMPLATE_DEFAULTS["cliff_probe_cents"] == 2
+    # 断层上限否决默认 0 = 关闭:这是一道会让市场整侧不挂的闸门,不能默认生效
+    assert TEMPLATE_DEFAULTS["gap_veto_cents"] == 0
     # 老策略五个模板键:placement_mode 与四个老策略参数(已恢复)
     assert TEMPLATE_DEFAULTS["placement_mode"] == "gap_single"
     assert TEMPLATE_DEFAULTS["legacy_wall_threshold"] == 2000

@@ -49,6 +49,42 @@ def has_cliff_below(bids, reward_range_min, cliff_probe_cents):
     )
 
 
+def _sorted_levels(bids):
+    """原始 bids -> 价降序的 {price,size} 档位表(float 化)。"""
+    return sorted(
+        ({"price": float(b["price"]), "size": float(b["size"])} for b in bids),
+        key=lambda lv: lv["price"],
+        reverse=True,
+    )
+
+
+def _max_gap_and_split(levels):
+    """价降序档位表 -> (最大相邻价差(美分), 劈分点下标)。
+
+    劈分点 = 最大价差上方一侧的最后一档,高位 = levels[0 .. split_idx]。
+    价差按分四舍五入去浮点尘:否则 0.28-0.18 会算成 10.000000000000002,把恰 10¢ 的
+    价差误判成 >10¢ 宽断层;并列价差也会被尘埃打破而选错劈分点。
+    <2 档时无相邻价差可算,返回 (0.0, len-1)。
+    """
+    max_gap = 0.0
+    split_idx = len(levels) - 1
+    for i in range(len(levels) - 1):
+        gap = round((levels[i]["price"] - levels[i + 1]["price"]) * 100.0, 6)
+        if gap > max_gap:
+            max_gap = gap
+            split_idx = i
+    return max_gap, split_idx
+
+
+def max_gap_cents(bids):
+    """原始 bids -> 全簿最大相邻价差(美分);空簿/单档为 0。
+
+    下单侧(explain_gap_single_order)与监控 Step 3 的断层上限复查共用这一份计算,
+    两处口径不会漂——否则同一个盘口会得出两种判断,单挂上去又被撤,反复空转。
+    """
+    return _max_gap_and_split(_sorted_levels(bids))[0]
+
+
 def explain_gap_single_order(
     bids,
     reward_range_min,
@@ -65,6 +101,7 @@ def explain_gap_single_order(
     shares=None,
     rule2_high_coeff_sum_min=0.0,
     rule3_high_coeff_sum_min=0.0,
+    gap_veto_cents=0,
 ):
     """网关式单档挂单的完整判断(纯函数,不下单)。
 
@@ -106,11 +143,7 @@ def explain_gap_single_order(
     if min_size <= 0 or not bids:
         d["skip_reason"] = "无买单簿或最低份数<=0"
         return d
-    levels = sorted(
-        ({"price": float(b["price"]), "size": float(b["size"])} for b in bids),
-        key=lambda lv: lv["price"],
-        reverse=True,
-    )
+    levels = _sorted_levels(bids)
     for lv in levels:
         lv["in_range"] = reward_range_min <= lv["price"] <= reward_range_max
     if not any(lv["in_range"] for lv in levels):
@@ -129,20 +162,20 @@ def explain_gap_single_order(
     # 断层与高位在「整个买单簿」上算,含奖励区间外的档:区间内只剩一档时,区间外的深坑
     # 才判得出来(旧口径只看区间内,那种形状 max_gap 恒为 0、永远落到最松的规则3)。
     # 选档另算,仍只在区间内顺延——区间外的档不是可挂的价位。
-    max_gap = 0.0
-    split_idx = len(levels) - 1
-    for i in range(len(levels) - 1):
-        # 按分四舍五入去浮点尘:否则 0.28-0.18 会算成 10.000000000000002,把恰 10¢ 的
-        # 价差误判成 >10¢ 宽断层;并列价差也会被尘埃打破而选错劈分点。
-        gap = round((levels[i]["price"] - levels[i + 1]["price"]) * 100.0, 6)
-        if gap > max_gap:
-            max_gap = gap
-            split_idx = i
+    max_gap, split_idx = _max_gap_and_split(levels)
     for idx, lv in enumerate(levels):
         lv["high_side"] = idx <= split_idx
         lv["chosen"] = False
     d["max_gap"] = max_gap
     d["levels"] = levels
+
+    # 断层上限否决:最大断层 > 上限 -> 该侧不挂。严格 >(恰好等于不算超),与 gap_wide_cents
+    # 的归级口径一致;0 = 关闭。必须放在 max_gap/levels 落进 d 之后再 return——预演页靠
+    # 这两个字段显示断层数值与逐档展开,用户才调得出合适的上限(悬崖当年在赋值前 return,
+    # 预演页因此对 0.1 美分盘显示成另一条规则,见 findings.md LOW-6)。
+    if gap_veto_cents and gap_veto_cents > 0 and max_gap > gap_veto_cents:
+        d["skip_reason"] = f"最大断层 {max_gap:g}¢ > 上限 {gap_veto_cents:g}¢ → 不挂"
+        return d
 
     # 按最大价差归级,取该级的选档门槛与高位系数和门槛;三级结构完全一致。
     # 高位系数和闸门原先只有规则1 有,现在三级各一个(规则2/3 默认 0 = 不拦)。
@@ -196,6 +229,7 @@ def plan_gap_single_order(
     shares=None,
     rule2_high_coeff_sum_min=0.0,
     rule3_high_coeff_sum_min=0.0,
+    gap_veto_cents=0,
 ):
     """网关式单档挂单(v4 用户策略)。explain_gap_single_order 的薄壳:
     返回 (price, shares) 或 None(不挂)。完整判断依据见 explain_gap_single_order。"""
@@ -215,6 +249,7 @@ def plan_gap_single_order(
         shares=shares,
         rule2_high_coeff_sum_min=rule2_high_coeff_sum_min,
         rule3_high_coeff_sum_min=rule3_high_coeff_sum_min,
+        gap_veto_cents=gap_veto_cents,
     )
     return (d["price"], d["shares"]) if d["action"] == "place" else None
 
@@ -270,9 +305,13 @@ def gap_single_price_basis(d, reward_range_min, reward_range_max):
             # 断层按整个买单簿算,所以这里列的是全簿而非只有区间内的档;区间外的档标出来,
             # 免得看的人以为奖励区间被算错了。
             f"买单簿(价降序):{per}",
-            f"最大断层 {d['max_gap']:g}¢→{_GAP_RULE_LABEL.get(d['rule'], '')}",
+            f"最大断层 {d['max_gap']:g}¢→{_GAP_RULE_LABEL.get(d['rule'], '未归级')}",
         ]
-        if not d.get("gate_passed"):
+        if d.get("rule") is None:
+            # 归级之前就被否决(断层上限):high_sum/gate_min/min_coeff 都还是 None,
+            # 照常拼下面两支会 f"{None:g}" 抛 TypeError,把记账和历史页一起带崩。
+            parts.append(d.get("skip_reason") or "不挂")
+        elif not d.get("gate_passed"):
             addends = "+".join(
                 f"{lv['coeff']:g}" for lv in levels if lv.get("high_side")
             )
@@ -311,6 +350,7 @@ def compute_market_single_orders(
     shares=None,
     rule2_high_coeff_sum_min=0.0,
     rule3_high_coeff_sum_min=0.0,
+    gap_veto_cents=0,
 ):
     """两边共享敞口的网关式单档计划(每边至多一单)。
 
@@ -341,6 +381,7 @@ def compute_market_single_orders(
             shares=shares,
             rule2_high_coeff_sum_min=rule2_high_coeff_sum_min,
             rule3_high_coeff_sum_min=rule3_high_coeff_sum_min,
+            gap_veto_cents=gap_veto_cents,
         )
         if plan is None:
             continue
@@ -412,6 +453,7 @@ def preview_gap_single_market(
     shares=None,
     rule2_high_coeff_sum_min=0.0,
     rule3_high_coeff_sum_min=0.0,
+    gap_veto_cents=0,
 ):
     """两边的网关式单档只读预演:对每边调 explain_gap_single_order,组装展示用 side。
 
@@ -443,6 +485,7 @@ def preview_gap_single_market(
             shares=shares,
             rule2_high_coeff_sum_min=rule2_high_coeff_sum_min,
             rule3_high_coeff_sum_min=rule3_high_coeff_sum_min,
+            gap_veto_cents=gap_veto_cents,
         )
         out[key] = {
             "outcome": side.get("outcome", ""),
@@ -452,7 +495,10 @@ def preview_gap_single_market(
             "spread_cents": side.get("spread_cents"),
             "reward_range": [side["reward_range_min"], side["reward_range_max"]],
             "rule": d["rule"],
-            "rule_label": _GAP_RULE_LABEL.get(d["rule"], "无区间档"),
+            # rule=None 有三种来路(区间内无买档 / 悬崖 / 断层上限),真实原因由
+            # skip_reason 给出。兜底不能写「无区间档」——后两种区间内是有档的,
+            # 那样会和同一行显示的「最大断层 15¢」自相矛盾。
+            "rule_label": _GAP_RULE_LABEL.get(d["rule"], "未归级"),
             "max_gap": d["max_gap"],
             "min_coeff": d["min_coeff"],
             "high_sum": d["high_sum"],

@@ -86,6 +86,11 @@ TEMPLATE_DEFAULTS = {
     "gap_mid_cents": 5,
     # 悬崖否决:奖励区间下沿往下这么多美分内无买档 → 该侧不挂。0=关闭。
     "cliff_probe_cents": 2,
+    # 断层上限否决:全簿最大相邻价差 > 这么多美分 → 该侧不挂。0=关闭(默认)。
+    # 下单时判一次,监控 Step3 每 tick 复查在挂买单(超限则撤、不重挂),两处共用
+    # laddering.max_gap_cents。注意口径是整个买单簿:低价区零散挂单会把 max_gap 撑得
+    # 很大,阈值要参考预演页显示的「最大断层」实际量级来定。
+    "gap_veto_cents": 0,
     # 止盈方式:maker=挂卖一吃价差(默认);market=浮盈(成本<买一)立即市价清仓。
     "take_profit_mode": "maker",
     "included_categories": DEFAULT_INCLUDED_CATEGORIES,

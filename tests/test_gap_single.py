@@ -29,6 +29,7 @@ def _plan(
     shares=None,
     gate2=0,
     gate3=0,
+    veto=0,
 ):
     return plan_gap_single_order(
         bids,
@@ -46,6 +47,7 @@ def _plan(
         shares=shares,
         rule2_high_coeff_sum_min=gate2,
         rule3_high_coeff_sum_min=gate3,
+        gap_veto_cents=veto,
     )
 
 
@@ -965,3 +967,137 @@ def test_reconcile_size_tolerance_is_configurable():
     )
     assert cancel3 == ["o1"]
     assert place3 == [(0.28, 344)]
+
+
+# --- 断层上限否决(gap_veto_cents):最大断层 > 上限 → 该侧不挂 -------------------
+# 下面几例共用盘口 0.18/0.17/0.02:全簿最大断层 = 0.17→0.02 = 15¢。
+# gate=0 是为了隔离变量——该盘口 15¢ 断层归规则1,默认闸门 20 会先把它拦下,
+# 那样就测不出上限本身是否生效了(与悬崖那组测试同样的手法)。
+_VETO_BIDS = [_b(0.18, 50), _b(0.17, 40), _b(0.02, 9999)]
+
+
+def test_gap_veto_skips_when_max_gap_exceeds_limit():
+    # 15¢ > 上限 10¢ → 不挂
+    assert _plan(_VETO_BIDS, veto=10, gate=0) is None
+
+
+def test_gap_veto_boundary_equal_still_places():
+    # 恰好等于上限不算超(严格 >),照常挂 —— 与 gap_wide_cents 的归级口径一致。
+    assert _plan(_VETO_BIDS, veto=15, gate=0) == (0.18, 20)
+
+
+def test_gap_veto_disabled_places_despite_wide_gap():
+    # 0 = 关闭,零回归:断层再宽也不否决。
+    assert _plan(_VETO_BIDS, veto=0, gate=0) == (0.18, 20)
+
+
+def test_explain_gap_veto_keeps_max_gap_and_levels_visible():
+    # 否决必须发生在 max_gap/levels 落进决策 dict 之后:预演页要靠这两个字段
+    # 显示「最大断层 X¢」和逐档展开,用户才能据此把上限调到合适的值。
+    # (悬崖当年在赋值前 return,预演页因此显示成另一条规则 —— findings.md LOW-6。)
+    d = explain_gap_single_order(
+        _VETO_BIDS, 0.10, 0.31, 20, AV, 10, 5, 0, 0, 0, 0, gap_veto_cents=10
+    )
+    assert d["action"] == "skip"
+    assert d["max_gap"] == 15
+    assert len(d["levels"]) == 3
+    assert "断层" in d["skip_reason"] and "上限" in d["skip_reason"]
+    assert d["rule"] is None  # 否决在归级之前,没有规则级可言
+    assert d["cliff"] is False  # 不是悬崖那条路径
+
+
+def test_price_basis_renders_gap_veto_without_crashing():
+    # 断层上限在归级之前否决,此时 high_sum/gate_min/min_coeff 全是 None ——
+    # price_basis 的跳过分支若照常拼「高位系数和 ... < 门槛 ...」会 f"{None:g}" 抛
+    # TypeError,把记账和历史页的「价格依据」一起带崩。
+    d = explain_gap_single_order(
+        _VETO_BIDS, 0.10, 0.31, 20, AV, 10, 5, 0, 0, 0, 0, gap_veto_cents=10
+    )
+    pb = gap_single_price_basis(d, 0.10, 0.31)
+    assert "上限" in pb
+    assert "最大断层 15¢" in pb
+    assert "买单簿" in pb  # 逐档证据仍要留着,断层在哪两档之间得看得见
+
+
+def test_preview_gap_veto_rule_label_is_not_misleading():
+    # rule=None 的兜底文案原本是「无区间档」:区间内明明有档、断层也算出来了,
+    # 写「无区间档 · 最大断层 15¢」自相矛盾(legacy_wall 的 LOW-6 同类问题)。
+    side = {
+        "outcome": "Yes",
+        "token_id": "t",
+        "min_size": 20,
+        "reward_range_min": 0.10,
+        "reward_range_max": 0.31,
+        "best_bid": 0.18,
+        "best_ask": 0.19,
+        "spread_cents": 1,
+        "bids": _VETO_BIDS,
+    }
+    out = preview_gap_single_market(
+        side, None, AV, 10, 5, 0, 0, 0, 0, gap_veto_cents=10
+    )
+    assert out["a"]["rule_label"] == "未归级"
+
+
+def test_max_gap_cents_matches_explain():
+    # 监控 Step3 复查用 max_gap_cents,下单侧用 explain 内部算出的 max_gap ——
+    # 两处必须是同一份计算,否则同一个盘口会得出两种判断(下单挂上、5 秒后被撤,反复)。
+    from engine.laddering import max_gap_cents
+
+    for bids in (
+        _VETO_BIDS,
+        [_b(0.28, 50), _b(0.27, 40)],
+        [_b(0.30, 10), _b(0.28, 20), _b(0.02, 9999)],
+    ):
+        d = explain_gap_single_order(bids, 0.10, 0.31, 20, AV, 10, 5, 0, 0, 0, 0)
+        assert max_gap_cents(bids) == d["max_gap"]
+
+
+def test_max_gap_cents_empty_or_single_level_is_zero():
+    # 空簿/单档无相邻价差可算 -> 0。Step3 里 0 > 上限 恒假,故不会误撤
+    # (与悬崖对空簿「无从判断、不撤单」同向)。
+    from engine.laddering import max_gap_cents
+
+    assert max_gap_cents([]) == 0.0
+    assert max_gap_cents([_b(0.28, 50)]) == 0.0
+
+
+def test_max_gap_cents_no_float_dust():
+    # 0.28-0.18 必须是 10 而不是 10.000000000000002,否则恰好等于上限的盘口
+    # 会被判成超限(严格 > 的边界会被浮点尘打破)。
+    from engine.laddering import max_gap_cents
+
+    assert max_gap_cents([_b(0.28, 50), _b(0.18, 40)]) == 10
+
+
+def test_compute_threads_gap_veto():
+    side = {
+        "bids": _VETO_BIDS,
+        "reward_range_min": 0.10,
+        "reward_range_max": 0.31,
+        "min_size": 20,
+    }
+    out = compute_market_single_orders(
+        side, None, 1000.0, 500, AV, 10, 5, 0, 0, 0, 0, gap_veto_cents=10
+    )
+    assert out["a"] == []
+
+
+def test_preview_threads_gap_veto():
+    side = {
+        "outcome": "Yes",
+        "token_id": "t",
+        "min_size": 20,
+        "reward_range_min": 0.10,
+        "reward_range_max": 0.31,
+        "best_bid": 0.18,
+        "best_ask": 0.19,
+        "spread_cents": 1,
+        "bids": _VETO_BIDS,
+    }
+    out = preview_gap_single_market(
+        side, None, AV, 10, 5, 0, 0, 0, 0, gap_veto_cents=10
+    )
+    assert out["a"]["action"] == "skip"
+    assert "上限" in out["a"]["skip_reason"]
+    assert out["a"]["max_gap"] == 15  # 预演页要显示的断层数值
