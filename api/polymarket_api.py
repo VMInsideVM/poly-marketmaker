@@ -47,6 +47,9 @@ SIG_GNOSIS_SAFE = 2  # Browser-wallet proxy signature type
 # POST /books 单次可带的 token 数。实测 500 个仍 HTTP 200(1.78s),1000 与 2000 都是
 # HTTP 400。取 100 留足余量:一批同生共死,批越大一次失败丢的盘口越多。
 _BOOKS_BATCH_SIZE = 100
+# Gamma 的 /markets 对超长 condition_ids 查询会返回 422。condition id 本身很长，
+# 50 个约 4KB query string，给 URL / 网关限制留足余量。
+_GAMMA_RESOLUTION_BATCH_SIZE = 50
 
 # Rewards API is part of the CLOB API
 REWARDS_API = POLYMARKET_HOST
@@ -744,21 +747,30 @@ class PolymarketAPI:
         ids = [c for c in dict.fromkeys(condition_ids) if c]
         if not ids:
             return {}
-        try:
-            resp = http_get(
-                "https://gamma-api.polymarket.com/markets",
-                params=[("condition_ids", c) for c in ids],
-                timeout=10,
-            )
-            resp.raise_for_status()
-        except Exception as e:
-            logger.warning("gamma_resolution_status failed (fail-open): %s", e)
-            return {}
         out = {}
-        for m in resp.json():
-            cid = m.get("conditionId", "")
-            if cid:
-                out[cid] = m.get("umaResolutionStatus")
+        for i in range(0, len(ids), _GAMMA_RESOLUTION_BATCH_SIZE):
+            chunk = ids[i : i + _GAMMA_RESOLUTION_BATCH_SIZE]
+            try:
+                resp = http_get(
+                    "https://gamma-api.polymarket.com/markets",
+                    params=[("condition_ids", c) for c in chunk],
+                    timeout=10,
+                )
+                resp.raise_for_status()
+            except Exception as e:
+                # 单批失败只让该批 fail-open；其它批仍可保护已进入 UMA 的市场。
+                logger.warning(
+                    "gamma_resolution_status batch %d/%d failed (fail-open): %s",
+                    i // _GAMMA_RESOLUTION_BATCH_SIZE + 1,
+                    (len(ids) + _GAMMA_RESOLUTION_BATCH_SIZE - 1)
+                    // _GAMMA_RESOLUTION_BATCH_SIZE,
+                    e,
+                )
+                continue
+            for m in resp.json():
+                cid = m.get("conditionId", "")
+                if cid:
+                    out[cid] = m.get("umaResolutionStatus")
         return out
 
     # --- Per-market rewards ---

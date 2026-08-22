@@ -53,3 +53,31 @@ def test_network_failure_fails_open_returns_empty():
     with patch("api.proxy.requests.get", side_effect=Exception("timeout")):
         out = PolymarketAPI.gamma_resolution_status(["0xc1"])
     assert out == {}
+
+
+def test_large_input_is_split_into_safe_batches():
+    ids = [f"0xc{i}" for i in range(101)]
+    response = _resp([])
+    with patch("api.proxy.requests.get", return_value=response) as g:
+        out = PolymarketAPI.gamma_resolution_status(ids)
+
+    assert out == {}
+    assert g.call_count == 3
+    batches = [
+        [value for key, value in call.kwargs["params"] if key == "condition_ids"]
+        for call in g.call_args_list
+    ]
+    assert [len(batch) for batch in batches] == [50, 50, 1]
+    assert batches[0] == ids[:50]
+    assert batches[-1] == ids[-1:]
+
+
+def test_failed_batch_does_not_discard_successful_batches():
+    ids = [f"0xc{i}" for i in range(51)]
+    first = _resp([{"conditionId": "0xc0", "umaResolutionStatus": "proposed"}])
+    with patch(
+        "api.proxy.requests.get", side_effect=[first, Exception("timeout")]
+    ):
+        out = PolymarketAPI.gamma_resolution_status(ids)
+
+    assert out == {"0xc0": "proposed"}

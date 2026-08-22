@@ -356,16 +356,31 @@ class WalletWorker:
             )
 
         placed = 0
+        skipped = {
+            "blacklist": 0,
+            "resolution": 0,
+            "cooldown": 0,
+            "tier": 0,
+            "concurrent": 0,
+            "orderbook": 0,
+            "balance": 0,
+            "budget": 0,
+            "rejected": 0,
+        }
         for mid in order:
             if mid in blacklist:
+                skipped["blacklist"] += 1
                 continue
             if mid in resolving:
+                skipped["resolution"] += 1
                 continue
             if self.db.is_in_cooldown(self.wallet_address, mid):
+                skipped["cooldown"] += 1
                 continue
             # 档位模块精确匹配(筛选层已挡;这里双点防御,防配置变更/共享列表时差)。
             tier = tier_for(size_tiers, grouped[mid][0].get("rewards_min_size"))
             if tier is None:
+                skipped["tier"] += 1
                 continue
             amount_value_table = tier.get("amount_value_table") or None
             gap_high_coeff_sum_min = float(tier.get("gap_high_coeff_sum_min", 20))
@@ -388,6 +403,7 @@ class WalletWorker:
                 mid not in markets_with_open
                 and len(markets_with_open) >= max_concurrent
             ):
+                skipped["concurrent"] += 1
                 continue
 
             sides = []
@@ -425,6 +441,7 @@ class WalletWorker:
                     }
                 )
             if not sides:
+                skipped["orderbook"] += 1
                 continue
 
             side_a = sides[0]
@@ -441,10 +458,13 @@ class WalletWorker:
                     mid,
                     ex,
                 )
+                skipped["balance"] += 1
                 continue
             budget = max(0.0, min(balance, max_exposure_usd) - held_value.get(mid, 0.0))
             shares_budget = max(0, max_exposure_shares - int(held_shares.get(mid, 0.0)))
             budget_ok = budget > 0 and shares_budget > 0
+            if not budget_ok:
+                skipped["budget"] += 1
             ladders = {"a": [], "b": []}
             # gap_single 每边的完整判断(供 place_buy 记真实原因、判成不挂时记 gap_skip)。
             gap_explains = {"a": None, "b": None}
@@ -611,13 +631,22 @@ class WalletWorker:
                         else:
                             self._record_place_buy_tier(mid, side, price, shares)
                         if limit is not None and placed >= limit:
+                            logger.info(
+                                "[place] %s markets=%d placed=%d skip=%s",
+                                self.wallet_address[:8], len(order), placed, skipped
+                            )
                             return
                     except Exception as ex:
+                        skipped["rejected"] += 1
                         logger.error("place_limit_buy failed %s: %s", token_id, ex)
                 # ② 判成不挂:记 gap_skip(按 token 去重,判断变化才记)。
                 self._maybe_record_gap_skip(
                     mid, side, gap_explains.get(key), placement_mode
                 )
+        logger.info(
+            "[place] %s markets=%d placed=%d skip=%s",
+            self.wallet_address[:8], len(order), placed, skipped
+        )
 
     def _touch_active(self):
         """记一次「上次活跃」(纯展示)。写失败绝不能打断下单,吞掉只打 warning。"""
