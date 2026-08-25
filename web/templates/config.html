@@ -222,8 +222,9 @@
                 <input type="number" name="fill_check_interval_sec" step="1">
             </div>
             <div class="form-group">
-                <label>成交后冷却时间 (分钟)</label>
+                <label>清仓后冷却时间 (分钟)</label>
                 <input type="number" name="cooldown_minutes" step="1">
+                <p class="hint" style="color:#888;font-size:12px">从该市场持仓<b>完全清空</b>那一刻起算，不是从买入成交起算。持仓期间整个市场（两侧）都不挂新买单、在挂买单一律撤掉；卖光后再等这么多分钟才恢复。所以一个迟迟没回本的仓会让这个市场长期停做。</p>
             </div>
             <div class="form-group">
                 <label>奖励参数缓存 (秒，0=每次实时取)</label>

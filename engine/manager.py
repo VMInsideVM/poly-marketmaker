@@ -375,7 +375,16 @@ class WalletWorker:
             if mid in resolving:
                 skipped["resolution"] += 1
                 continue
-            if self.db.is_in_cooldown(self.wallet_address, mid):
+            # 冷却的语义是「完全卖掉之后才开始计时」:持仓期间由监控侧每 tick 续期
+            # (monitor._renew_position_cooldown),下面的 market_held 是第二道 ——
+            # 某一轮监控 tick 因网络失败早退就断了续期、冷却可能提前到期,只剩它拦得住。
+            # 判的是**整个市场**(YES+NO 合计份额),不是单侧:单侧暂停只挡持仓那一侧,
+            # 另一侧照挂,那样冷却就不是市场级的了。
+            # **注意它不能在这里 continue**:那样会把下面的撤单分支一起跳过,持仓期间
+            # 该市场的在挂买单就没人撤了(_handle_fill 只撤成交那一单的剩余量)。它走的
+            # 是与单侧暂停同一条「撤光、不挂」的路,只是范围从一侧扩到整个市场。
+            market_held = float(held_shares.get(mid, 0) or 0) > 0
+            if not market_held and self.db.is_in_cooldown(self.wallet_address, mid):
                 skipped["cooldown"] += 1
                 continue
             # 档位模块精确匹配(筛选层已挡;这里双点防御,防配置变更/共享列表时差)。
@@ -461,6 +470,10 @@ class WalletWorker:
                 )
                 skipped["balance"] += 1
                 continue
+            # 注:`- held_value.get(mid)` 这一项自「市场级冷却按卖光计时」之后已不可达
+            # ——有持仓的市场在上面就走了「撤光、不挂」的分支,根本到不了这里,所以
+            # 这个扣减恒为 0。留着是防御性的(万一以后放宽整市场冻结),不是还在
+            # 起作用的逻辑;同市场两侧合计超敞口现在由「有持仓就整个市场不挂」兜住。
             budget = max(0.0, min(balance, max_exposure_usd) - held_value.get(mid, 0.0))
             shares_budget = max(0, max_exposure_shares - int(held_shares.get(mid, 0.0)))
             budget_ok = budget > 0 and shares_budget > 0
@@ -470,8 +483,19 @@ class WalletWorker:
             # gap_single 每边的完整判断(供 place_buy 记真实原因、判成不挂时记 gap_skip)。
             gap_explains = {"a": None, "b": None}
             if budget_ok:
-                ca = None if side_a["token_id"] in held_assets else side_a
-                cb = None if (side_b and side_b["token_id"] in held_assets) else side_b
+                ca = (
+                    None
+                    if (market_held or side_a["token_id"] in held_assets)
+                    else side_a
+                )
+                cb = (
+                    None
+                    if (
+                        market_held
+                        or (side_b and side_b["token_id"] in held_assets)
+                    )
+                    else side_b
+                )
                 if placement_mode == "legacy_wall":
                     ladders = compute_market_legacy_orders(
                         ca,
@@ -546,10 +570,17 @@ class WalletWorker:
                     continue
                 token_id = side["token_id"]
                 resting = buys_by_token.get(token_id, [])
-                if token_id in held_assets:
-                    # 成交后单侧暂停:撤光该侧全部在挂买单、不挂新单(SP5b Q1)
+                if market_held or token_id in held_assets:
+                    # 撤光该侧全部在挂买单、不挂新单。两种来源:
+                    #   market_held  该市场还有持仓 -> 冷却尚未开始计时(卖光才起算),
+                    #                整个市场两侧都停
+                    #   held_assets  成交后单侧暂停(SP5b Q1),只停持仓那一侧
                     cancel_ids, to_place = reconcile_buy_orders([], resting)
-                    cancel_reason = "成交后单侧暂停:撤掉该侧全部买单,直至该侧持仓平掉"
+                    cancel_reason = (
+                        "市场仍有持仓:撤掉该市场全部买单,直至持仓清空后冷却期满"
+                        if market_held
+                        else "成交后单侧暂停:撤掉该侧全部买单,直至该侧持仓平掉"
+                    )
                     cancel_action = "side_pause_cancel"
                 elif budget_ok:
                     # 老策略的 balance/custom 份数按实时余额算,做市成交会让余额不断

@@ -198,8 +198,13 @@ def test_book_shift_cancels_old_tier_and_places_new():
     assert 0.30 in placed and 0.31 not in placed
 
 
-def test_paused_side_cancels_resting_and_other_side_runs():
-    # 持有 YES(A-y) -> YES 侧暂停:撤光 YES 在挂买单、不挂 YES 新单;NO(A-n) 照常挂。
+def test_held_market_cancels_resting_and_places_on_neither_side():
+    """持有 YES(A-y) -> 撤光在挂买单,且**两侧都不挂新单**。
+
+    市场级冷却改成「完全卖掉之后才开始计时」之后,持仓期间整个市场都停,不再是
+    「只停持仓那一侧、另一侧照常」。撤单这半边必须仍然守住:持仓期间没人撤该市场
+    的买单的话,_handle_fill 只撤成交那一单的剩余量,其余价位的旧单会一直挂着。
+    """
     worker, api, db = _make_worker()
     api.get_user_positions.return_value = [
         {"conditionId": "A", "asset": "A-y", "size": 100.0, "curPrice": 0.30}
@@ -217,27 +222,25 @@ def test_paused_side_cancels_resting_and_other_side_runs():
     api.get_orderbook.return_value = _ob([(0.30, 1000)], [(0.31, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes"), _elig("A", "A-n", "No")])
     cancelled = [oid for c in api.cancel_orders.call_args_list for oid in c.args[0]]
-    assert "o-yes" in cancelled  # YES 旧单被撤
-    placed_tokens = [c.args[0] for c in api.place_limit_buy.call_args_list]
-    assert placed_tokens and all(t == "A-n" for t in placed_tokens)  # 只挂 NO
+    assert "o-yes" in cancelled  # 旧单被撤
+    api.place_limit_buy.assert_not_called()  # 两侧都不挂
 
 
-def test_held_value_deducts_other_side_budget():
-    # 持有 YES 市值 50U(100×0.50);max_exposure_usd=100 -> NO 侧预算 50U,
-    # gap_single 挂 min_size=100 @0.50 恰好用满(100×0.50=50U)。
+def test_held_market_cannot_exceed_exposure_because_nothing_is_placed():
+    """同市场敞口保护:持有 YES 市值 50U、上限 100U 时,以前 NO 侧还能挂 50U
+    (budget 里扣 held_value);现在整个市场停,一份都不挂。
+
+    这条断言比原来的「扣减后恰好用满」更强 —— 不挂就不可能超敞口。**因此
+    `budget` 里那项 `- held_value.get(mid)` 现在已不可达**(有持仓的市场根本走不到
+    算 budget 那一步),留着是防御性的,不是还在起作用的逻辑。
+    """
     worker, api, db = _make_worker(template={"max_exposure_usd": 100})
     api.get_user_positions.return_value = [
         {"conditionId": "A", "asset": "A-y", "size": 100.0, "curPrice": 0.50}
     ]
     api.get_orderbook.return_value = _ob([(0.50, 1000)], [(0.51, 1000)])
     worker.place_orders([_elig("A", "A-y", "Yes"), _elig("A", "A-n", "No")])
-    placed = {
-        round(c.args[1], 2): c.args[2]
-        for c in api.place_limit_buy.call_args_list
-        if c.args[0] == "A-n"
-    }
-    assert placed.get(0.50) == 100  # 预算 100-50=50U;挂 min_size=100 @0.50 恰用满
-    assert not any(c.args[0] == "A-y" for c in api.place_limit_buy.call_args_list)
+    api.place_limit_buy.assert_not_called()
 
 
 def test_both_sides_held_cancels_both_and_places_nothing():
@@ -737,3 +740,64 @@ def test_zero_valued_key_is_preserved_not_treated_as_missing():
     api2.get_orderbook.return_value = cliff_book
     w2.place_orders([_elig("A", "A-y", "Yes", min_size=20)])
     assert api2.place_limit_buy.call_count == 1
+
+
+# --- 持仓期间整个市场不挂(冷却改为「卖光后才计时」的第二道) ------------------
+# 冷却续期在监控侧(check_exit 每 tick 把 expires_at 推后),这里是下单侧的兜底:
+# 某一轮监控 tick 因网络失败早退,续期就断了、冷却可能提前到期,只剩这道拦得住。
+# place_orders 自取 positions(取不到就整轮 return),不受监控侧失败影响。
+
+
+def _position(cid, asset, size=100.0, price=0.30):
+    return {
+        "conditionId": cid,
+        "asset": asset,
+        "size": size,
+        "curPrice": price,
+        "avgPrice": price,
+    }
+
+
+def test_skips_whole_market_while_holding_any_position():
+    # 持有 A 的 YES:整个市场(YES+NO 两侧)都不挂,不只是持仓那一侧。
+    # 这是「冷却以完全卖掉为准」的语义 —— 单侧暂停(side_pause)只挡持仓侧,
+    # 另一侧照挂,那样冷却就不是市场级的了。
+    worker, api, db = _make_worker()
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    api.get_user_positions.return_value = [_position("A", "A-y")]
+    worker.place_orders([_elig("A", "A-y", "Yes"), _elig("A", "A-n", "No")])
+    api.place_limit_buy.assert_not_called()
+
+
+def test_skips_held_market_even_when_cooldown_expired():
+    """关键回归:冷却已过期(监控侧续期断了一轮),持仓判定必须仍然拦住。
+
+    **只给另一侧(A-n)**:持仓那一侧本来就被单侧暂停挡着,拿它做断言测不出新行为
+    (改动前也是绿的)。真正区分新旧的是「没持仓的那一侧还挂不挂」。
+    """
+    worker, api, db = _make_worker()
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    api.get_user_positions.return_value = [_position("A", "A-y")]
+    db.is_in_cooldown.return_value = False  # 冷却确实过期了
+    worker.place_orders([_elig("A", "A-n", "No")])
+    api.place_limit_buy.assert_not_called()
+
+
+def test_other_markets_still_placed_while_one_is_held():
+    # 只冻结持仓所在的市场,别的市场照常。A 侧用 A-n(没持仓的那一侧),否则
+    # 单侧暂停会替新逻辑挡掉、断言测不出东西。
+    worker, api, db = _make_worker()
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    api.get_user_positions.return_value = [_position("A", "A-y")]
+    worker.place_orders([_elig("A", "A-n", "No"), _elig("B", "B-y", "Yes")])
+    assert api.place_limit_buy.call_count == 1
+    assert api.place_limit_buy.call_args[0][0] == "B-y"
+
+
+def test_zero_size_position_does_not_freeze_market():
+    # size=0 的残留条目不算持仓,不该冻结市场
+    worker, api, db = _make_worker()
+    api.get_orderbook.return_value = _ob([(0.30, 300)], [(0.31, 1000)])
+    api.get_user_positions.return_value = [_position("A", "A-y", size=0.0)]
+    worker.place_orders([_elig("A", "A-y", "Yes")])
+    api.place_limit_buy.assert_called_once()

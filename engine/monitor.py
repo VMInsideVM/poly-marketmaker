@@ -583,6 +583,35 @@ class OrderMonitor:
         if dumped_any:
             self._liquidate_cooldown_until = time.time() + LIQUIDATE_COOLDOWN_SEC
 
+    def _renew_position_cooldown(self, positions):
+        """持仓期间给市场级冷却续期:每 tick 把 expires_at 推到 now + cooldown_minutes。
+
+        市场级冷却的语义是「完全卖掉之后才开始计时」。续期实现的妙处在于**无状态**:
+        卖光后自然停止续期,最后一次续期的到期时间恰好就是「卖光后 N 分钟」(误差一个
+        tick)。不必跨 tick 记「持仓从有到无」的转变点 —— 那要怕重启丢状态、怕 Data API
+        抖动把持仓短暂消失误判成卖光,还要逐一决定正常卖单成交 / B0 止损 / 低余额清仓 /
+        结算清仓 / 市场兑付算不算「卖掉」。这里只问「此刻有没有持仓」,对以上全免疫。
+
+        买单成交那一刻持仓还没反映到 Data API,那段空窗由 _handle_fill 里的
+        set_cooldown 盖住,下一 tick 持仓出现后由本方法接管,两者无缝衔接。
+
+        纯筛选用途,**绝不能抛**:写失败只会让冷却早到期一点(下单侧还有持仓判定兜底),
+        而抛出去会中断整轮离场判定、让持仓裸奔。
+        """
+        try:
+            markets = {
+                p.get("conditionId", "")
+                for p in positions
+                if float(p.get("size", 0) or 0) > 0 and p.get("conditionId")
+            }
+            if not markets:
+                return
+            minutes = self.db.get_settings()["cooldown_minutes"]
+            for cid in markets:
+                self.db.set_cooldown(self.wallet_address, cid, minutes)
+        except Exception as e:
+            logger.warning("持仓冷却续期失败(不影响离场): %s", e)
+
     def check_exit(self, open_orders=None):
         """两段式离场:成本≤买一挂卖一,成本>买一挂成本价(永不低于成本;亏损≥强平阈值兜底市价止损)。
 
@@ -603,6 +632,9 @@ class OrderMonitor:
         except Exception as e:
             logger.warning("Data API positions failed (skip exit): %s", e)
             return
+        # 紧跟取持仓之后续冷却,排在取挂单之前:取挂单失败会让本轮早退,排在后面的话
+        # 那一轮就断了续期,冷却可能提前到期、市场被放行。
+        self._renew_position_cooldown(positions)
         if open_orders is None:
             try:
                 open_orders = self.api.get_open_orders()

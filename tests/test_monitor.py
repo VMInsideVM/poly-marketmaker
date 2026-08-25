@@ -3107,3 +3107,90 @@ class TestStep3PrefetchWiring:
         monitor.check_sell_orders()
         stages = [r.get("stage") for r in monitor._status_rows]
         assert "止盈卖单" in stages and "Step1" in stages
+
+
+class TestPositionCooldownRenewal:
+    """市场级冷却改为「完全卖掉之后才开始计时」。
+
+    做法是持仓期间每 tick 把 expires_at 续到 now + cooldown_minutes,卖光后自然
+    停止续期,最后一次续期的到期时间恰好是「卖光后 N 分钟」(误差一个 tick)。
+    这样不必跨 tick 记「持仓从有到无」的转变点 —— 那会怕重启丢状态、怕 Data API
+    抖动把短暂消失误判成卖光,也要逐一决定正常卖单/B0 止损/低余额清仓/结算清仓/
+    市场兑付算不算「卖掉」。续期只问「此刻有没有持仓」,对这些全免疫。
+    """
+
+    def _pos(self, asset, cid, size=100.0):
+        return {
+            "asset": asset,
+            "size": size,
+            "curPrice": 0.30,
+            "conditionId": cid,
+        }
+
+    def _cooldown_calls(self, db):
+        return [c.args for c in db.set_cooldown.call_args_list]
+
+    def test_renews_cooldown_for_each_held_market(self):
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [
+            self._pos("tokA", "mktA"),
+            self._pos("tokB", "mktB"),
+        ]
+        monitor._cost_lots = MagicMock(return_value=(None, []))
+        monitor.check_exit()
+        markets = {args[1] for args in self._cooldown_calls(db)}
+        assert markets == {"mktA", "mktB"}
+        for args in self._cooldown_calls(db):
+            assert args[0] == "0xABC"  # wallet
+            assert args[2] == 20  # cooldown_minutes
+
+    def test_same_market_both_sides_renewed_once(self):
+        # 同一市场的 YES/NO 都有持仓时只续一次,别对同一行写两遍
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [
+            self._pos("tokYes", "mkt1"),
+            self._pos("tokNo", "mkt1"),
+        ]
+        monitor._cost_lots = MagicMock(return_value=(None, []))
+        monitor.check_exit()
+        assert len(self._cooldown_calls(db)) == 1
+
+    def test_no_position_no_renewal(self):
+        # 卖光了 -> 不再续期,冷却按最后一次续期的到期时间自然走完
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = []
+        monitor.check_exit()
+        assert self._cooldown_calls(db) == []
+
+    def test_zero_size_position_not_renewed(self):
+        # size=0 的残留条目不算持仓
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos("tokA", "mktA", size=0.0)]
+        monitor.check_exit()
+        assert self._cooldown_calls(db) == []
+
+    def test_positions_fetch_failure_does_not_renew(self):
+        # 取持仓失败:既不能瞎续(可能已经卖光了)也不能崩
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.side_effect = RuntimeError("data api down")
+        monitor.check_exit()
+        assert self._cooldown_calls(db) == []
+
+    def test_renewal_failure_does_not_break_exit(self):
+        # 续期只是筛选用,写失败绝不能中断离场判定(持仓会因此裸奔)
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos("tok1", "mkt1")]
+        db.set_cooldown.side_effect = RuntimeError("db locked")
+        monitor._cost_lots = MagicMock(return_value=(0.30, []))
+        monitor._sell_book = MagicMock(return_value=(0.01, "0.01", 0.35, 0.40))
+        monitor.check_exit()  # 不得抛
+        api.place_limit_sell.assert_called_once()
+
+    def test_renews_before_open_orders_fetch(self):
+        """续期必须排在取挂单之前:取挂单失败会让 check_exit 早退,排在后面的话
+        那一轮就断了续期,冷却可能提前到期、市场被放行。"""
+        monitor, api, db = _make_monitor()
+        api.get_user_positions.return_value = [self._pos("tok1", "mkt1")]
+        api.get_open_orders.side_effect = RuntimeError("clob down")
+        monitor.check_exit()
+        assert {args[1] for args in self._cooldown_calls(db)} == {"mkt1"}
