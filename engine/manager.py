@@ -748,6 +748,16 @@ class EngineManager:
         self.scan_checked: int = 0
         self._scan_lock = threading.Lock()  # 守卫手动扫描不重复开线程
         self._scan_generation = 0  # 每次启动手动扫描 +1;旧扫描据此合作式让位
+        # 引擎启停代际:每次 start_all/stop_all +1,扫描线程据此判断「我这一代还算不算数」。
+        # **与 _scan_generation 是两码事**,绝不能合并:那个是手动扫描的代际,用户点一次
+        # 「扫描市场」就会 +1,合并的话一次手动扫描就把自动循环停了。
+        # 为什么不能只靠 _stop_event:stop_all set 它、join 一下就丢掉线程引用,而 _discover
+        # 一跑 17-27 分钟且原本全程不检查取消,join 必然超时;随后 start_all 的
+        # _stop_event.clear() 把旧线程唯一的退出依据也抹了——它醒来看到「没让我停」就继续
+        # 跑到进程结束,每重启一次多一个永不退出的循环(2026-08-22 实盘:11:15:34 stopped、
+        # 11:15:50 started,旧循环的下单动作记到 11:20:04)。两个循环并发会对同一市场重复
+        # 挂单、并互相撤对方刚挂的单。代际是单调递增的,clear 不掉。
+        self._engine_generation = 0
         # 下单线程池:钱包之间并行下单。串行时一轮 = 各钱包耗时之和,实盘 7 钱包 ×
         # 8-11 分钟 = 一轮 61 分钟,任一钱包两次挂单之间空窗 67 分钟(2026-08-22 日志)。
         # **必须长期持有、跨轮复用**:models/database.py 是每线程一条 sqlite 连接且
@@ -781,14 +791,22 @@ class EngineManager:
 
         self.startup_recovery()
 
-        # Start auto scanner loop
+        # Start auto scanner loop。先推进代际再 clear:上一代的线程即便还卡在 _discover
+        # 里、醒来时看到 _stop_event 已被 clear,也会因为代际对不上而立刻退出。
+        self._engine_generation += 1
+        gen = self._engine_generation
         self._stop_event.clear()
-        self._scanner_thread = threading.Thread(target=self._scanner_loop, daemon=True)
+        self._scanner_thread = threading.Thread(
+            target=self._scanner_loop, args=(gen,), daemon=True
+        )
         self._scanner_thread.start()
         logger.info("Engine started: %d wallets + auto scanner", len(self.engines))
 
     def stop_all(self):
         """Stop everything: scanner + all wallet workers, cancel all buy orders."""
+        # 先推进代际:join 超时(发现阶段一跑十几分钟,超时是常态)后我们会丢掉线程引用,
+        # 从此再也够不着它,只能靠它自己在下一个检查点看到代际变了而退出。
+        self._engine_generation += 1
         self._stop_event.set()
         if self._scanner_thread:
             self._scanner_thread.join(timeout=30)
@@ -1066,24 +1084,38 @@ class EngineManager:
         if worker:
             worker.stop()
 
-    def _scanner_loop(self):
-        """快节奏循环:按 discovery_interval 发现新市场(慢),每轮刷簿+下单(快)。"""
+    def _scanner_loop(self, gen: int):
+        """快节奏循环:按 discovery_interval 发现新市场(慢),每轮刷簿+下单(快)。
+
+        gen = 启动本线程时的引擎代际。**退出条件必须同时看代际**,不能只看
+        _stop_event:start_all 会先 clear 事件再启新线程,只看事件的话上一代线程醒来
+        看到「没让我停」就永远跑下去(见 __init__ 里 _engine_generation 的注释)。
+        """
         settings = self.db.get_settings()
         place_interval = settings["scan_interval_sec"]
 
-        while not self._stop_event.is_set():
+        def stale():
+            return gen != self._engine_generation
+
+        while not self._stop_event.is_set() and not stale():
             if self._scanner_api and self.engines:
                 try:
                     if self._should_discover(time.time()):
-                        self._discover()
+                        self._discover(gen)
+                except ScanSuperseded:
+                    break  # 发现阶段中途被取消(引擎已停/重启):立刻收工,别再下单
                 except Exception as e:
                     logger.error("Discovery error: %s", e)
+                if stale():
+                    break
                 # 发现失败也不拖垮下单:_scan_with_status 失败保留上一份缓存池,
                 # 本轮仍用它刷簿下单;首启失败则池空,_place_round 空池 guard 跳过。
                 try:
-                    self._place_round()
+                    self._place_round(gen)
                 except Exception as e:
                     logger.error("Place round error: %s", e)
+            if stale():
+                break
             self._maybe_push_weekly()
 
             self._stop_event.wait(timeout=place_interval)
@@ -1209,7 +1241,9 @@ class EngineManager:
             return list(seen.values())
         return [self.db.get_template(self.db.get_default_template_id())]
 
-    def _scan_with_status(self, gen: int = None, skip_orderbook: bool = False) -> list:
+    def _scan_with_status(
+        self, gen: int = None, skip_orderbook: bool = False, stale=None
+    ) -> list:
         """Run one scan, reporting scan_status/progress; shared by manual and
         auto paths. On success sets eligible_markets/last_scan_time and
         scan_status='done' and returns the eligible list. On failure resets
@@ -1242,7 +1276,16 @@ class EngineManager:
             if is_current():
                 self.eligible_markets.append(entry)
 
-        cancel = (lambda: gen != self._scan_generation) if gen is not None else None
+        # 两个独立的取消来源,任一成立就让采集器在最近的检查点抛 ScanSuperseded:
+        #   gen   手动扫描的代际(被更新一轮手动扫描接管)
+        #   stale 引擎代际回调(引擎已停/重启,自动发现必须能被打断——不然它一跑十几
+        #         分钟,stop_all 的 join 必然超时,线程失联后就成了永不退出的僵尸)
+        def _cancelled():
+            if stale is not None and stale():
+                return True
+            return gen is not None and gen != self._scan_generation
+
+        cancel = _cancelled if (stale is not None or gen is not None) else None
 
         try:
             scanner = MarketScanner(self._scanner_api, self.db, "")
@@ -1297,12 +1340,25 @@ class EngineManager:
         interval = self.db.get_settings()["discovery_interval_sec"]
         return (not self.eligible_markets) or (now - self.last_scan_time) >= interval
 
-    def _discover(self):
-        """慢节奏:全量奖励发现(不抓订单簿),刷新缓存候选池 + 持久化。"""
-        self._scan_with_status(skip_orderbook=True)
+    def _discover(self, gen: int = None):
+        """慢节奏:全量奖励发现(不抓订单簿),刷新缓存候选池 + 持久化。
 
-    def _place_round(self):
+        gen = 调用方(扫描线程)的引擎代际,作为取消依据传给采集器:这一步实测要跑
+        17-27 分钟,不给它取消信号的话 stop_all 的 join 必然超时、线程失联。
+        代际一变就在最近的检查点抛 ScanSuperseded。
+
+        gen=None(无代际调用)时**不传 stale**:`None != 任何 int` 恒真,传进去等于
+        一进采集器就自我取消。
+        """
+        stale = (lambda: gen != self._engine_generation) if gen is not None else None
+        self._scan_with_status(skip_orderbook=True, stale=stale)
+
+    def _place_round(self, gen: int = None):
         """快节奏:无簿门槛精筛 -> 只给幸存市场刷订单簿 -> 每钱包下单(跌出撤单)。空池跳过。
+
+        gen = 调用方的引擎代际(None=不校验,供手动下单路径复用)。刷簿+下单要跑几分钟,
+        期间引擎可能已被停掉或重启;每个钱包提交前再判一次,免得上一代的循环又挂一轮单
+        ——两代循环并发时,同一市场会被重复挂单(敞口翻倍)、还会互相撤对方刚挂的单。
 
         刷簿是整轮最贵的一步(每市场每 token 一次网络请求),所以先用不需要订单簿的门槛
         (品类/奖励/结算/冷却/档位/价带)把候选池筛一遍,只抓真正可能下单的那几十个市场的
@@ -1335,8 +1391,10 @@ class EngineManager:
 
         def _place_one(item):
             address, (tmpl, subset) = item
-            # running 在任务体内判(不是提交前):survivors 是提交前算的,排队期间
-            # 钱包可能已被 stop_wallet 停掉,那就不该再给它挂单。
+            # running 与代际都在任务体内判(不是提交前):survivors 是提交前算的,排队
+            # 期间钱包可能已被 stop_wallet 停掉、或整个引擎已被停/重启。
+            if gen is not None and gen != self._engine_generation:
+                return
             worker = self.engines.get(address)
             if not worker or not worker.running:
                 return

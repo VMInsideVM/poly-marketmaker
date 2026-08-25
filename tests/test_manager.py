@@ -1159,3 +1159,209 @@ class TestTickSharesOpenOrders:
             with pytest.raises(RuntimeError):
                 worker._tick()
         assert any("[tick]" in str(r.msg) for r in caplog.records)
+
+
+class TestScannerThreadGeneration:
+    """僵尸扫描线程:重启引擎必须让旧扫描线程真的停下来。
+
+    原实现只靠 _stop_event:stop_all set 它、join(timeout=30) 等一下就把线程引用
+    丢掉,而 _discover 一跑 17-27 分钟且全程不检查任何取消信号,join 必然超时;
+    随后 start_all 的 _stop_event.clear() 把旧线程唯一的退出依据也抹掉了 —— 它醒来
+    看到「没让我停」,继续跑到进程结束。每重启一次多一个永不退出的扫描循环。
+    2026-08-22 实盘:11:15:34 Engine stopped、11:15:50 Engine started,而旧循环的
+    下单动作一直记到 11:20:04。两个循环并发下单会对同一市场重复挂单(敞口翻倍),
+    并互相撤对方刚挂的单。
+    """
+
+    def _loop_manager(self):
+        manager, db = _make_manager()
+        db.get_settings.return_value = dict(
+            db.get_settings.return_value, scan_interval_sec=0.01
+        )
+        manager._scanner_api = MagicMock()
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xABC": worker}
+        return manager, db
+
+    def test_stale_generation_loop_exits_immediately(self):
+        # 代际已被 stop_all/start_all 推进:旧线程任何一次检查都必须直接退出,
+        # 一轮下单/发现都不许再做。
+        manager, _ = self._loop_manager()
+        manager._engine_generation = 2
+        calls = []
+
+        def place(gen=None):
+            calls.append("place")
+            # 兜底:代际检查若失效,这个循环没有任何停止条件会无限空转。让它撞上限后
+            # 自己停下,测试才能以「红」而不是「挂死」的形式报出问题。
+            if len(calls) > 50:
+                manager._stop_event.set()
+
+        manager._place_round = place
+        manager._should_discover = lambda now: False
+        manager._scanner_loop(1)  # 旧代际
+        assert calls == []
+
+    def test_current_generation_loop_runs(self):
+        # 反面用例:代际相符时照常跑(否则上一条断言可能只是因为循环根本没工作)
+        manager, _ = self._loop_manager()
+        manager._engine_generation = 1
+        calls = []
+
+        def place(gen=None):
+            calls.append("place")
+            manager._stop_event.set()  # 跑一轮就让它停,避免测试挂住
+
+        manager._place_round = place
+        manager._should_discover = lambda now: False
+        manager._scanner_loop(1)
+        assert calls == ["place"]
+
+    def test_generation_bump_stops_a_running_loop_even_after_event_cleared(self):
+        """核心回归:旧线程在 _stop_event 被 clear 之后醒来,也必须退出。
+
+        这正是原 bug 的时序 —— start_all 先 clear 再启新线程,旧线程醒来时
+        _stop_event.is_set() 已经是 False。只有代际能救它。
+        """
+        manager, _ = self._loop_manager()
+        manager._engine_generation = 1
+        rounds = []
+        entered = threading.Event()
+
+        def place(gen=None):
+            rounds.append(len(rounds))
+            entered.set()
+            # 跑飞兜底:代际检查失效时线程不会自己停,靠这个收场以免测试永久挂住。
+            # 注意它 set 的是 _stop_event —— 那等于替线程做了本该由代际做的事,所以
+            # 下面**不能**只断言线程已退出(那样破坏实现也照样绿),必须断言它是在代际
+            # 推进后的头几轮就退出的,而不是一路空转到撞上这个上限。
+            if len(rounds) > 60:
+                manager._stop_event.set()
+
+        manager._place_round = place
+        manager._should_discover = lambda now: False
+
+        t = threading.Thread(target=manager._scanner_loop, args=(1,), daemon=True)
+        t.start()
+        assert entered.wait(timeout=5), "循环没跑起来"
+
+        # 模拟 stop_all + start_all:推进代际,并且 clear 掉事件(原 bug 的关键一步)
+        n_at_bump = len(rounds)
+        manager._engine_generation = 2
+        manager._stop_event.clear()
+
+        t.join(timeout=5)
+        assert not t.is_alive(), "旧扫描线程在代际推进后仍未退出(僵尸)"
+        extra = len(rounds) - n_at_bump
+        assert extra <= 3, f"代际推进后又空转了 {extra} 轮(靠跑飞兜底才停下,说明代际检查没生效)"
+        n = len(rounds)
+        time.sleep(0.1)
+        assert len(rounds) == n, "退出后仍在下单"
+
+    def test_stop_all_bumps_generation(self):
+        manager, _ = self._loop_manager()
+        before = manager._engine_generation
+        manager._scanner_thread = None  # 没有真线程要 join
+        manager.engines = {}
+        manager.stop_all()
+        assert manager._engine_generation > before
+
+    def test_start_all_bumps_generation_and_passes_it_to_thread(self):
+        manager, db = self._loop_manager()
+        db.list_wallets.return_value = []
+        before = manager._engine_generation
+        started = {}
+
+        class FakeThread:
+            def __init__(self, target=None, args=(), daemon=None):
+                started["args"] = args
+
+            def start(self):
+                pass
+
+        with patch("engine.manager.threading.Thread", FakeThread):
+            manager.start_all()
+        assert manager._engine_generation > before
+        assert started["args"] == (manager._engine_generation,), started
+
+    def test_discover_without_generation_passes_no_cancel(self):
+        """无代际调用(gen=None)不能传 stale:`None != 任何 int` 恒真,传进去等于
+        一进采集器就自我取消,整个发现阶段直接作废。"""
+        manager, _ = self._loop_manager()
+        manager._engine_generation = 7
+        captured = {}
+
+        def fake_scan(gen=None, skip_orderbook=False, stale=None):
+            captured["stale"] = stale
+            return []
+
+        manager._scan_with_status = fake_scan
+        manager._discover()
+        assert captured["stale"] is None
+
+    def test_place_round_without_generation_still_places(self):
+        """同理,_place_round(gen=None) 不校验代际(供手动下单路径复用)。"""
+        manager, _ = self._loop_manager()
+        manager._engine_generation = 7
+        manager.eligible_markets = [{"market_id": "m9", "tags": []}]
+        worker = manager.engines["0xABC"]
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def prefilter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
+            def refresh_orderbooks(self, pool):
+                pass
+
+            def book_eligible(self, market, tmpl):
+                return [market]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._place_round()
+        worker.place_orders.assert_called_once()
+
+    def test_place_round_skips_wallets_when_generation_stale(self):
+        """两代循环并发时,上一代不许再挂单——同一市场重复挂单会让敞口翻倍。"""
+        manager, _ = self._loop_manager()
+        manager._engine_generation = 2
+        manager.eligible_markets = [{"market_id": "m9", "tags": []}]
+        worker = manager.engines["0xABC"]
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def prefilter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
+            def refresh_orderbooks(self, pool):
+                pass
+
+            def book_eligible(self, market, tmpl):
+                return [market]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._place_round(1)  # 旧代际
+        worker.place_orders.assert_not_called()
+
+    def test_discover_cancel_fires_on_generation_bump(self):
+        """_discover 期间(17-27 分钟)必须能被取消,否则 join 永远超时。
+        自动模式原本 cancel=None,全程硬跑到底。"""
+        manager, _ = self._loop_manager()
+        manager._engine_generation = 1
+        captured = {}
+
+        def fake_scan(gen=None, skip_orderbook=False, stale=None):
+            captured["stale"] = stale
+            return []
+
+        manager._scan_with_status = fake_scan
+        manager._discover(1)
+        assert captured["stale"] is not None, "自动发现没有传取消回调"
+        assert captured["stale"]() is False  # 代际未变 -> 不取消
+        manager._engine_generation = 2
+        assert captured["stale"]() is True  # 代际已变 -> 取消
