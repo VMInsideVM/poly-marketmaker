@@ -675,6 +675,11 @@ class OrderMonitor:
             # 结算清仓:结果已提交,无视盈亏、无视成本是否算得出,市价清掉该持仓。
             self._resolution_dump(cid, asset_id, size, cur, cost, lots, open_orders)
             return
+        if take_profit_mode == "market_always":
+            # 止盈方式=直接市价清仓:不论盈亏,只要有持仓就市价卖出,不走两段式判断,
+            # 成本算不出来也照卖(与结算清仓同理)。
+            self._market_always_dump(cid, asset_id, size, cur, cost, lots, open_orders)
+            return
         if cost is None or cost <= 0:
             logger.warning(
                 "Exit skipped (no buy fills) asset=%s size=%s — UNPROTECTED",
@@ -914,6 +919,40 @@ class OrderMonitor:
                 detail=f"成本{cost:.4f} 成交≈{fill:.4f}",
             )
             return
+
+    def _market_always_dump(self, cid, asset_id, size, cur, cost, lots, open_orders):
+        """止盈方式=market_always:不论盈亏,只要有持仓就市价清仓,不做两段式判断。
+
+        成本算不出来(cost=None)也照样卖(_market_dump 原生支持,记录里显示成本未知、
+        不计盈亏);无买盘卖不出时不记幻影成交,发 ⚠️ 状态行,下 tick 自愈重试。
+        """
+        _, tick_str, best_bid, _ = self._sell_book(asset_id)
+        if best_bid is None or best_bid <= 0:
+            self._status_add(
+                market=cid,
+                side="卖出",
+                price="-",
+                size=str(size),
+                matched="-",
+                stage="离场",
+                action="⚠️止盈·无买盘暂未清仓",
+                detail="止盈方式=直接市价清仓，但盘口无买盘，市价卖不出，待有买盘再清",
+            )
+            return
+        self._market_dump(
+            cid,
+            asset_id,
+            size,
+            cur,
+            best_bid,
+            cost,
+            lots,
+            open_orders,
+            tag="止盈",
+            reason="止盈方式=直接市价清仓：不论盈亏，立即市价卖出",
+            expose_on_fail=True,
+            tick_str=tick_str,
+        )
 
     def _resolution_dump(self, cid, asset_id, size, cur, cost, lots, open_orders):
         """结算清仓:市场结果已提交(umaResolutionStatus 非空)时,无视盈亏市价把该持仓清掉。

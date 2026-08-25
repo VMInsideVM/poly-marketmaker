@@ -1634,6 +1634,60 @@ class TestExitTakeProfitMode:
         args, kwargs = api.place_limit_sell.call_args
         assert abs(args[1] - 0.40) < 1e-9
 
+    def test_market_always_mode_profit_dumps_market(self):
+        # take_profit_mode=market_always:不论盈亏都市价清仓,不挂 maker 卖单。
+        monitor, api, db = _make_monitor({"take_profit_mode": "market_always"})
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        monitor._cost_lots = MagicMock(return_value=(0.30, []))
+        monitor._sell_book = MagicMock(return_value=(0.01, "0.01", 0.35, 0.40))
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once_with("tok1", 100.0, tick_size="0.01")
+        api.place_limit_sell.assert_not_called()
+        db.record_trade.assert_called_once()  # 成本已知 -> 记 pnl
+
+    def test_market_always_mode_underwater_still_dumps_market(self):
+        # 套牢(成本 0.40 > 买一 0.30)也照样市价卖,不挂成本价等回本。
+        # 止损显式关闭,排除"碰巧触发 B0 强平"的假阳性 —— 要测的是 market_always 本身的分支。
+        monitor, api, db = _make_monitor(
+            {"take_profit_mode": "market_always", "stop_loss_mode": "off"}
+        )
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        monitor._cost_lots = MagicMock(return_value=(0.40, []))
+        monitor._sell_book = MagicMock(return_value=(0.01, "0.01", 0.30, 0.42))
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once_with("tok1", 100.0, tick_size="0.01")
+        api.place_limit_sell.assert_not_called()
+
+    def test_market_always_mode_cost_unknown_still_dumps(self):
+        # 成本重建失败(get_trades 无买入成交):正常模式会「跳过·裸奔」,这个模式仍照卖。
+        monitor, api, db = _make_monitor({"take_profit_mode": "market_always"})
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        monitor._cost_lots = MagicMock(return_value=(None, []))
+        monitor._sell_book = MagicMock(return_value=(0.01, "0.01", 0.30, 0.42))
+        rows = []
+        monitor._status_add = lambda **kw: rows.append(kw)
+        monitor.check_exit()
+        api.place_market_sell.assert_called_once_with("tok1", 100.0, tick_size="0.01")
+        db.record_trade.assert_not_called()  # 成本未知 -> 不记 pnl
+        assert not any("裸奔" in (r.get("action") or "") for r in rows), rows
+
+    def test_market_always_mode_no_bid_skips_without_phantom_record(self):
+        # 无买盘卖不出:不能记幻影成交,发 ⚠️ 无买盘状态行,下 tick 再试。
+        monitor, api, db = _make_monitor({"take_profit_mode": "market_always"})
+        api.get_user_positions.return_value = [self._pos()]
+        api.get_open_orders.return_value = []
+        monitor._cost_lots = MagicMock(return_value=(0.30, []))
+        monitor._sell_book = MagicMock(return_value=(0.01, "0.01", None, 0.40))
+        rows = []
+        monitor._status_add = lambda **kw: rows.append(kw)
+        monitor.check_exit()
+        api.place_market_sell.assert_not_called()
+        db.record_trade.assert_not_called()
+        assert any("无买盘" in (r.get("action") or "") for r in rows), rows
+
 
 # ---------------------------------------------------------------------------
 # 结算守卫(持仓侧):umaResolutionStatus 非空 -> 该持仓无视盈亏市价清仓

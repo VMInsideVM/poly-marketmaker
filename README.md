@@ -229,7 +229,7 @@ pytest tests/test_strategy.py     # 单个文件
 | `stop_loss_mode` | `percent` | 强平止损方式：`percent`（占成本百分比）/ `fixed`（固定美分）/ `off`（关闭） |
 | `stop_loss_percent` | 20 | 按比例止损时：亏到成本的百分之多少市价清仓 |
 | `theta_stop_cents` | 5 | 按固定金额止损时：亏损达到这么多美分市价清仓 |
-| `take_profit_mode` | `maker` | 浮盈卖法：`maker` 挂卖一吃价差 / `market` 成本 < 买一时立即市价清仓 |
+| `take_profit_mode` | `maker` | 浮盈卖法：`maker` 挂卖一吃价差 / `market` 成本 < 买一时立即市价清仓 / `market_always` 不论盈亏、只要有持仓就立即市价清仓 |
 | `max_exposure_usd` / `max_exposure_shares` | 250 / 500 | 单市场最大敞口（美元 / 份数） |
 | `max_concurrent_markets` | 10 | 最大并发做市市场数 |
 
