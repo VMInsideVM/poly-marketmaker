@@ -194,11 +194,11 @@
         </div>
         <div class="table-scroll">
             <table class="data-table">
-                <thead><tr><th>品类</th><th>计数</th><th>做市</th><th>跳过新市场</th></tr></thead>
+                <thead><tr><th>品类</th><th>计数</th><th>做市</th><th>排除</th><th>跳过新市场</th></tr></thead>
                 <tbody id="included-categories"></tbody>
             </table>
         </div>
-        <p class="hint" style="color:#888;font-size:12px">「做市」勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。「跳过新市场」只在上面的总开关打开时生效：勾中的品类里，创建时间不足保护期的市场不做（实际生效可能比保护期晚最多一个「市场发现间隔」，默认 4 小时）；没勾的品类照常做新市场。计数是当前该品类的市场数，每次「扫描市场」后自动更新，也可点上方「刷新计数」手动拉取；没有计数不影响勾选。</p>
+        <p class="hint" style="color:#888;font-size:12px">「做市」勾中的品类才做市，「其他/未分类」= 不属于以上任何品类的市场。「排除」勾中的品类一票否决：只要市场带这个标签就不做，哪怕它同时带着你勾了「做市」的标签（官方品类互相重叠，例如不少选举市场同时挂在政治下，光靠不勾「选举」是挡不住的）。排除优先于做市，两列互斥；「其他/未分类」没有标签可排除，故该行不提供这一列。「跳过新市场」只在上面的总开关打开时生效：勾中的品类里，创建时间不足保护期的市场不做（实际生效可能比保护期晚最多一个「市场发现间隔」，默认 4 小时）；没勾的品类照常做新市场。计数是当前该品类的市场数，每次「扫描市场」后自动更新，也可点上方「刷新计数」手动拉取；没有计数不影响勾选。</p>
 
         <h3>档位模块（按市场最低奖励份额精确匹配）</h3>
         <div id="size-tiers"></div>
@@ -282,7 +282,7 @@ function loadTemplates() {
     });
 }
 
-function makeCatRow(slug, label, count, make, skip, isOther) {
+function makeCatRow(slug, label, count, make, skip, isOther, excl) {
     const tr = document.createElement('tr');
     const nameTd = document.createElement('td');
     nameTd.textContent = label;
@@ -296,6 +296,21 @@ function makeCatRow(slug, label, count, make, skip, isOther) {
     if (isOther) { makeCb.id = 'include-other'; }
     else { makeCb.className = 'cat-make'; makeCb.value = slug; }
     makeTd.appendChild(makeCb);
+    // 排除列：「其他/未分类」不带任何 curated 标签，排除集碰不到它（它归「做市」列
+    // 的 include_other 管），所以那一行只显示占位符，不给勾选框。
+    const exclTd = document.createElement('td');
+    if (isOther) {
+        exclTd.textContent = '—';
+        exclTd.style.color = '#888';
+    } else {
+        const exclCb = document.createElement('input');
+        exclCb.type = 'checkbox';
+        exclCb.checked = !!excl;
+        exclCb.className = 'cat-excl';
+        exclCb.value = slug;
+        exclCb.onchange = updateSkipNewCol;
+        exclTd.appendChild(exclCb);
+    }
     const skipTd = document.createElement('td');
     const skipCb = document.createElement('input');
     skipCb.type = 'checkbox';
@@ -303,28 +318,29 @@ function makeCatRow(slug, label, count, make, skip, isOther) {
     if (isOther) { skipCb.id = 'skip-new-other'; }
     else { skipCb.className = 'cat-skip'; skipCb.value = slug; }
     skipTd.appendChild(skipCb);
-    tr.append(nameTd, cntTd, makeTd, skipTd);
+    tr.append(nameTd, cntTd, makeTd, exclTd, skipTd);
     return tr;
 }
 
-function renderCategories(catalog, selected, includeOther, skipSelected, skipOther) {
+function renderCategories(catalog, selected, includeOther, skipSelected, skipOther, excluded) {
     const box = document.getElementById('included-categories');
     box.innerHTML = '';
     const sel = new Set(selected || []);
     const skipSel = new Set(skipSelected || []);
+    const exclSel = new Set(excluded || []);
     const cats = catalog.categories || [];
     const known = new Set(cats.map(c => c.slug));
     // 全部品类都显示(不再按计数隐藏,0 个市场的也在);计数只作点缀
     const shown = cats.slice();
     // 已选但目录里没有的(极少)补上:做市名单与保护名单都要补,否则勾选会在下次保存时丢失
-    (selected || []).concat(skipSelected || []).forEach(s => {
+    (selected || []).concat(skipSelected || []).concat(excluded || []).forEach(s => {
         if (!known.has(s) && !shown.some(c => c.slug === s)) {
             shown.push({slug: s, label: s, count: 0});
         }
     });
     shown.forEach(c => box.appendChild(makeCatRow(
         c.slug, c.label, catalog.ready ? (c.count || 0) : null,
-        sel.has(c.slug), skipSel.has(c.slug), false
+        sel.has(c.slug), skipSel.has(c.slug), false, exclSel.has(c.slug)
     )));
     // 「其他/未分类」固定作最后一行
     box.appendChild(makeCatRow(
@@ -338,15 +354,22 @@ function renderCategories(catalog, selected, includeOther, skipSelected, skipOth
     updateSkipNewCol();
 }
 
-// 「跳过新市场」列的置灰:总开关关着、或该品类根本不做市时,这个勾选没有意义。
+// 「排除」与「做市」互斥的置灰,以及「跳过新市场」列的置灰:总开关关着、该品类
+// 根本不做市、或已被排除时,后面的勾选都没有意义。
 // 只置灰不清值——disabled 的 checkbox 依然会被 :checked 选中并保存,取消再勾回来不丢配置。
+// 后端仍以「排除优先」为准(见 engine/categories.py market_wanted),即便 DB 里
+// 存进了两边都勾的矛盾配置,也一定不下单。
 function updateSkipNewCol() {
     const on = !!(document.getElementById('skip-new-markets') || {}).checked;
     document.querySelectorAll('#included-categories tr').forEach(tr => {
         const make = tr.querySelector('input.cat-make, #include-other');
         const skip = tr.querySelector('input.cat-skip, #skip-new-other');
         if (!make || !skip) return;
-        skip.disabled = !on || !make.checked;
+        const excl = tr.querySelector('input.cat-excl');
+        const isExcluded = !!(excl && excl.checked);
+        make.disabled = isExcluded;          // 排除了就谈不上做市
+        if (excl) excl.disabled = false;     // 排除列自己永不置灰,否则勾上就取消不掉
+        skip.disabled = !on || !make.checked || isExcluded;
     });
 }
 
@@ -358,6 +381,7 @@ function collectCategorySelections() {
         other: !!(document.getElementById('include-other') || {}).checked,
         skip: q('#included-categories input.cat-skip:checked'),
         skipOther: !!(document.getElementById('skip-new-other') || {}).checked,
+        excluded: q('#included-categories input.cat-excl:checked'),
     };
 }
 
@@ -375,15 +399,15 @@ function refreshCategories(ev) {
     const cur = collectCategorySelections();
     const empty = {ready: false, categories: [], other_count: 0};
     document.getElementById('included-categories').innerHTML =
-        '<tr><td colspan="4" class="hint" style="color:#888">刷新中…</td></tr>';
+        '<tr><td colspan="5" class="hint" style="color:#888">刷新中…</td></tr>';
     const draw = catalog => renderCategories(
-        catalog, cur.included, cur.other, cur.skip, cur.skipOther);
+        catalog, cur.included, cur.other, cur.skip, cur.skipOther, cur.excluded);
     fetch('/api/categories?refresh=1').then(r => r.json()).then(draw).catch(() => draw(empty));
 }
 
 function loadStrategy(tid) {
     document.getElementById('included-categories').innerHTML =
-        '<tr><td colspan="4" class="hint" style="color:#888">加载中…</td></tr>';
+        '<tr><td colspan="5" class="hint" style="color:#888">加载中…</td></tr>';
 
     const tmplP = fetch(`/api/templates/${tid}`).then(r => r.json());
     const catP = fetch('/api/categories').then(r => r.json())
@@ -412,7 +436,8 @@ function loadStrategy(tid) {
             data.included_categories || [],
             data.include_other,
             data.skip_new_categories || [],
-            data.skip_new_other
+            data.skip_new_other,
+            data.veto_categories || []
         );
     });
 }
@@ -630,6 +655,7 @@ document.getElementById('strategy-form').addEventListener('submit', function(e) 
     data.include_other = cats.other;
     data.skip_new_categories = cats.skip;
     data.skip_new_other = cats.skipOther;
+    data.veto_categories = cats.excluded;
     fetch(`/api/templates/${currentTemplateId}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data),

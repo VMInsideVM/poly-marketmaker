@@ -58,8 +58,22 @@ both template-level and both defaulting to *everything*, so an upgrade changes n
 behavior. The category verdict is **any-hit**: a market whose tags include any protected
 slug is protected; an untagged market (no curated tag at all) follows `skip_new_other`.
 That verdict is the same pure function the trading whitelist uses — `market_in_categories`
-in `engine/categories.py`, of which `market_wanted` is now a one-line wrapper — so the two
-cannot drift. The age floor is judged twice: once in the shared `discover_candidates`,
+in `engine/categories.py`, which `market_wanted` delegates to after its own veto check — so
+the two cannot drift. **`veto_categories` (template-level, default empty) is the trading
+whitelist's veto and lives only on `market_wanted`**: a market carrying any vetoed tag is
+not traded even when another of its tags is whitelisted. It deliberately does NOT touch
+`market_in_categories`, so new-market protection is unaffected — refusing to trade a
+category and protecting new markets in it are different questions. It only works if its slugs actually get
+tagged, which takes two things: they are unioned into `slugs_needed` in
+`discover_candidates` (a slug that is never queried is never tagged, so the veto could
+never fire — a dud), and `veto_categories` is part of the `_active_templates` dedup key,
+so that two templates vetoing different categories are not collapsed into one and half
+the union silently dropped from that query set. The key is **not** named
+`excluded_categories`: that was the pre-v3.0.0 blacklist ("trade everything except these",
+mutually exclusive with the whitelist) and user databases still hold stale rows for it —
+`tests/test_database.py` asserts that name stays out of `TEMPLATE_DEFAULTS`. Untagged
+("other") markets carry no curated tag, so the veto cannot reach them; they stay under
+`include_other`. The age floor is judged twice: once in the shared `discover_candidates`,
 where `loosest_new_market_hours(templates, tags)` returns a per-market threshold (a market
 is excluded only if *every* template would exclude it, i.e. every template has the switch
 on **and** protects that market's categories; then the smallest N wins), and once per

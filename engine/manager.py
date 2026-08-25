@@ -1192,6 +1192,9 @@ class EngineManager:
             key = (
                 tuple(sorted(tmpl.get("included_categories", []) or [])),
                 bool(tmpl.get("include_other", False)),
+                # 排除集也进去重键:它决定 slugs_needed(排除的 slug 要一并去查,
+                # 否则打不出标签、排除判不出来),排除集不同的模板不能被去重成一个。
+                tuple(sorted(tmpl.get("veto_categories", []) or [])),
                 tmpl.get("min_reward_usd", 0),
                 tmpl.get("min_settlement_days"),
                 tmpl.get("max_settlement_days"),

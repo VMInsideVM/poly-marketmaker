@@ -800,6 +800,41 @@ class TestDiscoverNeededSlugsOnly:
         db.get_blacklist_ids.return_value = set()
         return api, db
 
+    def test_excluded_slugs_are_queried_so_the_veto_can_fire(self):
+        """排除集的 slug 必须一并去查,否则排除是个永远打不响的哑弹。
+
+        tag_pool 只按「查过的 slug」给市场打标签(不收「其他」时 tags 是残缺的)。
+        排除 elections 却不查 elections,市场标签里就不会出现 elections,
+        market_wanted 的排除分支永远不成立 —— 配了等于没配。
+        """
+        queried = []
+
+        def fake_rewards(tag_slug=None, **kw):
+            queried.append(tag_slug)
+            return {
+                "politics": [{"condition_id": "P"}, {"condition_id": "PE"}],
+                "elections": [{"condition_id": "PE"}],
+            }.get(tag_slug, [])
+
+        api, db = self._api_db(fake_rewards)
+        scanner = MarketScanner(api, db, "")
+        pool = scanner.fetch_candidates(
+            [
+                {
+                    "included_categories": ["politics"],
+                    "veto_categories": ["elections"],
+                    "include_other": False,
+                    "min_reward_usd": 0,
+                }
+            ],
+            skip_orderbook=True,
+        )
+        assert "elections" in queried, f"排除集的 slug 没被查:{queried}"
+        # 打上了标签,排除才判得出来 —— 发现阶段本身不剔(池子跨模板共享),
+        # 剔除交给各模板的 prefilter_for_template。
+        tags = {m["condition_id"]: m.get("tags", []) for m in pool}
+        assert "elections" in tags.get("PE", []), tags
+
     def test_only_needed_slugs_queried_without_include_other(self):
         # 不收「其他」时:只查各模板 included 并集,不再固定查全 14。
         queried = []
@@ -1035,6 +1070,66 @@ class TestPrefilterForTemplate:
         ]
         tmpl = self._template(included_categories=["politics"], include_other=False)
         assert self._ids(scanner, pool, tmpl) == {"A"}
+
+    def test_veto_categories_veto_overlapping_market(self):
+        """排除集命中即不做市,哪怕它同时命中白名单。
+
+        实盘:模板勾 politics、没勾 elections,却在官方标签为
+        ['politics','elections'] 的选举市场挂了单 —— 白名单是 OR 语义,交集非空
+        就过。候选池里带 elections 的 54 个市场有 44 个同时带 politics,调白名单
+        挡不住,只能靠排除集一票否决。
+        """
+        scanner = self._scanner()
+        pool = [
+            self._candidate("KEEP", tags=["politics"]),
+            self._candidate("VETO", tags=["politics", "elections"]),
+        ]
+        tmpl = self._template(
+            included_categories=["politics"], veto_categories=["elections"]
+        )
+        assert self._ids(scanner, pool, tmpl) == {"KEEP"}
+
+    def test_veto_categories_absent_key_is_zero_regression(self):
+        # 模板没有 veto_categories 键(升级上来的老模板):不剔任何东西
+        scanner = self._scanner()
+        pool = [self._candidate("A", tags=["politics", "elections"])]
+        tmpl = self._template(included_categories=["politics"])
+        tmpl.pop("veto_categories", None)
+        assert self._ids(scanner, pool, tmpl) == {"A"}
+
+    def test_veto_categories_empty_list_is_zero_regression(self):
+        scanner = self._scanner()
+        pool = [self._candidate("A", tags=["politics", "elections"])]
+        tmpl = self._template(
+            included_categories=["politics"], veto_categories=[]
+        )
+        assert self._ids(scanner, pool, tmpl) == {"A"}
+
+    def test_veto_categories_do_not_disable_include_other(self):
+        # 「其他」(空 tags)不带 curated 标签,排除集碰不到它,仍归 include_other 管
+        scanner = self._scanner()
+        pool = [self._candidate("OTHER", tags=[])]
+        tmpl = self._template(
+            included_categories=["politics"],
+            include_other=True,
+            veto_categories=["elections"],
+        )
+        assert self._ids(scanner, pool, tmpl) == {"OTHER"}
+
+    def test_veto_categories_do_not_affect_new_market_protection(self):
+        """排除集不能牵连新市场保护:保护名单走 market_in_categories,与做市白名单
+        是两码事。这里 politics 被保护、市场只有 5 小时,该被保护挡掉(而不是因为
+        排除集里有 elections 就走别的分支)。"""
+        scanner = self._scanner()
+        pool = [self._aged("NEW", 5)]
+        pool[0]["tags"] = ["politics"]
+        tmpl = self._template(
+            skip_new_markets=True,
+            new_market_hours=24,
+            skip_new_categories=["politics"],
+            veto_categories=["elections"],
+        )
+        assert self._ids(scanner, pool, tmpl) == set()
 
     def test_drops_cooldown(self):
         scanner = self._scanner(cooldown=True)

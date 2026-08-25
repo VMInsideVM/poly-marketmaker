@@ -95,6 +95,11 @@ TEMPLATE_DEFAULTS = {
     "take_profit_mode": "maker",
     "included_categories": DEFAULT_INCLUDED_CATEGORIES,
     "include_other": True,
+    # 排除品类:命中即不做市,优先于上面的白名单。默认空 = 不排除,零回归。
+    # 白名单是「命中任一即要」的 OR 语义,而官方品类互相重叠(某选举市场同时挂在
+    # politics 和 elections 下),只勾 politics 也会把它收进来;收窄白名单挡不住
+    # 这种重叠,要拒绝某个品类只能靠这里一票否决。
+    "veto_categories": [],
     "max_exposure_usd": 250,
     "max_exposure_shares": 500,
     "max_concurrent_markets": 10,

@@ -26,6 +26,7 @@ from engine.categories import (
     included_union,
     any_include_other,
     tag_pool,
+    veto_union,
     market_in_categories,
     market_wanted,
     count_by_category,
@@ -205,10 +206,17 @@ class MarketScanner:
         补精确奖励。钱包无关、网络密集(rewards 端点)、不抓订单簿、不算价。"""
         union = included_union(templates)
         inc_other = any_include_other(templates)
-        # 只查用得上的品类:收「其他」时判其他绕不开、必须查全 14;否则只需 included 并集。
-        # 注意:只按 included_categories 打标签,故 tags 可能残缺;新市场保护判定因此与
+        veto = veto_union(templates)
+        # 只查用得上的品类:收「其他」时判其他绕不开、必须查全 14;否则只需 included 并集
+        # **加上各模板的排除集**——排除集的 slug 不查就打不出标签,market_wanted 的排除
+        # 分支永远不成立,配了等于没配(哑弹)。
+        # 注意:只按这些 slug 打标签,故 tags 可能残缺;新市场保护判定因此与
         # 做市名单取交集(见 loosest_new_market_hours),改这行前先确认那边仍成立。
-        slugs_needed = set(CATALOG_SLUGS) if inc_other else (union & set(CATALOG_SLUGS))
+        slugs_needed = (
+            set(CATALOG_SLUGS)
+            if inc_other
+            else ((union | veto) & set(CATALOG_SLUGS))
+        )
         floors = [t.get("min_reward_usd", 0) for t in templates]
         min_floor = min(floors) if floors else 0
 
@@ -533,6 +541,8 @@ class MarketScanner:
         max_days = template.get("max_settlement_days")  # None=不限上限
         included = set(template.get("included_categories", []) or [])
         include_other = bool(template.get("include_other", False))
+        # 排除集:命中即不做市,优先于白名单。缺键/空 = 不排除任何品类(零回归)。
+        veto = set(template.get("veto_categories", []) or [])
         tier_sizes = enabled_sizes(template.get("size_tiers") or [])
         skip_new = bool(template.get("skip_new_markets"))
         new_hours = _new_market_hours(template)
@@ -546,7 +556,7 @@ class MarketScanner:
         survivors = []
         for market in candidate_pool:
             tags = market.get("tags", [])
-            if not market_wanted(tags, included, include_other):
+            if not market_wanted(tags, included, include_other, veto):
                 continue
             total_rate = _batch_rate(market)
             market_reward = market.get("market_reward", total_rate)

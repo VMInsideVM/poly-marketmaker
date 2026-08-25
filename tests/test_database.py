@@ -51,6 +51,50 @@ def test_config_split_engine_and_template_defaults():
     assert ENGINE_DEFAULTS["discovery_interval_sec"] == 14400
 
 
+def test_veto_categories_default_empty_and_roundtrips(tmp_path):
+    """排除品类(veto_categories)默认空、存得进读得出。
+
+    键名刻意不叫 excluded_categories:那是 v3.0.0 之前的黑名单键(语义「不做这些、
+    其余都做」,与白名单二选一),用户库里仍有残留值。上面那条
+    `assert "excluded_categories" not in TEMPLATE_DEFAULTS` 守的就是它不许复活。
+    """
+    from config import TEMPLATE_DEFAULTS
+
+    assert TEMPLATE_DEFAULTS["veto_categories"] == []
+
+    database = Database(str(tmp_path / "veto.db"))
+    database.init()
+    try:
+        tid = database.get_default_template_id()
+        assert database.get_template(tid)["veto_categories"] == []
+        database.save_template(tid, {"veto_categories": ["elections"]})
+        assert database.get_template(tid)["veto_categories"] == ["elections"]
+    finally:
+        database.close()
+
+
+def test_legacy_excluded_categories_row_does_not_leak_into_veto(tmp_path):
+    """库里残留的 v3.0.0 黑名单值绝不能被当成新的排除集读出来。
+
+    实测某台机器的默认模板仍存着 excluded_categories=["sports","esports","weather"]。
+    两个键同名的话,升级后这三个品类会凭空变成一票否决,而用户看不出为什么。
+    """
+    database = Database(str(tmp_path / "legacy.db"))
+    database.init()
+    try:
+        tid = database.get_default_template_id()
+        # 直接写入老键,模拟升级上来的库
+        database.save_template(
+            tid, {"excluded_categories": ["sports", "esports", "weather"]}
+        )
+        tmpl = database.get_template(tid)
+        assert tmpl["veto_categories"] == []  # 新键不受老值污染
+        # 老键仍在 dict 里(get_template 不过滤 stored),但没有任何代码读它
+        assert tmpl["excluded_categories"] == ["sports", "esports", "weather"]
+    finally:
+        database.close()
+
+
 def test_template_defaults_has_exposure_keys():
     from config import TEMPLATE_DEFAULTS
 

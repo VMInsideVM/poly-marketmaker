@@ -217,6 +217,7 @@ pytest tests/test_strategy.py     # 单个文件
 | `skip_new_categories` / `skip_new_other` | 全部品类 / `true` | 新市场保护对哪些做市品类生效（tag slug）；`skip_new_other` 管「其他/未分类」。默认全部，等同升级前的一刀切行为 |
 | `included_categories` | 除 sports/esports/weather 外全部 | 做市品类白名单（勾中的才做，tag slug） |
 | `include_other` | `true` | 是否做市「其他/未分类」（不属于任何 curated 品类的市场） |
+| `veto_categories` | 空 | 排除品类（tag slug）：市场带其中任一标签就不做，优先于白名单。官方品类互相重叠（多数选举市场同时挂在政治下），白名单是「命中任一即要」，光不勾「选举」挡不住；要拒绝某个品类得填这里。「其他/未分类」不带标签，不受它影响 |
 | `size_tiers` | （空） | **档位模块**：按市场最低奖励份额**精确匹配**。每档配 启用 / 挂单份数（≥档位值）/ 规则 1-3 选档门槛 / 规则 1-3 高位系数和门槛 / 金额数值表。**没有任何已启用模块对得上的市场不挂单** |
 | `gap_wide_cents` / `gap_mid_cents` | 10 / 5 | 断层分级阈值（美分）：> 宽 → 规则 1，≥ 中 → 规则 2，更小 → 规则 3 |
 | `cliff_probe_cents` | 2 | 悬崖否决：奖励区间下沿往下这么多美分内没有买档，该侧不挂（0 = 关）。两种挂单模式都生效 |
