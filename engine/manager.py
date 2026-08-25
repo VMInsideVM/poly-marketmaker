@@ -10,6 +10,7 @@ import functools
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from api.polymarket_api import PolymarketAPI
 from api.proxy import use_proxy
@@ -747,6 +748,16 @@ class EngineManager:
         self.scan_checked: int = 0
         self._scan_lock = threading.Lock()  # 守卫手动扫描不重复开线程
         self._scan_generation = 0  # 每次启动手动扫描 +1;旧扫描据此合作式让位
+        # 下单线程池:钱包之间并行下单。串行时一轮 = 各钱包耗时之和,实盘 7 钱包 ×
+        # 8-11 分钟 = 一轮 61 分钟,任一钱包两次挂单之间空窗 67 分钟(2026-08-22 日志)。
+        # **必须长期持有、跨轮复用**:models/database.py 是每线程一条 sqlite 连接且
+        # 从不回收,每轮新建线程池 = 每轮泄露 N 条连接(30 秒一轮 × 5 钱包 ≈ 每小时
+        # 600 条)。这也是 api/proxy.py parallel_map(每次 with 新建池)不能用在下单
+        # 路径上的原因 —— place_orders 全程读写 db,不是纯网络读。
+        # max_workers 只是上限:线程懒建,实际只长到「同时下单的钱包数」。
+        self._place_pool = ThreadPoolExecutor(
+            max_workers=32, thread_name_prefix="place"
+        )
 
     # === Auto mode: full engine lifecycle ===
 
@@ -1319,10 +1330,13 @@ class EngineManager:
             logger.info("本轮无市场通过无簿门槛,跳过刷订单簿")
         scanner.refresh_orderbooks(list(needed.values()))
 
-        for address, (tmpl, subset) in survivors.items():
+        def _place_one(item):
+            address, (tmpl, subset) = item
+            # running 在任务体内判(不是提交前):survivors 是提交前算的,排队期间
+            # 钱包可能已被 stop_wallet 停掉,那就不该再给它挂单。
             worker = self.engines.get(address)
             if not worker or not worker.running:
-                continue
+                return
             try:
                 # subset 已过无簿门槛(prefilter),直接跑簿门槛即可,不重复走 prefilter。
                 eligible = []
@@ -1334,6 +1348,12 @@ class EngineManager:
                 worker.place_orders(eligible, cancel_dropouts=True)
             except Exception as e:
                 logger.error("Error distributing to wallet %s: %s", address, e)
+
+        # 各钱包并行下单,本轮等全部跑完才返回(_scanner_loop 因此不会重入)。异常在
+        # _place_one 内逐个兜住,一个钱包炸了不影响其余钱包本轮的下单与撤单。
+        # 代理隔离不需要额外处理:place_orders 自带 @_worker_proxied,在方法体内从
+        # self.api.proxy_url 取值、在当前线程设 contextvar,与调用线程无关。
+        list(self._place_pool.map(_place_one, list(survivors.items())))
 
     def startup_recovery(self):
         """API-driven recovery: seed each monitor's trade watermark from DB history.

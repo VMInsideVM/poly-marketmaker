@@ -1,6 +1,7 @@
 """tests/test_manager.py"""
 
 import logging
+import threading
 import time
 import pytest
 from unittest.mock import MagicMock, patch
@@ -406,6 +407,144 @@ class TestSharedScanWithStatus:
             manager._place_round()
         distributed = worker.place_orders.call_args[0][0]
         assert [m["market_id"] for m in distributed] == ["lo", "mid", "hi"]
+
+    def test_place_round_runs_wallets_in_parallel(self):
+        """钱包之间必须并行下单:串行时一轮 = 各钱包耗时之和(实盘 7 钱包 × 8-11 分钟
+        = 一轮 61 分钟,单钱包空窗 67 分钟)。这里让每个钱包在 place_orders 里等一个
+        共同的 barrier —— 只有真并行才可能全部到齐,串行会在第一个上死等到超时。"""
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        n = 3
+        barrier = threading.Barrier(n, timeout=5)
+        arrived = []
+
+        def _make_worker(addr):
+            w = MagicMock()
+            w.running = True
+
+            def place(eligible, cancel_dropouts=False):
+                barrier.wait()  # 串行执行时这里必然 BrokenBarrierError
+                arrived.append(addr)
+
+            w.place_orders.side_effect = place
+            return w
+
+        manager.engines = {f"0x{i}": _make_worker(f"0x{i}") for i in range(n)}
+        manager.eligible_markets = [{"market_id": "m9", "tags": []}]
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def prefilter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
+            def refresh_orderbooks(self, pool):
+                pass
+
+            def book_eligible(self, market, tmpl):
+                return [market]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._place_round()
+        assert sorted(arrived) == ["0x0", "0x1", "0x2"]
+
+    def test_place_round_one_wallet_failure_does_not_block_others(self):
+        """单个钱包抛异常只跳过它自己:并行提交后若不逐个兜住,一个钱包的异常会顺着
+        future 冒出来,让本轮其余钱包既不下单也不撤单(串行版靠循环内 try 保证,
+        并行版必须自己保住同样的隔离性)。"""
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        ok = MagicMock()
+        ok.running = True
+        bad = MagicMock()
+        bad.running = True
+        bad.place_orders.side_effect = RuntimeError("wallet blew up")
+        manager.engines = {"0xBAD": bad, "0xOK": ok}
+        manager.eligible_markets = [{"market_id": "m9", "tags": []}]
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def prefilter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
+            def refresh_orderbooks(self, pool):
+                pass
+
+            def book_eligible(self, market, tmpl):
+                return [market]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._place_round()  # 不得抛出
+        ok.place_orders.assert_called_once()
+
+    def test_place_round_reuses_one_thread_pool(self):
+        """下单线程池必须跨轮复用,绝不能每轮新建。models/database.py 是「每线程一条
+        sqlite 连接且从不回收」,每轮新建线程池 = 每轮泄露 N 条连接(30 秒一轮 × 5
+        钱包 ≈ 每小时 600 条)。这也是 api/proxy.py parallel_map(每次新建池)不能用在
+        下单路径上的原因 —— place_orders 全程读写 db。"""
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        worker = MagicMock()
+        worker.running = True
+        manager.engines = {"0xABC": worker}
+        manager.eligible_markets = [{"market_id": "m9", "tags": []}]
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def prefilter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
+            def refresh_orderbooks(self, pool):
+                pass
+
+            def book_eligible(self, market, tmpl):
+                return [market]
+
+        seen_threads = []
+        worker.place_orders.side_effect = lambda *a, **k: seen_threads.append(
+            threading.current_thread()
+        )
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._place_round()
+            pool_first = manager._place_pool
+            manager._place_round()
+            pool_second = manager._place_pool
+
+        assert pool_first is pool_second  # 同一个池对象,不每轮新建
+        assert seen_threads[0] is seen_threads[1]  # 同一条线程,连接不泄露
+
+    def test_place_round_skips_stopped_wallet(self):
+        """并行提交仍要尊重 worker.running:停掉的钱包不下单(串行版在循环里判,
+        并行版必须在任务体内判 —— survivors 是在提交前算的,期间钱包可能被停)。"""
+        manager, db = _make_manager()
+        manager._scanner_api = MagicMock()
+        stopped = MagicMock()
+        stopped.running = False
+        manager.engines = {"0xSTOP": stopped}
+        manager.eligible_markets = [{"market_id": "m9", "tags": []}]
+
+        class FakeScanner:
+            def __init__(self, api, db, addr):
+                pass
+
+            def prefilter_for_template(self, pool, tmpl, addr):
+                return list(pool)
+
+            def refresh_orderbooks(self, pool):
+                pass
+
+            def book_eligible(self, market, tmpl):
+                return [market]
+
+        with patch("engine.manager.MarketScanner", FakeScanner):
+            manager._place_round()
+        stopped.place_orders.assert_not_called()
 
     def test_should_discover_empty_pool_true(self):
         manager, db = _make_manager()
