@@ -1625,7 +1625,8 @@ class TestDiscoverySkipNewMarkets:
     """发现阶段跳过新建市场：模板全开时按最宽松门槛排除；任一模板没开则一个都不排。
 
     发现阶段是钱包无关的共享阶段，排早了会把别的模板要的市场也剔掉（与奖励地板用
-    min_floor 兜底同一模式）。created_at 由奖励端点白拿，判定不发任何网络请求。
+    min_floor 兜底同一模式）。这里 Gamma 未打桩、不回任何市场，判定用的是奖励端点的 created_at；
+    市场级时间的替换见 TestNewMarketAgeFromGamma。
     """
 
     def _api(self, markets):
@@ -1756,3 +1757,116 @@ class TestDiscoverySkipNewMarkets:
             skip_new_other=TEMPLATE_DEFAULTS["skip_new_other"],
         )
         assert self._pool_ids(api, [tmpl]) == {"OLD"}
+
+
+class TestNewMarketAgeFromGamma:
+    """新市场保护按市场自己的创建时间判,不按奖励端点的 created_at。
+
+    奖励端点的 created_at 是**事件**的创建时间。「价格触及」这类事件会往老事件里追加
+    新价位市场,新市场带着老事件的时间(2026-10-13 实盘:上线不到 10 小时的 MU/PLTR/黄金
+    新价位被当成 76 小时到 18 天的老市场挂单并成交)。市场级时间从 Gamma 批量取。
+    """
+
+    def _mkt(self, cid, event_age_hours, size=100):
+        return {
+            "condition_id": cid,
+            "question": cid,
+            "tokens": [{"token_id": cid + "-y", "price": 0.3}],
+            "rewards_config": [{"rate_per_day": 50}],
+            "rewards_min_size": size,
+            "end_date": (date.today() + timedelta(days=10)).strftime("%Y-%m-%d"),
+            "created_at": _created_hours_ago(event_age_hours),
+        }
+
+    def _api(self, markets, gamma_ages):
+        """gamma_ages: {cid: 市场真实年龄(小时)};不在里面的 = Gamma 没回。"""
+        api = MagicMock()
+
+        def fake_rewards(tag_slug=None, **kw):
+            return list(markets) if tag_slug is None else []
+
+        api.get_rewards_markets.side_effect = fake_rewards
+        api.get_rewards_for_market.return_value = []
+        api.gamma_created_at.side_effect = lambda cids: {
+            c: _created_hours_ago(gamma_ages[c]) for c in cids if c in gamma_ages
+        }
+        return api
+
+    def _tmpl(self, **over):
+        t = {
+            "included_categories": [],
+            "include_other": True,
+            "min_reward_usd": 0,
+            "min_price_cents": 0,
+            "max_price_cents": 100,
+            "size_tiers": [_tier(100)],
+            "min_settlement_days": 0,
+            "max_settlement_days": None,
+            "skip_new_markets": True,
+            "new_market_hours": 24,
+            "skip_new_categories": [],
+            "skip_new_other": True,
+        }
+        t.update(over)
+        return t
+
+    def _scanner(self, api):
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        db.is_in_cooldown.return_value = False
+        return MarketScanner(api, db, "")
+
+    def test_new_market_in_old_event_excluded_from_pool(self):
+        # 事件 76 小时前建、这个价位 9 小时前才加进来 -> 是新市场,要拦
+        api = self._api(
+            [self._mkt("NEW", 76), self._mkt("OLD", 100)], {"NEW": 9, "OLD": 100}
+        )
+        pool = self._scanner(api).discover_candidates([self._tmpl()])
+        assert {m["condition_id"] for m in pool} == {"OLD"}
+
+    def test_prefilter_uses_market_age_when_another_template_keeps_it_in_pool(self):
+        # 另一个模板不保护 -> 发现阶段留下它;保护它的模板在 prefilter 里必须按市场时间拦掉
+        api = self._api([self._mkt("NEW", 76)], {"NEW": 9})
+        protect, open_ = self._tmpl(), self._tmpl(skip_new_markets=False)
+        sc = self._scanner(api)
+        pool = sc.discover_candidates([protect, open_])
+        assert [m["condition_id"] for m in pool] == ["NEW"]
+        assert sc.prefilter_for_template(pool, protect, "0xw") == []
+        assert [
+            m["condition_id"] for m in sc.prefilter_for_template(pool, open_, "0xw")
+        ] == ["NEW"]
+
+    def test_gamma_missing_falls_back_to_rewards_created_at(self):
+        # Gamma 没回(批失败/查不到) -> 保留奖励端点的时间,行为与修复前一致
+        api = self._api([self._mkt("NEW", 5), self._mkt("OLD", 100)], {})
+        pool = self._scanner(api).discover_candidates([self._tmpl()])
+        assert {m["condition_id"] for m in pool} == {"OLD"}
+
+    def test_no_gamma_request_when_no_template_protects(self):
+        # 没人开保护 -> 一个请求都不多发(不用这个功能的用户零成本)
+        api = self._api([self._mkt("NEW", 76)], {"NEW": 9})
+        self._scanner(api).discover_candidates([self._tmpl(skip_new_markets=False)])
+        api.gamma_created_at.assert_not_called()
+
+    def test_cancel_during_gamma_lookup_stops_before_reward_fetches(self):
+        # 停引擎/手动重扫接管发生在查 Gamma 期间 -> 查完立即让位,不再发精确奖励请求
+        api = self._api([self._mkt("A", 100)], {})
+        state = {"stop": False}
+
+        def lookup(cids):
+            state["stop"] = True
+            return {}
+
+        api.gamma_created_at.side_effect = lookup
+        with pytest.raises(ScanSuperseded):
+            self._scanner(api).discover_candidates(
+                [self._tmpl()], cancel=lambda: state["stop"]
+            )
+        api.get_rewards_for_market.assert_not_called()
+
+    def test_only_tradable_markets_are_looked_up(self):
+        # 档位没有任何模板要的市场(这里 size=7)下不了单,年龄无关紧要,不去查
+        api = self._api([self._mkt("A", 100), self._mkt("B", 100, size=7)], {})
+        self._scanner(api).discover_candidates([self._tmpl()])
+        (cids,), _ = api.gamma_created_at.call_args
+        assert list(cids) == ["A"]

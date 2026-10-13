@@ -51,8 +51,21 @@ leaves the process running.
 
 **Pipeline: scan → strategy → place → monitor.**
 - `engine/scanner.py` filters reward markets (reward ≥ threshold, settlement days, price band, spread, cooldown, an optional market-age floor, and an exact size-tier match: rewards_min_size must equal an enabled size_tiers module) and computes an order price via `engine/strategy.py`. It does **not** filter by balance (the eligible list is shared across wallets with different balances); instead it records a per-market `min_cost = rewards_min_size × ceil_to_tick(reward_range_min)` (the minimum capital to place a reward-qualifying order) that each wallet gates on at placement time. Placement parameters (rule1/2/3 coeff thresholds, the three per-rule 高位系数和门槛 — rule1's is the historical key `gap_high_coeff_sum_min`, rule2/3 default to `0` meaning no gate — and amount_value_table) and the order share count live in per-template `size_tiers` modules keyed by the market's `rewards_min_size` (exact match; a market with no matching enabled tier is never placed, and its resting buys are removed by the dropout-cancel pass on the next placement round). Gap-tier thresholds (gap_wide/mid_cents), cliff probe, exposure and exit parameters stay template-global. The optional market-age floor (`skip_new_markets` / `new_market_hours`, template-level,
-default off) skips markets created within the last N hours, using the `created_at` the
-CLOB rewards endpoint already returns (no extra request). It applies only to the
+default off) skips markets created within the last N hours. **The age must be the
+market's own creation time, not the `created_at` the CLOB rewards endpoint returns**: that
+one is the *event's* creation time (identical to the microsecond with Gamma
+`events[0].createdAt`, shared by every market in the event). Price-target events ("Will X
+hit $Y Week of …" / "in October") keep appending new strike markets to an old event as the
+price moves, and those inherit the old time — on 2026-10-13 strikes listed under 10 hours
+earlier were judged 76 h to 18 days old and got filled despite a correct config. So
+`discover_candidates` calls `_use_market_created_at`, which overwrites `created_at` in place
+with Gamma's market-level `createdAt` (`PolymarketAPI.gamma_created_at`, batched) before the
+age verdict — only for markets that pass the tier/window gate *and* that some template
+protects, so a user with the switch off sends no extra request. Markets Gamma doesn't
+return keep the event time (never later than the market's, so it can only under-protect
+— the same fail-open direction as a missing `created_at`). Every Gamma `/markets?condition_ids=`
+call must pass `limit`: the default page is 20, so a batch of 50 silently loses 30 (this
+also hid 60% of markets from the UMA resolution guard until 2026-10-13). It applies only to the
 categories selected in `skip_new_categories` (+ `skip_new_other` for untagged markets),
 both template-level and both defaulting to *everything*, so an upgrade changes no
 behavior. The category verdict is **any-hit**: a market whose tags include any protected

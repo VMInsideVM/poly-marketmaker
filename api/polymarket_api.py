@@ -49,7 +49,7 @@ SIG_GNOSIS_SAFE = 2  # Browser-wallet proxy signature type
 _BOOKS_BATCH_SIZE = 100
 # Gamma 的 /markets 对超长 condition_ids 查询会返回 422。condition id 本身很长，
 # 50 个约 4KB query string，给 URL / 网关限制留足余量。
-_GAMMA_RESOLUTION_BATCH_SIZE = 50
+_GAMMA_BATCH_SIZE = 50
 
 # Rewards API is part of the CLOB API
 REWARDS_API = POLYMARKET_HOST
@@ -154,6 +154,40 @@ def pick_funded_sig_type(by_sig: dict) -> int | None:
         if bal > best_bal:
             best, best_bal = int(st), bal
     return best
+
+
+def _gamma_markets_batched(condition_ids: list, label: str) -> list[dict]:
+    """按 condition_id 分批查 Gamma /markets(公共接口,免 auth),返回各批市场记录的合并。
+
+    limit 必须带:Gamma 默认最多回 20 条,不带的话一批 50 个里有 30 个静默查不到
+    (2026-10-13 实测)。单批失败只丢该批(打 WARNING 后继续),其余批照常返回——
+    调用方对查不到的市场一律 fail-open。
+    """
+    ids = [c for c in dict.fromkeys(condition_ids) if c]
+    batches = (
+        len(ids) + _GAMMA_BATCH_SIZE - 1
+    ) // _GAMMA_BATCH_SIZE
+    rows = []
+    for i in range(0, len(ids), _GAMMA_BATCH_SIZE):
+        chunk = ids[i : i + _GAMMA_BATCH_SIZE]
+        try:
+            resp = http_get(
+                "https://gamma-api.polymarket.com/markets",
+                params=[("condition_ids", c) for c in chunk] + [("limit", len(chunk))],
+                timeout=10,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            logger.warning(
+                "%s batch %d/%d failed (fail-open): %s",
+                label,
+                i // _GAMMA_BATCH_SIZE + 1,
+                batches,
+                e,
+            )
+            continue
+        rows.extend(resp.json())
+    return rows
 
 
 class PolymarketAPI:
@@ -741,40 +775,31 @@ class PolymarketAPI:
 
         GET /markets?condition_ids=a&condition_ids=b... 返回 {condition_id: status
         或 None}。UMA proposal 提交后该字段变非空(proposed->disputed->resolved);
-        正常交易为 None。网络/HTTP 失败 -> 返回 {}(fail-open:Gamma 抖动时调用方
-        一律不撤/不跳过,绝不因一次接口失败误撤全仓买单)。
+        正常交易为 None。网络/HTTP 失败 -> 该批查不到(fail-open:Gamma 抖动时调用方
+        一律不撤/不跳过,绝不因一次接口失败误撤全仓买单;其它批仍可保护已进入 UMA 的市场)。
         """
-        ids = [c for c in dict.fromkeys(condition_ids) if c]
-        if not ids:
-            return {}
-        out = {}
-        for i in range(0, len(ids), _GAMMA_RESOLUTION_BATCH_SIZE):
-            chunk = ids[i : i + _GAMMA_RESOLUTION_BATCH_SIZE]
-            try:
-                resp = http_get(
-                    "https://gamma-api.polymarket.com/markets",
-                    # limit 必须带:Gamma 默认最多回 20 条,不带的话一批 50 个里有 30 个
-                    # 静默查不到(2026-10-13 实测),这些市场进入结算也不会被撤单。
-                    params=[("condition_ids", c) for c in chunk]
-                    + [("limit", len(chunk))],
-                    timeout=10,
-                )
-                resp.raise_for_status()
-            except Exception as e:
-                # 单批失败只让该批 fail-open；其它批仍可保护已进入 UMA 的市场。
-                logger.warning(
-                    "gamma_resolution_status batch %d/%d failed (fail-open): %s",
-                    i // _GAMMA_RESOLUTION_BATCH_SIZE + 1,
-                    (len(ids) + _GAMMA_RESOLUTION_BATCH_SIZE - 1)
-                    // _GAMMA_RESOLUTION_BATCH_SIZE,
-                    e,
-                )
-                continue
-            for m in resp.json():
-                cid = m.get("conditionId", "")
-                if cid:
-                    out[cid] = m.get("umaResolutionStatus")
-        return out
+        return {
+            m["conditionId"]: m.get("umaResolutionStatus")
+            for m in _gamma_markets_batched(condition_ids, "gamma_resolution_status")
+            if m.get("conditionId")
+        }
+
+    @staticmethod
+    def gamma_created_at(condition_ids: list) -> dict:
+        """批量取每个 condition_id 的**市场级**创建时间(Gamma createdAt,UTC ISO 串)。
+
+        奖励端点 /rewards/markets/multi 的 created_at 是事件的创建时间,同一事件下的市场
+        共用一个值;往老事件里新加的市场会因此显得很老。新市场保护要用这里的值。
+        返回 {condition_id: createdAt};createdAt 缺失/为空或该批查询失败的市场不出现在
+        结果里,调用方保留原值(fail-open)。
+        """
+        return {
+            m["conditionId"]: m["createdAt"]
+            for m in _gamma_markets_batched(condition_ids, "gamma_created_at")
+            if m.get("conditionId")
+            and isinstance(m.get("createdAt"), str)
+            and m["createdAt"]
+        }
 
     # --- Per-market rewards ---
 

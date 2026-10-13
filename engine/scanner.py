@@ -175,17 +175,21 @@ def loosest_new_market_hours(templates, tags) -> float:
     """
     hours = []
     for t in templates:
-        if not t.get("skip_new_markets"):
-            return 0.0
-        if not market_in_categories(
-            tags,
-            set(t.get("skip_new_categories") or [])
-            & set(t.get("included_categories") or []),
-            bool(t.get("skip_new_other")) and bool(t.get("include_other")),
-        ):
+        if not _protects_new(t, tags):
             return 0.0
         hours.append(_new_market_hours(t))
     return min(hours) if hours else 0.0
+
+
+def _protects_new(template, tags) -> bool:
+    """该模板是否对这组品类开了新市场保护:开关开着,且品类在保护名单内(保护名单与
+    做市名单取交集,理由见 loosest_new_market_hours)。不看小时数。"""
+    return bool(template.get("skip_new_markets")) and market_in_categories(
+        tags,
+        set(template.get("skip_new_categories") or [])
+        & set(template.get("included_categories") or []),
+        bool(template.get("skip_new_other")) and bool(template.get("include_other")),
+    )
 
 
 class MarketScanner:
@@ -268,7 +272,8 @@ class MarketScanner:
 
         # 「新市场」门槛:发现阶段只能排除「每个模板都会因太新排除」的市场,门槛按市场的
         # 品类逐条算(见 loosest_new_market_hours);各模板自己的 N 由 prefilter_for_template
-        # 精筛。created_at 由奖励端点白拿,判定不发网络请求。
+        # 精筛。判定前先把可能下单、又有模板保护的市场的 created_at 换成市场自己的创建
+        # 时间(见 _use_market_created_at)。
         now = time.time()
 
         # 并集档位 sizes + 各模板结算窗口:精确奖励拉取(每市场一次网络、~0.78s)是发现
@@ -299,7 +304,7 @@ class MarketScanner:
 
         # 品类匹配(过黑名单/奖励地板)的市场都进候选池;其中被档位+窗口门控选中的才拉精确
         # 奖励(priced,并发),其余用批量奖励兜底(extra,不发网络)。
-        priced, extra = [], []
+        kept = []  # (market, 是否过档位+窗口门控)
         for market in pool:
             if cancel and cancel():
                 raise ScanSuperseded()
@@ -310,12 +315,32 @@ class MarketScanner:
                 continue  # 没被任何模板 include(且非其他)
             if _batch_rate(market) < min_floor:
                 continue  # 比最宽松模板还低,任何模板都不会要
+            kept.append((market, _should_price(market)))
+
+        # 只有门控内(某个模板可能下单)且有模板保护的市场,年龄才影响下单;门控外的市场
+        # 任何模板都下不了单,不为它们多发请求。没人开保护时一个请求都不发。
+        self._use_market_created_at(
+            [
+                m
+                for m, gated in kept
+                if gated
+                and any(
+                    _protects_new(t, m.get("tags", [])) and _new_market_hours(t)
+                    for t in templates
+                )
+            ]
+        )
+        if cancel and cancel():
+            raise ScanSuperseded()
+
+        priced, extra = [], []
+        for market, gated in kept:
             min_age_hours = loosest_new_market_hours(templates, market.get("tags", []))
             if min_age_hours:
                 age = market_age_hours(market.get("created_at", ""), now)
                 if age is not None and age < min_age_hours:
                     continue  # 太新;created_at 取不到 -> fail-open 保留
-            (priced if _should_price(market) else extra).append(market)
+            (priced if gated else extra).append(market)
 
         def _precise_reward(market):
             # 精确每市场奖励(与旧 scan 一致:/rewards/markets/{cid});失败退回批量 total_rate。
@@ -394,6 +419,43 @@ class MarketScanner:
             len(union),
         )
         return out
+
+    def _use_market_created_at(self, markets):
+        """把这些市场的 created_at 换成市场自己的创建时间(Gamma 批量取,原地改)。
+
+        奖励端点的 created_at 是**事件**的创建时间:同一事件下所有市场共用一个值,与
+        Gamma 的 events[0].createdAt 精确到微秒一致。「价格触及」这类事件会随价格走动往
+        老事件里追加新价位,新市场带着老事件的时间,新市场保护配得再对也拦不住(2026-10-13
+        实盘:上线不到 10 小时的 MU/PLTR/黄金新价位,按事件时间算成 76 小时到 18 天,被挂单
+        并成交)。改写在候选池的市场上,发现阶段与 prefilter_for_template 读的是同一个值。
+
+        Gamma 没回的市场(该批失败/查不到)保留原值:事件不晚于其下的市场创建,原值只会
+        让市场显得更老,少拦不多拦——与 created_at 取不到即保留同方向。
+        """
+        if not markets:
+            return
+        created = self.api.gamma_created_at(
+            [m.get("condition_id", "") for m in markets]
+        )
+        now = time.time()
+        got = moved = 0
+        for market in markets:
+            ts = created.get(market.get("condition_id", ""))
+            if not isinstance(ts, str) or not ts:
+                continue
+            got += 1
+            before = market_age_hours(market.get("created_at", ""), now)
+            after = market_age_hours(ts, now)
+            if before is not None and after is not None and before - after > 1:
+                moved += 1
+            market["created_at"] = ts
+        logger.info(
+            "新市场保护:向 Gamma 查 %d 个市场的创建时间,取到 %d 个,"
+            "其中 %d 个比奖励接口给的晚 1 小时以上(老事件里新加的市场)",
+            len(markets),
+            got,
+            moved,
+        )
 
     def refresh_orderbooks(self, pool, cancel=None):
         """给候选池每个市场刷新订单簿快照(覆盖写)。钱包无关、可重复调。
