@@ -72,6 +72,29 @@ def test_large_input_is_split_into_safe_batches():
     assert batches[-1] == ids[-1:]
 
 
+def _fake_gamma(statuses):
+    """仿真 Gamma /markets:不带 limit 时最多回 20 条(2026-10-13 实测:请求 50 个
+    condition_id 只回其中 20 个,带 limit=50 才回全)。"""
+
+    def get(_url, params: list, **_kw):
+        ids = [v for k, v in params if k == "condition_ids"]
+        limit = int(dict(params).get("limit", 20))
+        rows = [{"conditionId": c, "umaResolutionStatus": statuses[c]} for c in ids]
+        return _resp(rows[:limit])
+
+    return get
+
+
+def test_full_batch_is_not_truncated_by_gamma_default_limit():
+    ids = [f"0xc{i}" for i in range(50)]
+    with patch(
+        "api.proxy.requests.get",
+        side_effect=_fake_gamma(dict.fromkeys(ids, "proposed")),
+    ):
+        out = PolymarketAPI.gamma_resolution_status(ids)
+    assert out == dict.fromkeys(ids, "proposed")
+
+
 def test_failed_batch_does_not_discard_successful_batches():
     ids = [f"0xc{i}" for i in range(51)]
     first = _resp([{"conditionId": "0xc0", "umaResolutionStatus": "proposed"}])

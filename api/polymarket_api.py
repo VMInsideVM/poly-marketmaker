@@ -753,7 +753,10 @@ class PolymarketAPI:
             try:
                 resp = http_get(
                     "https://gamma-api.polymarket.com/markets",
-                    params=[("condition_ids", c) for c in chunk],
+                    # limit 必须带:Gamma 默认最多回 20 条,不带的话一批 50 个里有 30 个
+                    # 静默查不到(2026-10-13 实测),这些市场进入结算也不会被撤单。
+                    params=[("condition_ids", c) for c in chunk]
+                    + [("limit", len(chunk))],
                     timeout=10,
                 )
                 resp.raise_for_status()
