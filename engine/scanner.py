@@ -31,7 +31,7 @@ from engine.categories import (
     market_wanted,
     count_by_category,
 )
-from config import CATALOG_SLUGS, CATEGORY_CATALOG, ENGINE_DEFAULTS
+from config import CATALOG_SLUGS, CATEGORY_CATALOG, CATEGORY_QUERY_TAG, ENGINE_DEFAULTS
 from engine.strategy import reward_price_range
 from engine.tiers import enabled_sizes
 from api.proxy import use_proxy, current_proxy, parallel_map
@@ -225,8 +225,18 @@ class MarketScanner:
         min_floor = min(floors) if floors else 0
 
         def _tag_slug(slug):  # 返回整条记录(用于并入候选池 + 建 cid 集打标签)
+            tag = CATEGORY_QUERY_TAG.get(slug, slug)
             try:
-                rows = self.api.get_rewards_markets(tag_slug=slug, max_pages=max_pages)
+                rows = self.api.get_rewards_markets(tag_slug=tag, max_pages=max_pages)
+                if not rows:
+                    # 标签失效是静默的:查回 0 个,该品类的市场全落进「其他」,勾选的
+                    # 做市/保护都不生效(culture 就这样哑了三个多月)。
+                    logger.warning(
+                        "品类 %s(查询标签 %s)查回 0 个奖励市场:要么暂时没有这类市场,"
+                        "要么标签已失效——该品类的市场会被当成「其他」",
+                        slug,
+                        tag,
+                    )
                 return slug, rows
             except Exception as e:
                 # 单个品类查询失败不拖垮整轮发现(奖励端点偶发 500):该 slug 记空,
@@ -540,7 +550,9 @@ class MarketScanner:
 
         def _slug_ids(slug):
             with use_proxy(proxy):
-                rows = self.api.get_rewards_markets(tag_slug=slug, max_pages=max_pages)
+                rows = self.api.get_rewards_markets(
+                    tag_slug=CATEGORY_QUERY_TAG.get(slug, slug), max_pages=max_pages
+                )
             return {m.get("condition_id", "") for m in rows} & full_ids
 
         slugs = [c["slug"] for c in catalog]

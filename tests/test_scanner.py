@@ -896,8 +896,9 @@ class TestDiscoverNeededSlugsOnly:
         assert {m["condition_id"] for m in pool} == {"W", "G"}
 
     def test_include_other_queries_all_slugs(self):
-        # 收「其他」时:判其他绕不开,必须查全 14(回归护栏)。
-        from config import CATALOG_SLUGS
+        # 收「其他」时:判其他绕不开,必须查全 14(回归护栏)。查询用的是各品类的
+        # 查询标签(文化查 pop-culture),见 TestCultureQueryTag。
+        from config import CATEGORY_QUERY_TAG
 
         queried = set()
 
@@ -917,7 +918,7 @@ class TestDiscoverNeededSlugsOnly:
             }
         ]
         scanner.discover_candidates(templates)
-        assert queried == set(CATALOG_SLUGS)
+        assert queried == set(CATEGORY_QUERY_TAG.values())
 
     def test_subset_does_not_set_last_catalog(self):
         # 只查子集算不出全 14 计数 -> 不覆盖 last_catalog(保留旧缓存)。
@@ -1870,3 +1871,72 @@ class TestNewMarketAgeFromGamma:
         self._scanner(api).discover_candidates([self._tmpl()])
         (cids,), _ = api.gamma_created_at.call_args
         assert list(cids) == ["A"]
+
+
+class TestCultureQueryTag:
+    """「文化」品类在奖励端点上的标签是 pop-culture,不是 culture。
+
+    tag_slug=culture 查回永远是 0 个市场(2026-10-15 实测;其余 13 个 curated 品类都能
+    查到),于是奥斯卡/烂番茄/MrBeast 这类盘从没被打上「文化」,全落进「其他」:勾了
+    「文化」保护、没勾「其他」保护的模板,新上线的奥斯卡提名盘照样挂单成交。内部 slug
+    仍叫 culture(用户 DB 里存的勾选不用迁移),只有发给奖励端点的查询换成 pop-culture。
+    """
+
+    @staticmethod
+    def _fake_rewards(tag_slug=None, **kw):
+        oscar = {
+            "condition_id": "OSCAR",
+            "tokens": [],
+            "rewards_config": [{"rate_per_day": 50}],
+        }
+        if tag_slug is None:
+            return [oscar]
+        return {"pop-culture": [oscar]}.get(tag_slug, [])
+
+    def test_culture_markets_are_tagged_culture(self):
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = self._fake_rewards
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        pool = MarketScanner(api, db, "").discover_candidates(
+            [
+                {
+                    "included_categories": ["culture"],
+                    "include_other": False,
+                    "min_reward_usd": 0,
+                }
+            ]
+        )
+        assert [(m["condition_id"], m["tags"]) for m in pool] == [("OSCAR", ["culture"])]
+
+    def test_category_counts_count_culture(self):
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = self._fake_rewards
+        out = MarketScanner(api, MagicMock(), "").category_counts(
+            [{"slug": "culture", "label": "文化"}]
+        )
+        assert out["categories"][0]["count"] == 1
+        assert out["other_count"] == 0
+
+    def test_empty_category_query_is_logged(self, caplog):
+        # 品类查回 0 个市场时打 WARNING:标签失效是静默的,culture 就这样哑了三个多月
+        import logging
+
+        api = MagicMock()
+        api.get_rewards_markets.side_effect = lambda tag_slug=None, **kw: []
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        with caplog.at_level(logging.WARNING, logger="engine.scanner"):
+            MarketScanner(api, db, "").discover_candidates(
+                [
+                    {
+                        "included_categories": ["culture"],
+                        "include_other": False,
+                        "min_reward_usd": 0,
+                    }
+                ]
+            )
+        assert any(
+            r.levelno == logging.WARNING and "pop-culture" in r.getMessage()
+            for r in caplog.records
+        )

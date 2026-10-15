@@ -3,9 +3,11 @@
 import os
 import sys
 
-# curated 品类名单(白名单勾选来源)。slug 须是 CLOB /rewards/markets/multi 的 tag_slug
-# 可识别值(已实测 politics/geopolitics/world/elections/economy/finance/crypto/sports/
-# esports/games/weather/ai/tech/culture 均返回合理子集)。顺序即配置页展示顺序。
+# curated 品类名单(白名单勾选来源)。slug 是内部标识(存进用户 DB 的勾选值),也是发给
+# CLOB /rewards/markets/multi 的 tag_slug——除非条目另带 "tag",那时查询用 tag。
+# 「文化」的 slug 当初定成 culture,但奖励端点不认这个标签,查回永远 0 个(2026-10-15
+# 实测;它认的是 pop-culture),文化盘因此全落进「其他」。slug 不改是为了不迁移用户 DB。
+# 2026-10-15 实测其余 13 个 slug 首页都能查到 100 个。顺序即配置页展示顺序。
 CATEGORY_CATALOG = [
     {"slug": "politics", "label": "政治"},
     {"slug": "geopolitics", "label": "地缘政治"},
@@ -20,9 +22,11 @@ CATEGORY_CATALOG = [
     {"slug": "weather", "label": "天气"},
     {"slug": "ai", "label": "人工智能"},
     {"slug": "tech", "label": "科技"},
-    {"slug": "culture", "label": "文化"},
+    {"slug": "culture", "label": "文化", "tag": "pop-culture"},
 ]
 CATALOG_SLUGS = frozenset(c["slug"] for c in CATEGORY_CATALOG)
+# 各 slug 向奖励端点查询时用的 tag_slug。
+CATEGORY_QUERY_TAG = {c["slug"]: c.get("tag", c["slug"]) for c in CATEGORY_CATALOG}
 # 默认延续升级前行为:体育/电竞/天气不做,其余(含未分类)都做。
 _DEFAULT_EXCLUDED = {"sports", "esports", "weather"}
 DEFAULT_INCLUDED_CATEGORIES = [

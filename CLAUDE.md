@@ -72,7 +72,14 @@ behavior. The category verdict is **any-hit**: a market whose tags include any p
 slug is protected; an untagged market (no curated tag at all) follows `skip_new_other`.
 That verdict is the same pure function the trading whitelist uses — `market_in_categories`
 in `engine/categories.py`, which `market_wanted` delegates to after its own veto check — so
-the two cannot drift. **`veto_categories` (template-level, default empty) is the trading
+the two cannot drift.
+Tags come from querying the rewards endpoint once per curated slug, and **the slug is an
+internal id, not necessarily the query tag**: `CATEGORY_QUERY_TAG` maps it (`culture` →
+`pop-culture`). `tag_slug=culture` returns zero markets, so until 2026-10-15 every culture
+market (Oscars, Rotten Tomatoes, MrBeast…) silently fell into "other" — the 文化 checkbox did
+nothing for trading or protection. The slug stayed `culture` so users' saved ticks need no
+migration. A curated query returning zero rows now logs a WARNING, since a dead tag fails silently.
+**`veto_categories` (template-level, default empty) is the trading
 whitelist's veto and lives only on `market_wanted`**: a market carrying any vetoed tag is
 not traded even when another of its tags is whitelisted. It deliberately does NOT touch
 `market_in_categories`, so new-market protection is unaffected — refusing to trade a
