@@ -269,6 +269,11 @@ class Database:
         c.execute(f"DELETE FROM template_settings WHERE key IN ({ph})", superseded)
         c.execute(f"DELETE FROM settings WHERE key IN ({ph})", superseded)
         self.conn.commit()
+        # 空名字 = 「Gamma 查无此市场」的负缓存。2026-10-16 前的解析会把 Gamma 少回的(默认
+        # 只回 20 条)和已关闭的市场都误记成负缓存,名字从此留空。每次启动清掉,由
+        # ensure_market_meta 重查;真查无此市场的,代价只是每次启动多问一次 Gamma。
+        c.execute("DELETE FROM market_meta WHERE name = ''")
+        self.conn.commit()
 
     # --- Settings ---
 

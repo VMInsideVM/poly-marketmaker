@@ -745,28 +745,34 @@ class PolymarketAPI:
 
         GET /markets?condition_ids=a&condition_ids=b... 返回 Gamma 已知的市场。
         返回 {condition_id: {"name", "market_slug", "event_slug"}}。
-        HTTP/网络失败时抛出(由调用方决定如何处理)。
+        HTTP/网络失败时抛出(由调用方决定如何处理)——调用方会把「Gamma 应答了但没有」
+        的 id 写成负缓存(名字从此留空),所以绝不能把失败或少回当成「没有」:
+        - 必须带 limit:Gamma 默认最多回 20 条(2026-10-13 实测),一次 50 个会少回 30 个;
+        - Gamma 默认不回已关闭的市场,历史页里多是已结算的,没找到的再按 closed=true 查一遍。
         """
         ids = [c for c in dict.fromkeys(condition_ids) if c]
-        if not ids:
-            return {}
-        resp = http_get(
-            "https://gamma-api.polymarket.com/markets",
-            params=[("condition_ids", c) for c in ids],
-            timeout=10,
-        )
-        resp.raise_for_status()
         out = {}
-        for m in resp.json():
-            cid = m.get("conditionId", "")
-            if not cid:
-                continue
-            evs = m.get("events") or []
-            out[cid] = {
-                "name": m.get("question", ""),
-                "market_slug": m.get("slug", ""),
-                "event_slug": (evs[0].get("slug", "") if evs else ""),
-            }
+        for closed in ("false", "true"):
+            todo = [c for c in ids if c not in out]
+            for i in range(0, len(todo), _GAMMA_BATCH_SIZE):
+                chunk = todo[i : i + _GAMMA_BATCH_SIZE]
+                resp = http_get(
+                    "https://gamma-api.polymarket.com/markets",
+                    params=[("condition_ids", c) for c in chunk]
+                    + [("limit", len(chunk)), ("closed", closed)],
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                for m in resp.json():
+                    cid = m.get("conditionId", "")
+                    if not cid:
+                        continue
+                    evs = m.get("events") or []
+                    out[cid] = {
+                        "name": m.get("question", ""),
+                        "market_slug": m.get("slug", ""),
+                        "event_slug": (evs[0].get("slug", "") if evs else ""),
+                    }
         return out
 
     @staticmethod

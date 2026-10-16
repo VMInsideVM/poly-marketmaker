@@ -589,6 +589,20 @@ class TestEligibleMarkets:
 
 
 class TestMarketMeta:
+    def test_startup_clears_negative_cache(self, tmp_path):
+        # 空名字行是「Gamma 查无此市场」的负缓存。2026-10-16 前的解析会把 Gamma 少回的和
+        # 已关闭的市场误记成负缓存,名字从此留空;每次启动清掉,让修好的解析重查一遍。
+        path = str(tmp_path / "m.db")
+        first = Database(path)
+        first.init()
+        first.upsert_market_meta("0xneg", "", "", "")
+        first.upsert_market_meta("0xok", "市场A", "s", "e")
+        first.close()
+        again = Database(path)
+        again.init()
+        assert set(again.get_market_meta()) == {"0xok"}
+        again.close()
+
     def test_upsert_and_get(self, db):
         db.upsert_market_meta("0xc1", "市场A", "slug-a", "evt-a")
         meta = db.get_market_meta()
