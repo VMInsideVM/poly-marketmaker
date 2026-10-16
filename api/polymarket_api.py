@@ -158,7 +158,9 @@ def pick_funded_sig_type(by_sig: dict) -> int | None:
     return best
 
 
-def _gamma_markets_batched(condition_ids: list, label: str) -> list[dict]:
+def _gamma_markets_batched(
+    condition_ids: list, label: str, extra_params=()
+) -> list[dict]:
     """按 condition_id 分批查 Gamma /markets(公共接口,免 auth),返回各批市场记录的合并。
 
     limit 必须带:Gamma 默认最多回 20 条,不带的话一批 50 个里有 30 个静默查不到
@@ -177,7 +179,8 @@ def _gamma_markets_batched(condition_ids: list, label: str) -> list[dict]:
                 resp = http_get(
                     "https://gamma-api.polymarket.com/markets",
                     params=[("condition_ids", c) for c in chunk]
-                    + [("limit", len(chunk))],
+                    + [("limit", len(chunk))]
+                    + list(extra_params),
                     timeout=10,
                 )
                 resp.raise_for_status()
@@ -805,28 +808,39 @@ class PolymarketAPI:
         }
 
     @staticmethod
-    def gamma_market_times(condition_ids: list) -> dict:
-        """批量取每个 condition_id 的**市场级**创建时间与结算时间(Gamma createdAt/endDate)。
+    def gamma_market_details(condition_ids: list) -> dict:
+        """批量取每个 condition_id 的**市场级**创建时间、结算时间和标签(Gamma)。
 
         奖励端点 /rewards/markets/multi 的 created_at 和 end_date 都是**事件**级的,同一
         事件下的市场共用一个值(与 Gamma events[0] 的 createdAt/endDate 一致):往老事件里
         新加的市场显得很老,而「X 月 Y 日前会不会…」这类事件里先结算的那几个市场,拿到的是
         事件里最晚那个市场的结算日(实测 178 个里 32 个,最大差两个半月)。
-        返回 {condition_id: {"created_at": ..., "end_date": ...}};某字段缺失/为空就不给
+        标签(include_tag=true)用来补品类:奖励接口每个品类只翻 20 页,排在后面的市场会漏打
+        该品类的标签(2026-10-16 实测约 2 万个候选里 5249 个漏标)。
+        返回 {condition_id: {"created_at", "end_date", "tag_slugs"}};某项缺失/为空就不给
         该键,整批查询失败的市场不出现在结果里——调用方保留原值(fail-open)。
         """
         out = {}
-        for m in _gamma_markets_batched(condition_ids, "gamma_market_times"):
+        for m in _gamma_markets_batched(
+            condition_ids, "gamma_market_details", [("include_tag", "true")]
+        ):
             cid = m.get("conditionId")
             if not cid:
                 continue
-            times = {
+            details = {
                 key: m[src]
                 for key, src in (("created_at", "createdAt"), ("end_date", "endDate"))
                 if isinstance(m.get(src), str) and m[src]
             }
-            if times:
-                out[cid] = times
+            slugs = [
+                t["slug"]
+                for t in (m.get("tags") or [])
+                if isinstance(t, dict) and isinstance(t.get("slug"), str) and t["slug"]
+            ]
+            if slugs:
+                details["tag_slugs"] = slugs
+            if details:
+                out[cid] = details
         return out
 
     # --- Per-market rewards ---

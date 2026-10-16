@@ -1,4 +1,4 @@
-"""tests/test_gamma_market_times.py — 批量取 condition_id 的市场级时间(Gamma createdAt / endDate)。"""
+"""tests/test_gamma_market_details.py — 批量取 condition_id 的市场级时间(Gamma createdAt / endDate)。"""
 
 from unittest.mock import patch, MagicMock
 from api.polymarket_api import PolymarketAPI
@@ -33,7 +33,7 @@ def test_maps_condition_to_market_created_and_end():
         ]
     )
     with patch("api.proxy.requests.get", return_value=fake):
-        out = PolymarketAPI.gamma_market_times(["0xc1"])
+        out = PolymarketAPI.gamma_market_details(["0xc1"])
     assert out == {
         "0xc1": {
             "created_at": "2026-10-12T16:38:12.155593Z",
@@ -56,7 +56,7 @@ def test_missing_or_null_fields_are_left_out():
         ]
     )
     with patch("api.proxy.requests.get", return_value=fake):
-        out = PolymarketAPI.gamma_market_times(["0xc1", "0xc2", "0xc3"])
+        out = PolymarketAPI.gamma_market_details(["0xc1", "0xc2", "0xc3"])
     assert out == {
         "0xc1": {"created_at": "2026-10-12T16:38:12Z"},
         "0xc2": {"end_date": "2026-10-16T00:00:00Z"},
@@ -65,7 +65,7 @@ def test_missing_or_null_fields_are_left_out():
 
 def test_empty_input_no_request():
     with patch("api.proxy.requests.get") as g:
-        out = PolymarketAPI.gamma_market_times([])
+        out = PolymarketAPI.gamma_market_details([])
     assert out == {}
     g.assert_not_called()
 
@@ -74,7 +74,7 @@ def test_full_batches_are_not_truncated_by_gamma_default_limit():
     ids = [f"0xc{i}" for i in range(120)]
     rows = {c: {"conditionId": c, "createdAt": "2026-10-12T16:38:12Z"} for c in ids}
     with patch("api.proxy.requests.get", side_effect=_fake_gamma(rows)) as g:
-        out = PolymarketAPI.gamma_market_times(ids)
+        out = PolymarketAPI.gamma_market_details(ids)
     assert out == {c: {"created_at": "2026-10-12T16:38:12Z"} for c in ids}
     assert g.call_count == 3  # 50 + 50 + 20,每批的 URL 都在 Gamma 的长度限制内
 
@@ -83,7 +83,7 @@ def test_failed_batch_does_not_discard_successful_batches():
     ids = [f"0xc{i}" for i in range(51)]
     first = _resp([{"conditionId": "0xc0", "createdAt": "2026-10-12T16:38:12Z"}])
     with patch("api.proxy.requests.get", side_effect=[first, Exception("timeout")]):
-        out = PolymarketAPI.gamma_market_times(ids)
+        out = PolymarketAPI.gamma_market_details(ids)
     assert out == {"0xc0": {"created_at": "2026-10-12T16:38:12Z"}}
 
 
@@ -91,7 +91,7 @@ def test_failed_batch_is_retried_once():
     # 读请求重试无副作用;不重试的话这批市场只能退回事件时间,保护出窟窿
     ok = _resp([{"conditionId": "0xc1", "createdAt": "2026-10-12T16:38:12Z"}])
     with patch("api.proxy.requests.get", side_effect=[Exception("timeout"), ok]):
-        out = PolymarketAPI.gamma_market_times(["0xc1"])
+        out = PolymarketAPI.gamma_market_details(["0xc1"])
     assert out == {"0xc1": {"created_at": "2026-10-12T16:38:12Z"}}
 
 
@@ -103,7 +103,7 @@ def test_every_batch_goes_through_the_wallet_proxy():
     rows = {c: {"conditionId": c, "createdAt": "2026-10-12T16:38:12Z"} for c in ids}
     with patch("api.proxy.requests.get", side_effect=_fake_gamma(rows)) as g:
         with use_proxy("http://p:1"):
-            out = PolymarketAPI.gamma_market_times(ids)
+            out = PolymarketAPI.gamma_market_details(ids)
     assert len(out) == 260
     assert g.call_count == 6
     assert all(
@@ -115,5 +115,21 @@ def test_every_batch_goes_through_the_wallet_proxy():
 def test_non_list_response_is_treated_as_failed_batch():
     # Gamma 偶尔回错误对象而不是列表;当成该批失败,不能让调用方逐条 .get 时崩掉
     with patch("api.proxy.requests.get", return_value=_resp({"error": "bad"})):
-        assert PolymarketAPI.gamma_market_times(["0xc1"]) == {}
+        assert PolymarketAPI.gamma_market_details(["0xc1"]) == {}
         assert PolymarketAPI.gamma_resolution_status(["0xc1"]) == {}
+
+
+def test_returns_market_tag_slugs_and_asks_for_them():
+    fake = _resp(
+        [
+            {
+                "conditionId": "0xc1",
+                "createdAt": "2026-10-12T16:38:12Z",
+                "tags": [{"slug": "sports"}, {"slug": "soccer"}],
+            },
+        ]
+    )
+    with patch("api.proxy.requests.get", return_value=fake) as g:
+        out = PolymarketAPI.gamma_market_details(["0xc1"])
+    assert out["0xc1"]["tag_slugs"] == ["sports", "soccer"]
+    assert ("include_tag", "true") in g.call_args.kwargs["params"]

@@ -31,7 +31,13 @@ from engine.categories import (
     market_wanted,
     count_by_category,
 )
-from config import CATALOG_SLUGS, CATEGORY_CATALOG, CATEGORY_QUERY_TAG, ENGINE_DEFAULTS
+from config import (
+    ALL_CATEGORY_SLUGS,
+    CATALOG_SLUGS,
+    CATEGORY_CATALOG,
+    CATEGORY_QUERY_TAG,
+    ENGINE_DEFAULTS,
+)
 from engine.strategy import reward_price_range
 from engine.tiers import enabled_sizes
 from api.proxy import use_proxy, current_proxy, parallel_map
@@ -283,7 +289,7 @@ class MarketScanner:
         # 「新市场」门槛:发现阶段只能排除「每个模板都会因太新排除」的市场,门槛按市场的
         # 品类逐条算(见 loosest_new_market_hours);各模板自己的 N 由 prefilter_for_template
         # 精筛。判定前先把可能下单的市场的 created_at/end_date 换成市场自己的(见
-        # _use_market_level_times)。
+        # _use_market_level_details)。
         now = time.time()
 
         # 并集档位 sizes + 各模板结算窗口:精确奖励拉取(每市场一次网络、~0.78s)是发现
@@ -330,7 +336,7 @@ class MarketScanner:
         # 新市场保护和结算窗口都要市场自己的时间,而奖励端点给的是事件级的。只查档位被
         # 某个模板要的市场(其余哪个模板都下不了单);没有任何启用档位时一个都不查。窗口
         # 门控(_should_price)必须放在这之后,否则它读到的还是事件的结算日。
-        self._use_market_level_times(
+        self._use_market_level_details(
             [m for m in kept if int(m.get("rewards_min_size", 0) or 0) in union_sizes]
         )
         if cancel and cancel():
@@ -423,8 +429,9 @@ class MarketScanner:
         )
         return out
 
-    def _use_market_level_times(self, markets):
-        """把这些市场的 created_at / end_date 换成市场自己的(Gamma 批量取,原地改)。
+    def _use_market_level_details(self, markets):
+        """把这些市场的 created_at / end_date 换成市场自己的,并补齐漏打的品类标签
+        (Gamma 批量取,原地改)。
 
         奖励端点的这两个字段都是**事件**级的:同一事件下所有市场共用一个值,与 Gamma
         events[0] 的 createdAt/endDate 一致。
@@ -434,6 +441,10 @@ class MarketScanner:
         - 结算日:「X 月 Y 日前会不会…」这类事件里先结算的市场拿到的是事件里最晚那个市场
           的结算日(实测 178 个里 32 个,最大差两个半月),「至少还有 N 天才结算」的窗口
           拦不住明天就结算的盘。
+        - 品类标签:奖励接口每个品类只翻 20 页(2000 个),排在后面的市场漏打该品类标签
+          (2026-10-16 实测约 2 万个候选里 5249 个漏标),「排除体育」拦不住漏了体育标签的
+          盘,只保护部分品类时也会漏。Gamma 的市场标签与奖励接口的品类归属抽样核对一致,
+          只补不删(查询标签经 CATEGORY_QUERY_TAG 映射回内部 slug,如 pop-culture→culture)。
         改写在候选池的市场上,发现阶段、prefilter_for_template 和市场发现页读的是同一个值。
 
         Gamma 没回的市场/字段保留原值(事件级),与修复前一样:创建时间只会显得更老(少拦);
@@ -442,11 +453,11 @@ class MarketScanner:
         """
         if not markets:
             return
-        looked_up = self.api.gamma_market_times(
+        looked_up = self.api.gamma_market_details(
             [m.get("condition_id", "") for m in markets]
         )
         now = time.time()
-        got = younger = sooner = 0
+        got = younger = sooner = tagged = 0
         for market in markets:
             times = looked_up.get(market.get("condition_id", ""))
             if not isinstance(times, dict) or not times:
@@ -468,13 +479,24 @@ class MarketScanner:
                 ) < _settlement_days_until(before_ts):
                     sooner += 1
                 market["end_date"] = end
+            have = list(market.get("tags") or [])
+            missing = [
+                s
+                for s in ALL_CATEGORY_SLUGS
+                if s not in have
+                and CATEGORY_QUERY_TAG[s] in (times.get("tag_slugs") or ())
+            ]
+            if missing:
+                market["tags"] = have + missing
+                tagged += 1
         logger.info(
-            "市场级时间:向 Gamma 查 %d 个市场,取到 %d 个;其中 %d 个比奖励接口给的晚建 1 小时"
-            "以上(老事件里新加的市场),%d 个结算日比奖励接口给的早",
+            "市场级信息:向 Gamma 查 %d 个市场,取到 %d 个;其中 %d 个比奖励接口给的晚建 1 小时"
+            "以上(老事件里新加的市场),%d 个结算日比奖励接口给的早,%d 个补上了漏打的品类标签",
             len(markets),
             got,
             younger,
             sooner,
+            tagged,
         )
 
     def refresh_orderbooks(self, pool, cancel=None):

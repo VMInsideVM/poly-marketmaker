@@ -1805,7 +1805,7 @@ class TestMarketLevelTimesFromGamma:
                     out[c] = times
             return out
 
-        api.gamma_market_times.side_effect = lookup
+        api.gamma_market_details.side_effect = lookup
         return api
 
     def _tmpl(self, **over):
@@ -1881,13 +1881,13 @@ class TestMarketLevelTimesFromGamma:
         # 结算窗口对每个模板都生效,没人开新市场保护也得查市场级结算日
         api = self._api([self._mkt("A", 100)], {})
         self._scanner(api).discover_candidates([self._tmpl(skip_new_markets=False)])
-        api.gamma_market_times.assert_called_once()
+        api.gamma_market_details.assert_called_once()
 
     def test_no_lookup_when_no_template_has_tiers(self):
         # 没有任何启用的档位 = 哪个模板都下不了单,不为它多发请求
         api = self._api([self._mkt("A", 100)], {})
         self._scanner(api).discover_candidates([self._tmpl(size_tiers=[])])
-        api.gamma_market_times.assert_not_called()
+        api.gamma_market_details.assert_not_called()
 
     def test_cancel_during_gamma_lookup_stops_before_reward_fetches(self):
         # 停引擎/手动重扫接管发生在查 Gamma 期间 -> 查完立即让位,不再发精确奖励请求
@@ -1898,7 +1898,7 @@ class TestMarketLevelTimesFromGamma:
             state["stop"] = True
             return {}
 
-        api.gamma_market_times.side_effect = lookup
+        api.gamma_market_details.side_effect = lookup
         with pytest.raises(ScanSuperseded):
             self._scanner(api).discover_candidates(
                 [self._tmpl()], cancel=lambda: state["stop"]
@@ -1909,8 +1909,81 @@ class TestMarketLevelTimesFromGamma:
         # 档位没有任何模板要的市场(这里 size=7)下不了单,时间无关紧要,不去查
         api = self._api([self._mkt("A", 100), self._mkt("B", 100, size=7)], {})
         self._scanner(api).discover_candidates([self._tmpl()])
-        (cids,), _ = api.gamma_market_times.call_args
+        (cids,), _ = api.gamma_market_details.call_args
         assert list(cids) == ["A"]
+
+
+class TestCategoryTagsCompletedFromGamma:
+    """奖励接口每个品类只翻 20 页(2000 个),排在后面的市场漏打该品类标签。
+
+    2026-10-16 实测:按 20 页组成的约 2 万个候选里 5249 个至少漏一个标签(体育 2593、
+    政治 2015、游戏 701、选举 599……)。漏了体育标签,「排除体育」就拦不住它;漏了某个被
+    保护的品类,新市场保护也拦不住。查市场级时间时顺带带回 Gamma 的市场标签补齐——
+    抽样核对过两边一致(奖励接口列在某品类下的,Gamma 标签里全都有)。
+    """
+
+    def _api(self, tag_slugs):
+        api = MagicMock()
+        m = {
+            "condition_id": "M",
+            "question": "M",
+            "tokens": [{"token_id": "M-y", "price": 0.3}],
+            "rewards_config": [{"rate_per_day": 50}],
+            "rewards_min_size": 100,
+            "end_date": (date.today() + timedelta(days=10)).strftime("%Y-%m-%d"),
+            "created_at": _created_hours_ago(500),
+        }
+
+        def fake_rewards(tag_slug=None, **kw):
+            # 这个市场排在体育榜 2000 名之后:只在游戏的查询里出现
+            return [m] if tag_slug in (None, "games") else []
+
+        api.get_rewards_markets.side_effect = fake_rewards
+        api.get_rewards_for_market.return_value = []
+        api.gamma_market_details.side_effect = lambda cids: {
+            c: {"tag_slugs": tag_slugs} for c in cids
+        }
+        return api
+
+    def _tmpl(self, **over):
+        t = {
+            "included_categories": ["games"],
+            "include_other": False,
+            "veto_categories": [],
+            "min_reward_usd": 0,
+            "min_price_cents": 0,
+            "max_price_cents": 100,
+            "size_tiers": [_tier(100)],
+            "min_settlement_days": 0,
+            "max_settlement_days": None,
+        }
+        t.update(over)
+        return t
+
+    def _scanner(self, api):
+        db = MagicMock()
+        db.get_blacklist_ids.return_value = set()
+        db.is_in_cooldown.return_value = False
+        return MarketScanner(api, db, "")
+
+    def test_missing_tag_is_filled_so_veto_fires(self):
+        api = self._api(["games", "sports", "soccer"])
+        tmpl = self._tmpl(veto_categories=["sports"])
+        sc = self._scanner(api)
+        pool = sc.discover_candidates([tmpl])
+        assert set(pool[0]["tags"]) == {"games", "sports"}
+        assert sc.prefilter_for_template(pool, tmpl, "0xw") == []
+
+    def test_gamma_query_tag_maps_back_to_internal_slug(self):
+        # Gamma 的 pop-culture 就是我们的「文化」(culture)
+        api = self._api(["games", "pop-culture"])
+        pool = self._scanner(api).discover_candidates([self._tmpl()])
+        assert set(pool[0]["tags"]) == {"games", "culture"}
+
+    def test_no_gamma_tags_keeps_existing_tags(self):
+        api = self._api([])
+        pool = self._scanner(api).discover_candidates([self._tmpl()])
+        assert pool[0]["tags"] == ["games"]
 
 
 class TestCultureQueryTag:

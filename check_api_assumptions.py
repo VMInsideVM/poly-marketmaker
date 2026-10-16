@@ -59,10 +59,31 @@ def check_category_tags():
         record("PASS", "品类查询标签", f"{len(CATEGORY_QUERY_TAG)} 个标签都能查到市场")
 
 
+def check_gamma_tags_match_categories():
+    """补品类标签的前提:奖励接口列在某品类下的市场,Gamma 的市场标签里要有该品类的查询标签。
+
+    奖励接口每个品类只翻 20 页,排在后面的市场靠 Gamma 标签补;对不上就补不了(或补错)。"""
+    bad = []
+    for slug, tag in CATEGORY_QUERY_TAG.items():
+        rows = PolymarketAPI.get_rewards_markets(tag_slug=tag, max_pages=1)[:10]
+        details = PolymarketAPI.gamma_market_details([m["condition_id"] for m in rows])
+        miss = [
+            m["condition_id"]
+            for m in rows
+            if tag not in (details.get(m["condition_id"], {}).get("tag_slugs") or [])
+        ]
+        if miss:
+            bad.append(f"{slug}({tag}) {len(miss)}/{len(rows)} 个缺标签")
+    if bad:
+        record("FAIL", "Gamma 市场标签", "与奖励接口的品类对不上: " + "; ".join(bad))
+    else:
+        record("PASS", "Gamma 市场标签", f"{len(CATEGORY_QUERY_TAG)} 个品类各抽 10 个都对得上")
+
+
 def check_gamma_batch(sample):
     """按 condition_id 批量查 Gamma,一批 50 个必须一个不少(默认只回 20 条的坑)。"""
     cids = [m["condition_id"] for m in sample]
-    got = PolymarketAPI.gamma_market_times(cids)
+    got = PolymarketAPI.gamma_market_details(cids)
     missing = [c for c in cids if c not in got]
     if missing:
         record(
@@ -178,7 +199,11 @@ def main():
     args = ap.parse_args()
     t0 = time.time()
     with use_proxy(args.proxy):
-        checks = [check_category_tags, check_resolution_field]
+        checks = [
+            check_category_tags,
+            check_gamma_tags_match_categories,
+            check_resolution_field,
+        ]
         sample = PolymarketAPI.get_rewards_markets(max_pages=1)[:50]
         if len(sample) < 50:
             record("FAIL", "奖励市场列表", f"首页只拿到 {len(sample)} 个")

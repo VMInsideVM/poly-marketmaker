@@ -65,9 +65,9 @@ one is the *event's* creation time (identical to the microsecond with Gamma
 hit $Y Week of …" / "in October") keep appending new strike markets to an old event as the
 price moves, and those inherit the old time — on 2026-10-13 strikes listed under 10 hours
 earlier were judged 76 h to 18 days old and got filled despite a correct config. So
-`discover_candidates` calls `_use_market_level_times`, which overwrites `created_at` **and
+`discover_candidates` calls `_use_market_level_details`, which overwrites `created_at` **and
 `end_date`** in place with Gamma's market-level `createdAt`/`endDate`
-(`PolymarketAPI.gamma_market_times`, batched) before both the age verdict and the
+(`PolymarketAPI.gamma_market_details`, batched) before both the age verdict and the
 settlement-window gate. `end_date` has the same defect: in "Will X happen by <date>?" events
 the earlier-dated markets carry the event's (latest) end date — 32 of 178 sampled, up to 2.5
 months off — so a `min_settlement_days` window would happily trade a market settling
@@ -94,6 +94,14 @@ internal id, not necessarily the query tag**: `CATEGORY_QUERY_TAG` maps it (`cul
 market (Oscars, Rotten Tomatoes, MrBeast…) silently fell into "other" — the 文化 checkbox did
 nothing for trading or protection. The slug stayed `culture` so users' saved ticks need no
 migration. A curated query returning zero rows now logs a WARNING, since a dead tag fails silently.
+Each query is also capped at `reward_scan_max_pages` (20 pages = 2000 markets, by reward), while
+politics/elections hold 10k+ and sports/games 40k+, so a market that enters the pool through one
+category can rank past 2000 in another and miss that tag — on 2026-10-16, 5249 of ~20k pool
+markets lacked at least one tag (sports 2593, politics 2015), so vetoing sports or protecting
+only some categories missed them. `_use_market_level_details` therefore also fills curated tags
+from Gamma's market tags (`include_tag=true`, same request as the dates), mapped back through
+`CATEGORY_QUERY_TAG` and only ever added, never removed; Gamma's tags were checked to agree
+with the rewards endpoint's category membership, and `check_api_assumptions.py` re-checks that.
 **`veto_categories` (template-level, default empty) is the trading
 whitelist's veto and lives only on `market_wanted`**: a market carrying any vetoed tag is
 not traded even when another of its tags is whitelisted. It deliberately does NOT touch
