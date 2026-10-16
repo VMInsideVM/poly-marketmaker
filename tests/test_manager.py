@@ -1365,3 +1365,74 @@ class TestScannerThreadGeneration:
         assert captured["stale"]() is False  # 代际未变 -> 不取消
         manager._engine_generation = 2
         assert captured["stale"]() is True  # 代际已变 -> 取消
+
+
+class TestDescribeTemplate:
+    """引擎启动时每个钱包打一行「实际生效的」品类/新市场保护/结算窗口。
+
+    2026-10 两轮排查「跳过新建市场没生效」,最费劲的就是分不清是配置问题还是代码问题:
+    日志里看不出每个钱包绑的是哪个模板、哪些品类做了却没保护。"""
+
+    @staticmethod
+    def _tmpl(**over):
+        from config import ALL_CATEGORY_SLUGS
+
+        t = {
+            "included_categories": list(ALL_CATEGORY_SLUGS),
+            "include_other": True,
+            "veto_categories": [],
+            "skip_new_markets": True,
+            "new_market_hours": 24,
+            "skip_new_categories": list(ALL_CATEGORY_SLUGS),
+            "skip_new_other": True,
+            "min_settlement_days": 1,
+            "max_settlement_days": None,
+        }
+        t.update(over)
+        return t
+
+    def test_names_template_and_settlement_window(self):
+        from engine.manager import describe_template
+
+        line = describe_template(self._tmpl(min_settlement_days=2), "1天稳定")
+        assert "「1天稳定」" in line
+        assert "结算至少 2 天" in line
+
+    def test_switch_off_is_spelled_out(self):
+        from engine.manager import describe_template
+
+        assert "跳过新建市场 关" in describe_template(
+            self._tmpl(skip_new_markets=False), "t"
+        )
+
+    def test_lists_traded_but_unprotected_categories(self):
+        # 最有用的一句:做了却没保护的品类。这里天气和「其他」做市但不保护
+        from config import ALL_CATEGORY_SLUGS
+        from engine.manager import describe_template
+
+        line = describe_template(
+            self._tmpl(
+                skip_new_categories=[s for s in ALL_CATEGORY_SLUGS if s != "weather"],
+                skip_new_other=False,
+            ),
+            "t",
+        )
+        assert "24h" in line
+        assert "不保护: 天气、其他" in line
+
+    def test_everything_traded_is_protected(self):
+        from engine.manager import describe_template
+
+        assert "全部保护" in describe_template(self._tmpl(), "t")
+
+    def test_start_all_logs_one_line_per_enabled_wallet(self, caplog):
+        manager, db = _make_manager()
+        db.get_template_for.return_value = self._tmpl()
+        db.list_templates.return_value = [{"id": 1, "name": "默认"}]
+        with caplog.at_level(logging.INFO, logger="engine.manager"):
+            with patch("engine.manager.decrypt", return_value="0x_fake_key"):
+                with patch("engine.manager.PolymarketAPI"):
+                    manager.start_all()
+                    manager.stop_all()
+        lines = [r.getMessage() for r in caplog.records if "生效配置" in r.getMessage()]
+        assert len(lines) == 2

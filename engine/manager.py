@@ -33,6 +33,48 @@ from utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
 
+_CATEGORY_LABELS = {c["slug"]: c["label"] for c in CATEGORY_CATALOG}
+
+
+def describe_template(tmpl: dict, name: str) -> str:
+    """一行说清模板实际生效的做市品类、新市场保护、结算窗口(给引擎启动日志用)。
+
+    保护范围按引擎实际口径算:保护名单与做市名单取交集,「其他」要做市且勾了才保护——
+    重点列出「做了却没保护」的品类,用户报「跳过新建市场没生效」时一眼能看出是不是配置。
+    """
+
+    def labels(slugs):
+        return "、".join(_CATEGORY_LABELS.get(s, s) for s in slugs)
+
+    order = [c["slug"] for c in CATEGORY_CATALOG]
+    included = [s for s in order if s in set(tmpl.get("included_categories") or [])]
+    include_other = bool(tmpl.get("include_other"))
+    veto = [s for s in order if s in set(tmpl.get("veto_categories") or [])]
+    traded = "全部" if len(included) == len(order) else (labels(included) or "无")
+    if include_other:
+        traded += "+其他"
+
+    if not tmpl.get("skip_new_markets"):
+        skip = "跳过新建市场 关"
+    else:
+        protected = set(tmpl.get("skip_new_categories") or [])
+        open_ = [s for s in included if s not in protected]
+        if include_other and not tmpl.get("skip_new_other"):
+            open_.append("其他")
+        hours = tmpl.get("new_market_hours")
+        hours = f"{hours:g}" if isinstance(hours, (int, float)) else hours
+        skip = f"跳过新建市场 开 {hours}h," + (
+            ("不保护: " + labels(open_)) if open_ else "全部保护"
+        )
+
+    max_days = tmpl.get("max_settlement_days")
+    window = f"结算至少 {tmpl.get('min_settlement_days')} 天"
+    if max_days is not None:
+        window += f"、至多 {max_days} 天"
+    return (
+        f"模板「{name}」: 做市 {traded}; 排除 {labels(veto) or '无'}; {skip}; {window}"
+    )
+
 
 def _tmpl_num(tmpl: dict, key: str, default: float) -> float:
     """读模板里的数字参数,`None` 兜底成默认值。
@@ -832,6 +874,25 @@ class EngineManager:
         )
         self._scanner_thread.start()
         logger.info("Engine started: %d wallets + auto scanner", len(self.engines))
+        self._log_effective_configs(wallets)
+
+    def _log_effective_configs(self, wallets):
+        """每个启用钱包打一行实际生效的配置。纯展示,任何异常都不能挡住启动。"""
+        try:
+            names = {t["id"]: t["name"] for t in self.db.list_templates()}
+            default_id = self.db.get_default_template_id()
+            for w in wallets:
+                if not w.get("enabled"):
+                    continue
+                tid = w.get("template_id") or default_id
+                tmpl = self.db.get_template_for(w["address"])
+                logger.info(
+                    "钱包 %s 生效配置 %s",
+                    w["address"],
+                    describe_template(tmpl, names.get(tid, f"#{tid}")),
+                )
+        except Exception as e:
+            logger.warning("打印各钱包生效配置失败(不影响运行): %s", e)
 
     def stop_all(self):
         """Stop everything: scanner + all wallet workers, cancel all buy orders."""
