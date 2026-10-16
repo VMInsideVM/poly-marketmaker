@@ -19,7 +19,7 @@ from py_clob_client_v2.clob_types import (
 from eth_account import Account
 from py_builder_relayer_client.builder.derive import derive as _derive_safe
 from py_builder_relayer_client.config import get_contract_config
-from api.proxy import parse_proxy, use_proxy, http_get, install_clob_proxy
+from api.proxy import parse_proxy, use_proxy, http_get, install_clob_proxy, parallel_map
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,8 @@ _BOOKS_BATCH_SIZE = 100
 # Gamma 的 /markets 对超长 condition_ids 查询会返回 422。condition id 本身很长，
 # 50 个约 4KB query string，给 URL / 网关限制留足余量。
 _GAMMA_BATCH_SIZE = 50
+# Gamma 批量查询的并发数,与发现阶段奖励端点的并发一致。
+_GAMMA_MAX_WORKERS = 4
 
 # Rewards API is part of the CLOB API
 REWARDS_API = POLYMARKET_HOST
@@ -160,33 +162,45 @@ def _gamma_markets_batched(condition_ids: list, label: str) -> list[dict]:
     """按 condition_id 分批查 Gamma /markets(公共接口,免 auth),返回各批市场记录的合并。
 
     limit 必须带:Gamma 默认最多回 20 条,不带的话一批 50 个里有 30 个静默查不到
-    (2026-10-13 实测)。单批失败只丢该批(打 WARNING 后继续),其余批照常返回——
-    调用方对查不到的市场一律 fail-open。
+    (2026-10-13 实测)。批次并发跑(发现阶段一次要查上万个市场,顺序查要几分钟;
+    parallel_map 在每个 worker 里设回调用方的代理,不会直连)。单批失败重试一次(读请求
+    无副作用),仍失败只丢该批(打 WARNING),其余批照常返回——调用方对查不到的市场
+    一律 fail-open。
     """
     ids = [c for c in dict.fromkeys(condition_ids) if c]
-    batches = (
-        len(ids) + _GAMMA_BATCH_SIZE - 1
-    ) // _GAMMA_BATCH_SIZE
+    chunks = [ids[i : i + _GAMMA_BATCH_SIZE] for i in range(0, len(ids), _GAMMA_BATCH_SIZE)]
+
+    def _fetch(numbered):
+        n, chunk = numbered
+        for attempt in (1, 2):
+            try:
+                resp = http_get(
+                    "https://gamma-api.polymarket.com/markets",
+                    params=[("condition_ids", c) for c in chunk]
+                    + [("limit", len(chunk))],
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, list):
+                    raise ValueError(f"Gamma 返回的不是列表: {str(data)[:120]}")
+                return data
+            except Exception as e:
+                if attempt == 2:
+                    logger.warning(
+                        "%s batch %d/%d failed (fail-open): %s",
+                        label,
+                        n,
+                        len(chunks),
+                        e,
+                    )
+        return []
+
     rows = []
-    for i in range(0, len(ids), _GAMMA_BATCH_SIZE):
-        chunk = ids[i : i + _GAMMA_BATCH_SIZE]
-        try:
-            resp = http_get(
-                "https://gamma-api.polymarket.com/markets",
-                params=[("condition_ids", c) for c in chunk] + [("limit", len(chunk))],
-                timeout=10,
-            )
-            resp.raise_for_status()
-        except Exception as e:
-            logger.warning(
-                "%s batch %d/%d failed (fail-open): %s",
-                label,
-                i // _GAMMA_BATCH_SIZE + 1,
-                batches,
-                e,
-            )
-            continue
-        rows.extend(resp.json())
+    for got in parallel_map(
+        _fetch, enumerate(chunks, start=1), _GAMMA_MAX_WORKERS
+    ):
+        rows.extend(got)
     return rows
 
 

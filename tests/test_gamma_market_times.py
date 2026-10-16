@@ -85,3 +85,35 @@ def test_failed_batch_does_not_discard_successful_batches():
     with patch("api.proxy.requests.get", side_effect=[first, Exception("timeout")]):
         out = PolymarketAPI.gamma_market_times(ids)
     assert out == {"0xc0": {"created_at": "2026-10-12T16:38:12Z"}}
+
+
+def test_failed_batch_is_retried_once():
+    # 读请求重试无副作用;不重试的话这批市场只能退回事件时间,保护出窟窿
+    ok = _resp([{"conditionId": "0xc1", "createdAt": "2026-10-12T16:38:12Z"}])
+    with patch("api.proxy.requests.get", side_effect=[Exception("timeout"), ok]):
+        out = PolymarketAPI.gamma_market_times(["0xc1"])
+    assert out == {"0xc1": {"created_at": "2026-10-12T16:38:12Z"}}
+
+
+def test_every_batch_goes_through_the_wallet_proxy():
+    # 批次并发查,每个 worker 线程都必须带上调用方的代理,绝不直连
+    from api.proxy import use_proxy
+
+    ids = [f"0xc{i}" for i in range(260)]
+    rows = {c: {"conditionId": c, "createdAt": "2026-10-12T16:38:12Z"} for c in ids}
+    with patch("api.proxy.requests.get", side_effect=_fake_gamma(rows)) as g:
+        with use_proxy("http://p:1"):
+            out = PolymarketAPI.gamma_market_times(ids)
+    assert len(out) == 260
+    assert g.call_count == 6
+    assert all(
+        c.kwargs.get("proxies") == {"http": "http://p:1", "https": "http://p:1"}
+        for c in g.call_args_list
+    )
+
+
+def test_non_list_response_is_treated_as_failed_batch():
+    # Gamma 偶尔回错误对象而不是列表;当成该批失败,不能让调用方逐条 .get 时崩掉
+    with patch("api.proxy.requests.get", return_value=_resp({"error": "bad"})):
+        assert PolymarketAPI.gamma_market_times(["0xc1"]) == {}
+        assert PolymarketAPI.gamma_resolution_status(["0xc1"]) == {}
