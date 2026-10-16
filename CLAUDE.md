@@ -16,6 +16,13 @@ pytest tests/test_strategy.py     # single file
 pytest tests/test_strategy.py::TestMaxSpread2_TickSize1Cent::test_bid1_gt_2000_place_at_bid2  # single test
 ```
 
+`python check_api_assumptions.py [--proxy URL]` checks the external-API assumptions the program
+depends on against the live Polymarket endpoints (category query tags return markets, Gamma
+batches come back complete, the resolution-status field name, `/books` keyed by `asset_id`…);
+`release.ps1` runs it before building and refuses to release on any FAIL. Those assumptions
+fail silently and fail-open, and mocked unit tests answer the way we *think* the API does, so
+when the code starts relying on a new external field or behavior, add a check for it there.
+
 `tests/` holds pytest unit tests (pure logic, no network). The top-level `test_live.py`, `test_simulate.py`, `test_real_order.py` are **not** pytest tests — they are manual scripts that hit the real Polymarket API and the local `market_maker.db`; `test_real_order.py` places actual orders. Do not run them as part of a test suite.
 
 ## Server deployment
@@ -67,8 +74,11 @@ months off — so a `min_settlement_days` window would happily trade a market se
 tomorrow. The lookup covers every market whose `rewards_min_size` some template trades
 (others can never be placed), with or without the new-market switch, and the window gate
 (`_should_price`) must run after it. Markets/fields Gamma doesn't return keep the event
-values (an event starts no later and ends no earlier than its markets, so they can only
-under-protect — the same fail-open direction as a missing `created_at`). Every Gamma `/markets?condition_ids=`
+values, i.e. the pre-fix behavior. That fallback is **not** one-directional: an event never
+starts after its markets (so `created_at` can only under-protect), but its end date can be
+*earlier* than a market's (the "ceasefire continues through Nov 30" market sits in an event
+ending Oct 31), so a fallen-back `end_date` can err either way. Batches are retried once and
+`check_api_assumptions.py` reports how often the two sources disagree. Every Gamma `/markets?condition_ids=`
 call must pass `limit`: the default page is 20, so a batch of 50 silently loses 30 (this
 also hid 60% of markets from the UMA resolution guard until 2026-10-13). It applies only to the
 categories selected in `skip_new_categories` (+ `skip_new_other` for untagged markets),

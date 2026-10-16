@@ -25,6 +25,12 @@ if ($existing) {
   throw "tag $tag 已存在。请先在 version.py 提升版本号再发布。"
 }
 
+# 3.5) 接口自检:对真实 Polymarket 接口核对程序依赖的假设(查询标签、Gamma 批量条数、
+#      结算状态字段、批量盘口对齐……)。任一项 FAIL 就不发——这类假设失效时程序不报错,
+#      只会悄悄「配置全对却不生效」。需要能连上 Polymarket(本机走 HTTPS_PROXY)。
+& python "$root\check_api_assumptions.py"
+if ($LASTEXITCODE -ne 0) { throw "接口自检未通过,先看上面的 FAIL 项再发版" }
+
 # 4) 构建安装包(build_installer.ps1 会用 version.py 注入版本)
 & "$root\build_installer.ps1"
 if ($LASTEXITCODE -ne 0) { throw "构建失败" }
