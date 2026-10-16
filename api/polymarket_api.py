@@ -785,21 +785,29 @@ class PolymarketAPI:
         }
 
     @staticmethod
-    def gamma_created_at(condition_ids: list) -> dict:
-        """批量取每个 condition_id 的**市场级**创建时间(Gamma createdAt,UTC ISO 串)。
+    def gamma_market_times(condition_ids: list) -> dict:
+        """批量取每个 condition_id 的**市场级**创建时间与结算时间(Gamma createdAt/endDate)。
 
-        奖励端点 /rewards/markets/multi 的 created_at 是事件的创建时间,同一事件下的市场
-        共用一个值;往老事件里新加的市场会因此显得很老。新市场保护要用这里的值。
-        返回 {condition_id: createdAt};createdAt 缺失/为空或该批查询失败的市场不出现在
-        结果里,调用方保留原值(fail-open)。
+        奖励端点 /rewards/markets/multi 的 created_at 和 end_date 都是**事件**级的,同一
+        事件下的市场共用一个值(与 Gamma events[0] 的 createdAt/endDate 一致):往老事件里
+        新加的市场显得很老,而「X 月 Y 日前会不会…」这类事件里先结算的那几个市场,拿到的是
+        事件里最晚那个市场的结算日(实测 178 个里 32 个,最大差两个半月)。
+        返回 {condition_id: {"created_at": ..., "end_date": ...}};某字段缺失/为空就不给
+        该键,整批查询失败的市场不出现在结果里——调用方保留原值(fail-open)。
         """
-        return {
-            m["conditionId"]: m["createdAt"]
-            for m in _gamma_markets_batched(condition_ids, "gamma_created_at")
-            if m.get("conditionId")
-            and isinstance(m.get("createdAt"), str)
-            and m["createdAt"]
-        }
+        out = {}
+        for m in _gamma_markets_batched(condition_ids, "gamma_market_times"):
+            cid = m.get("conditionId")
+            if not cid:
+                continue
+            times = {
+                key: m[src]
+                for key, src in (("created_at", "createdAt"), ("end_date", "endDate"))
+                if isinstance(m.get(src), str) and m[src]
+            }
+            if times:
+                out[cid] = times
+        return out
 
     # --- Per-market rewards ---
 

@@ -1760,12 +1760,14 @@ class TestDiscoverySkipNewMarkets:
         assert self._pool_ids(api, [tmpl]) == {"OLD"}
 
 
-class TestNewMarketAgeFromGamma:
-    """新市场保护按市场自己的创建时间判,不按奖励端点的 created_at。
+class TestMarketLevelTimesFromGamma:
+    """新市场保护和结算窗口按市场自己的时间判,不按奖励端点的 created_at / end_date。
 
-    奖励端点的 created_at 是**事件**的创建时间。「价格触及」这类事件会往老事件里追加
-    新价位市场,新市场带着老事件的时间(2026-10-13 实盘:上线不到 10 小时的 MU/PLTR/黄金
-    新价位被当成 76 小时到 18 天的老市场挂单并成交)。市场级时间从 Gamma 批量取。
+    奖励端点的这两个字段都是**事件**级的。「价格触及」这类事件会往老事件里追加新价位
+    市场,新市场带着老事件的创建时间(2026-10-13 实盘:上线不到 10 小时的 MU/PLTR/黄金
+    新价位被当成 76 小时到 18 天的老市场挂单并成交);「X 月 Y 日前会不会…」这类事件里
+    先结算的市场拿到的是事件里最晚那个市场的结算日(实测最大差两个半月),「至少还有 N 天
+    才结算」的窗口拦不住明天就结算的盘。市场级时间从 Gamma 批量取。
     """
 
     def _mkt(self, cid, event_age_hours, size=100):
@@ -1779,8 +1781,9 @@ class TestNewMarketAgeFromGamma:
             "created_at": _created_hours_ago(event_age_hours),
         }
 
-    def _api(self, markets, gamma_ages):
-        """gamma_ages: {cid: 市场真实年龄(小时)};不在里面的 = Gamma 没回。"""
+    def _api(self, markets, gamma_ages, gamma_ends=None):
+        """gamma_ages: {cid: 市场真实年龄(小时)};gamma_ends: {cid: 市场真实结算日 ISO 串};
+        都不在里面的 = Gamma 没回。"""
         api = MagicMock()
 
         def fake_rewards(tag_slug=None, **kw):
@@ -1788,9 +1791,21 @@ class TestNewMarketAgeFromGamma:
 
         api.get_rewards_markets.side_effect = fake_rewards
         api.get_rewards_for_market.return_value = []
-        api.gamma_created_at.side_effect = lambda cids: {
-            c: _created_hours_ago(gamma_ages[c]) for c in cids if c in gamma_ages
-        }
+        gamma_ends = gamma_ends or {}
+
+        def lookup(cids):
+            out = {}
+            for c in cids:
+                times = {}
+                if c in gamma_ages:
+                    times["created_at"] = _created_hours_ago(gamma_ages[c])
+                if c in gamma_ends:
+                    times["end_date"] = gamma_ends[c]
+                if times:
+                    out[c] = times
+            return out
+
+        api.gamma_market_times.side_effect = lookup
         return api
 
     def _tmpl(self, **over):
@@ -1843,11 +1858,36 @@ class TestNewMarketAgeFromGamma:
         pool = self._scanner(api).discover_candidates([self._tmpl()])
         assert {m["condition_id"] for m in pool} == {"OLD"}
 
-    def test_no_gamma_request_when_no_template_protects(self):
-        # 没人开保护 -> 一个请求都不多发(不用这个功能的用户零成本)
-        api = self._api([self._mkt("NEW", 76)], {"NEW": 9})
+    def test_market_settling_soon_in_far_event_is_not_traded(self):
+        # 事件 60 天后才结束,这个市场今天就结算 -> 「至少还有 1 天」的模板不能做它
+        far = (date.today() + timedelta(days=60)).strftime("%Y-%m-%d")
+        today = date.today().strftime("%Y-%m-%dT12:00:00Z")
+        m = dict(self._mkt("SOON", 500), end_date=far)
+        api = self._api([m], {}, {"SOON": today})
+        tmpl = self._tmpl(skip_new_markets=False, min_settlement_days=1)
+        sc = self._scanner(api)
+        pool = sc.discover_candidates([tmpl])
+        assert [x["end_date"] for x in pool] == [today]
+        assert sc.prefilter_for_template(pool, tmpl, "0xw") == []
+
+    def test_gamma_missing_end_date_keeps_rewards_end_date(self):
+        far = (date.today() + timedelta(days=60)).strftime("%Y-%m-%d")
+        m = dict(self._mkt("A", 500), end_date=far)
+        api = self._api([m], {"A": 500})
+        pool = self._scanner(api).discover_candidates([self._tmpl()])
+        assert [x["end_date"] for x in pool] == [far]
+
+    def test_lookup_runs_without_new_market_protection(self):
+        # 结算窗口对每个模板都生效,没人开新市场保护也得查市场级结算日
+        api = self._api([self._mkt("A", 100)], {})
         self._scanner(api).discover_candidates([self._tmpl(skip_new_markets=False)])
-        api.gamma_created_at.assert_not_called()
+        api.gamma_market_times.assert_called_once()
+
+    def test_no_lookup_when_no_template_has_tiers(self):
+        # 没有任何启用的档位 = 哪个模板都下不了单,不为它多发请求
+        api = self._api([self._mkt("A", 100)], {})
+        self._scanner(api).discover_candidates([self._tmpl(size_tiers=[])])
+        api.gamma_market_times.assert_not_called()
 
     def test_cancel_during_gamma_lookup_stops_before_reward_fetches(self):
         # 停引擎/手动重扫接管发生在查 Gamma 期间 -> 查完立即让位,不再发精确奖励请求
@@ -1858,7 +1898,7 @@ class TestNewMarketAgeFromGamma:
             state["stop"] = True
             return {}
 
-        api.gamma_created_at.side_effect = lookup
+        api.gamma_market_times.side_effect = lookup
         with pytest.raises(ScanSuperseded):
             self._scanner(api).discover_candidates(
                 [self._tmpl()], cancel=lambda: state["stop"]
@@ -1866,10 +1906,10 @@ class TestNewMarketAgeFromGamma:
         api.get_rewards_for_market.assert_not_called()
 
     def test_only_tradable_markets_are_looked_up(self):
-        # 档位没有任何模板要的市场(这里 size=7)下不了单,年龄无关紧要,不去查
+        # 档位没有任何模板要的市场(这里 size=7)下不了单,时间无关紧要,不去查
         api = self._api([self._mkt("A", 100), self._mkt("B", 100, size=7)], {})
         self._scanner(api).discover_candidates([self._tmpl()])
-        (cids,), _ = api.gamma_created_at.call_args
+        (cids,), _ = api.gamma_market_times.call_args
         assert list(cids) == ["A"]
 
 

@@ -58,12 +58,17 @@ one is the *event's* creation time (identical to the microsecond with Gamma
 hit $Y Week of …" / "in October") keep appending new strike markets to an old event as the
 price moves, and those inherit the old time — on 2026-10-13 strikes listed under 10 hours
 earlier were judged 76 h to 18 days old and got filled despite a correct config. So
-`discover_candidates` calls `_use_market_created_at`, which overwrites `created_at` in place
-with Gamma's market-level `createdAt` (`PolymarketAPI.gamma_created_at`, batched) before the
-age verdict — only for markets that pass the tier/window gate *and* that some template
-protects, so a user with the switch off sends no extra request. Markets Gamma doesn't
-return keep the event time (never later than the market's, so it can only under-protect
-— the same fail-open direction as a missing `created_at`). Every Gamma `/markets?condition_ids=`
+`discover_candidates` calls `_use_market_level_times`, which overwrites `created_at` **and
+`end_date`** in place with Gamma's market-level `createdAt`/`endDate`
+(`PolymarketAPI.gamma_market_times`, batched) before both the age verdict and the
+settlement-window gate. `end_date` has the same defect: in "Will X happen by <date>?" events
+the earlier-dated markets carry the event's (latest) end date — 32 of 178 sampled, up to 2.5
+months off — so a `min_settlement_days` window would happily trade a market settling
+tomorrow. The lookup covers every market whose `rewards_min_size` some template trades
+(others can never be placed), with or without the new-market switch, and the window gate
+(`_should_price`) must run after it. Markets/fields Gamma doesn't return keep the event
+values (an event starts no later and ends no earlier than its markets, so they can only
+under-protect — the same fail-open direction as a missing `created_at`). Every Gamma `/markets?condition_ids=`
 call must pass `limit`: the default page is 20, so a batch of 50 silently loses 30 (this
 also hid 60% of markets from the UMA resolution guard until 2026-10-13). It applies only to the
 categories selected in `skip_new_categories` (+ `skip_new_other` for untagged markets),

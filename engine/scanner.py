@@ -282,8 +282,8 @@ class MarketScanner:
 
         # 「新市场」门槛:发现阶段只能排除「每个模板都会因太新排除」的市场,门槛按市场的
         # 品类逐条算(见 loosest_new_market_hours);各模板自己的 N 由 prefilter_for_template
-        # 精筛。判定前先把可能下单、又有模板保护的市场的 created_at 换成市场自己的创建
-        # 时间(见 _use_market_created_at)。
+        # 精筛。判定前先把可能下单的市场的 created_at/end_date 换成市场自己的(见
+        # _use_market_level_times)。
         now = time.time()
 
         # 并集档位 sizes + 各模板结算窗口:精确奖励拉取(每市场一次网络、~0.78s)是发现
@@ -314,7 +314,7 @@ class MarketScanner:
 
         # 品类匹配(过黑名单/奖励地板)的市场都进候选池;其中被档位+窗口门控选中的才拉精确
         # 奖励(priced,并发),其余用批量奖励兜底(extra,不发网络)。
-        kept = []  # (market, 是否过档位+窗口门控)
+        kept = []
         for market in pool:
             if cancel and cancel():
                 raise ScanSuperseded()
@@ -325,32 +325,25 @@ class MarketScanner:
                 continue  # 没被任何模板 include(且非其他)
             if _batch_rate(market) < min_floor:
                 continue  # 比最宽松模板还低,任何模板都不会要
-            kept.append((market, _should_price(market)))
+            kept.append(market)
 
-        # 只有门控内(某个模板可能下单)且有模板保护的市场,年龄才影响下单;门控外的市场
-        # 任何模板都下不了单,不为它们多发请求。没人开保护时一个请求都不发。
-        self._use_market_created_at(
-            [
-                m
-                for m, gated in kept
-                if gated
-                and any(
-                    _protects_new(t, m.get("tags", [])) and _new_market_hours(t)
-                    for t in templates
-                )
-            ]
+        # 新市场保护和结算窗口都要市场自己的时间,而奖励端点给的是事件级的。只查档位被
+        # 某个模板要的市场(其余哪个模板都下不了单);没有任何启用档位时一个都不查。窗口
+        # 门控(_should_price)必须放在这之后,否则它读到的还是事件的结算日。
+        self._use_market_level_times(
+            [m for m in kept if int(m.get("rewards_min_size", 0) or 0) in union_sizes]
         )
         if cancel and cancel():
             raise ScanSuperseded()
 
         priced, extra = [], []
-        for market, gated in kept:
+        for market in kept:
             min_age_hours = loosest_new_market_hours(templates, market.get("tags", []))
             if min_age_hours:
                 age = market_age_hours(market.get("created_at", ""), now)
                 if age is not None and age < min_age_hours:
                     continue  # 太新;created_at 取不到 -> fail-open 保留
-            (priced if gated else extra).append(market)
+            (priced if _should_price(market) else extra).append(market)
 
         def _precise_reward(market):
             # 精确每市场奖励(与旧 scan 一致:/rewards/markets/{cid});失败退回批量 total_rate。
@@ -430,41 +423,57 @@ class MarketScanner:
         )
         return out
 
-    def _use_market_created_at(self, markets):
-        """把这些市场的 created_at 换成市场自己的创建时间(Gamma 批量取,原地改)。
+    def _use_market_level_times(self, markets):
+        """把这些市场的 created_at / end_date 换成市场自己的(Gamma 批量取,原地改)。
 
-        奖励端点的 created_at 是**事件**的创建时间:同一事件下所有市场共用一个值,与
-        Gamma 的 events[0].createdAt 精确到微秒一致。「价格触及」这类事件会随价格走动往
-        老事件里追加新价位,新市场带着老事件的时间,新市场保护配得再对也拦不住(2026-10-13
-        实盘:上线不到 10 小时的 MU/PLTR/黄金新价位,按事件时间算成 76 小时到 18 天,被挂单
-        并成交)。改写在候选池的市场上,发现阶段与 prefilter_for_template 读的是同一个值。
+        奖励端点的这两个字段都是**事件**级的:同一事件下所有市场共用一个值,与 Gamma
+        events[0] 的 createdAt/endDate 一致。
+        - 创建时间:「价格触及」这类事件随价格走动往老事件里追加新价位,新市场带着老事件
+          的时间,新市场保护配得再对也拦不住(2026-10-13 实盘:上线不到 10 小时的 MU/PLTR/
+          黄金新价位按事件时间算成 76 小时到 18 天,被挂单并成交)。
+        - 结算日:「X 月 Y 日前会不会…」这类事件里先结算的市场拿到的是事件里最晚那个市场
+          的结算日(实测 178 个里 32 个,最大差两个半月),「至少还有 N 天才结算」的窗口
+          拦不住明天就结算的盘。
+        改写在候选池的市场上,发现阶段、prefilter_for_template 和市场发现页读的是同一个值。
 
-        Gamma 没回的市场(该批失败/查不到)保留原值:事件不晚于其下的市场创建,原值只会
-        让市场显得更老,少拦不多拦——与 created_at 取不到即保留同方向。
+        Gamma 没回的市场/字段保留原值:事件建得不晚于、结束得不早于它下面的市场,原值
+        只会让市场显得更老、离结算更远,少拦不多拦——与取不到即放行同方向。
         """
         if not markets:
             return
-        created = self.api.gamma_created_at(
+        looked_up = self.api.gamma_market_times(
             [m.get("condition_id", "") for m in markets]
         )
         now = time.time()
-        got = moved = 0
+        got = younger = sooner = 0
         for market in markets:
-            ts = created.get(market.get("condition_id", ""))
-            if not isinstance(ts, str) or not ts:
+            times = looked_up.get(market.get("condition_id", ""))
+            if not isinstance(times, dict) or not times:
                 continue
             got += 1
-            before = market_age_hours(market.get("created_at", ""), now)
-            after = market_age_hours(ts, now)
-            if before is not None and after is not None and before - after > 1:
-                moved += 1
-            market["created_at"] = ts
+            created = times.get("created_at")
+            if isinstance(created, str) and created:
+                before = market_age_hours(market.get("created_at", ""), now)
+                after = market_age_hours(created, now)
+                if before is not None and after is not None and before - after > 1:
+                    younger += 1
+                market["created_at"] = created
+            end = times.get("end_date")
+            if isinstance(end, str) and end:
+                before_ts = _parse_end_date(market.get("end_date", ""))
+                after_ts = _parse_end_date(end)
+                if before_ts and after_ts and _settlement_days_until(
+                    after_ts
+                ) < _settlement_days_until(before_ts):
+                    sooner += 1
+                market["end_date"] = end
         logger.info(
-            "新市场保护:向 Gamma 查 %d 个市场的创建时间,取到 %d 个,"
-            "其中 %d 个比奖励接口给的晚 1 小时以上(老事件里新加的市场)",
+            "市场级时间:向 Gamma 查 %d 个市场,取到 %d 个;其中 %d 个比奖励接口给的晚建 1 小时"
+            "以上(老事件里新加的市场),%d 个结算日比奖励接口给的早",
             len(markets),
             got,
-            moved,
+            younger,
+            sooner,
         )
 
     def refresh_orderbooks(self, pool, cancel=None):
