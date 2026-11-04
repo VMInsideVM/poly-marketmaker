@@ -263,7 +263,7 @@ class TestPositionsPagination:
     ):
         api, client = _api_with_mock_client(mock_clob)
         resp = MagicMock()
-        resp.json.return_value = []
+        resp.json.return_value = {"data": [], "pagination": {"next_cursor": None}}
         mock_requests.get.return_value = resp
         api.get_user_positions("0xfunder")
         params = mock_requests.get.call_args.kwargs["params"]
@@ -334,7 +334,7 @@ class TestPerWalletProxy:
         temp.get_address.return_value = "0xE"
         mock_clob.return_value = temp
         resp = MagicMock()
-        resp.json.return_value = []
+        resp.json.return_value = {"data": [], "pagination": {"next_cursor": None}}
         mock_get.return_value = resp
         api = PolymarketAPI("0xpk", proxy="h:1000:u:p")
         api.get_user_positions("0xfunder")

@@ -2,6 +2,7 @@
 
 import functools
 import logging
+import math
 import time
 from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
@@ -56,6 +57,57 @@ _GAMMA_MAX_WORKERS = 4
 # Rewards API is part of the CLOB API
 REWARDS_API = POLYMARKET_HOST
 DATA_API_HOST = "https://data-api.polymarket.com"
+
+
+def _data_api_rows(route: str, params: dict, timeout: int) -> list[dict]:
+    """V2 只读游标分页。任何一页失败都抛错，绝不把半份持仓/流水当成功。
+
+    2026-11-02 旧 /positions、/activity 已返回 410。V2 响应是
+    {data: [...], pagination: {next_cursor: str | null}}；不能靠短页结束，
+    也不能把结构变化吞成 []（那会把真实持仓误判为空仓并继续买入）。
+    调用者的 _proxied 上下文覆盖整个分页过程。
+    """
+    out = []
+    cursor = None
+    seen = set()
+    while True:
+        query = dict(params)  # 每页独立，保留相同 user/过滤窗口；不发送 offset
+        if cursor is not None:
+            query["cursor"] = cursor
+        resp = http_get(f"{DATA_API_HOST}/v2/{route}", params=query, timeout=timeout)
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise ValueError(f"Data API v2 {route}: 缺少 data 列表")
+        page = payload["data"]
+        paging = payload.get("pagination")
+        if not isinstance(paging, dict) or "next_cursor" not in paging:
+            raise ValueError(f"Data API v2 {route}: 缺少 pagination.next_cursor")
+        if any(not isinstance(row, dict) for row in page):
+            raise ValueError(f"Data API v2 {route}: data 行不是对象")
+        cursor = paging["next_cursor"]
+        if cursor is None:
+            if paging.get("has_more") is True:
+                raise ValueError(f"Data API v2 {route}: has_more 为真但 cursor 为空")
+            out.extend(page)
+            return out
+        if not isinstance(cursor, str) or not cursor.strip() or cursor in seen:
+            raise ValueError(f"Data API v2 {route}: 无效或重复的 cursor")
+        seen.add(cursor)
+        out.extend(page)
+
+
+def _data_api_number(row: dict, key: str, *, nonnegative: bool = False):
+    """核心数值缺失/非有限时明确失败，不用 0 伪造空仓或奖励。金额不缩放。"""
+    value = row.get(key)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or (nonnegative and value < 0)
+    ):
+        raise ValueError(f"Data API v2: {key} 不是有效数值")
+    return value
 
 
 class OrderRejected(Exception):
@@ -167,42 +219,57 @@ def _gamma_markets_batched(
     (2026-10-13 实测)。批次并发跑(发现阶段一次要查上万个市场,顺序查要几分钟;
     parallel_map 在每个 worker 里设回调用方的代理,不会直连)。单批失败重试一次(读请求
     无副作用),仍失败只丢该批(打 WARNING),其余批照常返回——调用方对查不到的市场
-    一律 fail-open。
+    一律 fail-open。默认查询会隐藏已关闭市场，即使奖励接口仍列着它们；成功应答中
+    缺少的 id 再按 closed=true 补查，标签、市场时间和结算状态都不能凭空丢掉。
     """
     ids = [c for c in dict.fromkeys(condition_ids) if c]
-    chunks = [ids[i : i + _GAMMA_BATCH_SIZE] for i in range(0, len(ids), _GAMMA_BATCH_SIZE)]
+    chunks = [
+        ids[i : i + _GAMMA_BATCH_SIZE] for i in range(0, len(ids), _GAMMA_BATCH_SIZE)
+    ]
 
-    def _fetch(numbered):
-        n, chunk = numbered
+    def _read(n, chunk, *, closed=False):
         for attempt in (1, 2):
             try:
                 resp = http_get(
                     "https://gamma-api.polymarket.com/markets",
                     params=[("condition_ids", c) for c in chunk]
                     + [("limit", len(chunk))]
-                    + list(extra_params),
+                    + list(extra_params)
+                    + ([("closed", "true")] if closed else []),
                     timeout=10,
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                if not isinstance(data, list):
+                if not isinstance(data, list) or any(
+                    not isinstance(m, dict) for m in data
+                ):
                     raise ValueError(f"Gamma 返回的不是列表: {str(data)[:120]}")
-                return data
+                return [m for m in data if m.get("conditionId") in chunk]
             except Exception as e:
                 if attempt == 2:
                     logger.warning(
-                        "%s batch %d/%d failed (fail-open): %s",
+                        "%s batch %d/%d closed=%s failed (fail-open): %s",
                         label,
                         n,
                         len(chunks),
+                        closed,
                         e,
                     )
-        return []
+        return None  # 请求失败不是「成功应答却缺市场」，不再额外放大重试次数。
+
+    def _fetch(numbered):
+        n, chunk = numbered
+        rows = _read(n, chunk)
+        if rows is None:
+            return []
+        seen = {m.get("conditionId") for m in rows}
+        missing = [cid for cid in chunk if cid not in seen]
+        if missing:
+            rows += _read(n, missing, closed=True) or []
+        return rows
 
     rows = []
-    for got in parallel_map(
-        _fetch, enumerate(chunks, start=1), _GAMMA_MAX_WORKERS
-    ):
+    for got in parallel_map(_fetch, enumerate(chunks, start=1), _GAMMA_MAX_WORKERS):
         rows.extend(got)
     return rows
 
@@ -547,50 +614,65 @@ class PolymarketAPI:
         return self.client.are_orders_scoring(OrdersScoringParams(orderIds=order_ids))
 
     def get_user_positions(self, user_address: str) -> list:
-        """Polymarket Data API: current positions for a user.
+        """V2 当前持仓完整快照，转换为引擎和页面原有的内部字段。
 
-        Returns a list of position dicts. Confirmed fields (documented
-        sample): asset (=asset_id), size, avgPrice, curPrice, conditionId
-        (=market), outcome, title. user_address is the proxy/funder.
+        size 必须取 current_size，绝不是累计买入的 total_size。
+        avg_price 只映射给页面展示；离场成本仍只从 CLOB 成交重建。
         """
-        resp = http_get(
-            f"{DATA_API_HOST}/positions",
-            # limit 抬高单页上限,避免持仓被服务端默认页大小(约 100)静默截断 ->
-            # 漏离场/止损(F7)。本 app 并发市场上限 ~10 -> 持仓 ≤~20,500 足够,单请求。
-            params={"user": user_address, "limit": 500},
+        rows = _data_api_rows(
+            "positions",
+            {
+                "user": user_address,
+                "limit": 500,
+                "status": "OPEN",
+                "filter_type": "TOKENS",
+                "filter_amount": 0,
+            },
             timeout=15,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        return data if isinstance(data, list) else []
+        out = []
+        for row in rows:
+            for key in ("token_id", "condition_id"):
+                if not isinstance(row.get(key), str) or not row[key].strip():
+                    raise ValueError(f"Data API v2 positions: 缺少 {key}")
+            size = _data_api_number(row, "current_size", nonnegative=True)
+            price = _data_api_number(row, "current_price", nonnegative=True)
+            out.append(
+                {
+                    **row,
+                    "asset": row["token_id"],
+                    "conditionId": row["condition_id"],
+                    "size": size,
+                    "curPrice": price,
+                    "avgPrice": row.get("avg_price"),
+                }
+            )
+        return out
 
     def get_activity(self, types=None, start=None, end=None) -> list:
-        """Data API /activity（公开，按 funder）。offset 翻页至末页。
+        """Data API /v2/activity（公开，按 funder），完整游标翻页。
 
         types: 可选 type 白名单（逗号拼接）;start/end: epoch 秒窗口。用于盈亏台账取
         奖励(REWARD)/返佣(MAKER_REBATE)/赎回(REDEEM)。走本钱包代理(self.proxy_url)。
         """
-        user = self.get_funder()
-        limit = 500
-        offset = 0
-        out: list = []
-        while True:
-            params = {"user": user, "limit": limit, "offset": offset}
-            if types:
-                params["type"] = ",".join(types)
-            if start is not None:
-                params["start"] = int(start)
-            if end is not None:
-                params["end"] = int(end)
-            resp = http_get(f"{DATA_API_HOST}/activity", params=params, timeout=20)
-            resp.raise_for_status()
-            page = resp.json()
-            if not isinstance(page, list) or not page:
-                break
-            out.extend(page)
-            if len(page) < limit or offset + limit >= 10000:  # 末页 / offset 上限
-                break
-            offset += limit
+        # V2 省略 start 或传 0 只查近三年；start=1 保留原来的全历史语义。
+        params = {
+            "user": self.get_funder(),
+            "limit": 500,
+            "start": int(start) if start else 1,
+        }
+        if types:
+            params["type"] = ",".join(types)
+        if end is not None:
+            params["end"] = int(end)
+        out = []
+        for row in _data_api_rows("activity", params, timeout=20):
+            if not isinstance(row.get("type"), str) or not row["type"].strip():
+                raise ValueError("Data API v2 activity: 缺少 type")
+            _data_api_number(row, "timestamp", nonnegative=True)
+            amount = _data_api_number(row, "usdc_size")
+            # 奖励/返佣没有 token_id 或 condition_id 是正常的，不能按持仓规则过滤。
+            out.append({**row, "usdcSize": amount})
         return out
 
     # --- Rewards (CLOB API - public endpoints) ---
@@ -604,6 +686,8 @@ class PolymarketAPI:
         position: str = "DESC",
         max_pages: int = 5,
         tag_slug: str = None,
+        on_page=None,
+        check_cancel=None,
     ) -> list[dict]:
         """Fetch markets with active rewards using GET /rewards/markets/multi.
 
@@ -624,6 +708,8 @@ class PolymarketAPI:
         next_cursor = ""
         page = 0
         while True:
+            if check_cancel:
+                check_cancel()
             page += 1
             # One page of 100 (sorted by rate_per_day DESC) already covers every
             # reward-qualifying market; next_cursor pagination covers the rest.
@@ -644,11 +730,16 @@ class PolymarketAPI:
                 params["position"] = position
             if next_cursor:
                 params["next_cursor"] = next_cursor
-            logger.info("Fetching rewards markets page %d...", page)
+            logger.info(
+                "Fetching rewards markets tag=%s page %d...", tag_slug or "all", page
+            )
 
             # Retry per page
             resp_data = None
             for attempt in range(3):
+                # 放在请求的 try 外：取消不是网络失败，不得吞掉或重试。
+                if check_cancel:
+                    check_cancel()
                 try:
                     resp = http_get(
                         f"{REWARDS_API}/rewards/markets/multi",
@@ -673,14 +764,19 @@ class PolymarketAPI:
             if resp_data is None:
                 break
 
+            if check_cancel:
+                check_cancel()
             markets = resp_data.get("data", [])
             all_markets.extend(markets)
             logger.info(
-                "Page %d: got %d markets (total: %d)",
+                "tag=%s Page %d: got %d markets (total: %d)",
+                tag_slug or "all",
                 page,
                 len(markets),
                 len(all_markets),
             )
+            if on_page:
+                on_page(page, len(all_markets))
             next_cursor = resp_data.get("next_cursor", "LTE=")
             if next_cursor == "LTE=" or not markets or page >= max_pages:
                 break

@@ -872,6 +872,7 @@ def api_scan_status():
     return jsonify(
         {
             "scan_status": manager.scan_status,
+            "scan_progress": manager.scan_progress,
             "scan_checked": manager.scan_checked,
             "scan_total": manager.scan_total,
             "found": len(manager.eligible_markets or []),

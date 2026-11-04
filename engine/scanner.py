@@ -20,6 +20,7 @@ candidate during fetch_candidates.
 import re
 import time
 import logging
+import threading
 from datetime import datetime, date, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from engine.categories import (
@@ -223,17 +224,64 @@ class MarketScanner:
         # 注意:只按这些 slug 打标签,故 tags 可能残缺;新市场保护判定因此与
         # 做市名单取交集(见 loosest_new_market_hours),改这行前先确认那边仍成立。
         slugs_needed = (
-            set(CATALOG_SLUGS)
-            if inc_other
-            else ((union | veto) & set(CATALOG_SLUGS))
+            set(CATALOG_SLUGS) if inc_other else ((union | veto) & set(CATALOG_SLUGS))
         )
         floors = [t.get("min_reward_usd", 0) for t in templates]
         min_floor = min(floors) if floors else 0
 
+        def _check_cancel():
+            if cancel and cancel():
+                raise ScanSuperseded()
+
+        # 初筛可能耗时数分钟；不能等所有品类翻完才报第一条进度。
+        # 回调来自并发网络线程，只更新内存，绝不在这里读取/写入 DB。
+        progress_lock = threading.Lock()
+        completed_slugs = set()
+        labels = {c["slug"]: c["label"] for c in CATEGORY_CATALOG}
+
+        def _fetch_progress(slug, page=0, count=0, complete=False):
+            _check_cancel()
+            with progress_lock:
+                if complete:
+                    completed_slugs.add(slug)
+                label = labels.get(slug, "全品类（含其他）")
+                detail = (
+                    f"第 {page} 页，已读取 {count} 条" if page else "正在请求首个分页"
+                )
+                if complete:
+                    detail += "，该项已完成"
+                if on_progress:
+                    on_progress(
+                        0,
+                        0,
+                        f"抓取奖励市场：{label}，{detail}；"
+                        f"已完成 {len(completed_slugs)}/{len(slugs_needed) + int(inc_other)} 项",
+                    )
+
+        def _fetch_rewards(slug):
+            _fetch_progress(slug)
+            latest = [0, 0]
+
+            def on_page(page, count):
+                latest[:] = [page, count]
+                _fetch_progress(slug, page, count)
+
+            kwargs = {"tag_slug": CATEGORY_QUERY_TAG.get(slug, slug)} if slug else {}
+            rows = self.api.get_rewards_markets(
+                max_pages=max_pages,
+                on_page=on_page,
+                check_cancel=_check_cancel,
+                **kwargs,
+            )
+            _fetch_progress(slug, *latest, complete=True)
+            return rows
+
+        _check_cancel()
+
         def _tag_slug(slug):  # 返回整条记录(用于并入候选池 + 建 cid 集打标签)
             tag = CATEGORY_QUERY_TAG.get(slug, slug)
             try:
-                rows = self.api.get_rewards_markets(tag_slug=tag, max_pages=max_pages)
+                rows = _fetch_rewards(slug)
                 if not rows:
                     # 标签失效是静默的:查回 0 个,该品类的市场全落进「其他」,勾选的
                     # 做市/保护都不生效(culture 就这样哑了三个多月)。
@@ -244,6 +292,8 @@ class MarketScanner:
                         tag,
                     )
                 return slug, rows
+            except ScanSuperseded:
+                raise
             except Exception as e:
                 # 单个品类查询失败不拖垮整轮发现(奖励端点偶发 500):该 slug 记空,
                 # 其命中市场退化为「其他」(include_other 时仍会被 full 收)。
@@ -262,7 +312,7 @@ class MarketScanner:
         # full(不带品类=全品类)仅在有号收「其他」时需要:用来捞无 curated 标签的市场。
         # 不勾「其他」的号(如天气号)彻底跳过这次全品类抓取——正是它当初把低奖励品类
         # 挤出前 500、造成候选偏少的根因。
-        full = self.api.get_rewards_markets(max_pages=max_pages) if inc_other else []
+        full = _fetch_rewards(None) if inc_other else []
 
         # 品类计数快照(配置页勾选用):仅当查了全 14(即 inc_other,full 有值)才算得准。
         # 光 slugs_needed 覆盖全 14 不够——勾满 14 个 curated 品类但不勾「其他」时同样会覆盖全 14,
@@ -336,9 +386,13 @@ class MarketScanner:
         # 新市场保护和结算窗口都要市场自己的时间,而奖励端点给的是事件级的。只查档位被
         # 某个模板要的市场(其余哪个模板都下不了单);没有任何启用档位时一个都不查。窗口
         # 门控(_should_price)必须放在这之后,否则它读到的还是事件的结算日。
-        self._use_market_level_details(
-            [m for m in kept if int(m.get("rewards_min_size", 0) or 0) in union_sizes]
-        )
+        details_needed = [
+            m for m in kept if int(m.get("rewards_min_size", 0) or 0) in union_sizes
+        ]
+        _check_cancel()
+        if on_progress:
+            on_progress(0, 0, f"校验 {len(details_needed)} 个市场的日期和品类标签…")
+        self._use_market_level_details(details_needed)
         if cancel and cancel():
             raise ScanSuperseded()
 

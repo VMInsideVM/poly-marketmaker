@@ -307,7 +307,7 @@ function pollScan() {
                     `<progress value="${checked}" max="${total}" ` +
                     `style="display:block;width:100%;height:8px;margin-top:6px"></progress>`;
             } else {
-                box.textContent = `正在初筛… 已找到 ${found} 个`;
+                box.textContent = `${data.scan_progress || '正在初筛…'} · 已找到 ${found} 个候选（初筛完成后显示）`;
             }
         } else {
             box.style.display = 'none';

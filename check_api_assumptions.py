@@ -16,15 +16,20 @@
 """
 
 import argparse
+import math
 import sys
 import time
 from datetime import datetime, timezone
 
-from api.polymarket_api import PolymarketAPI, POLYMARKET_HOST
-from api.proxy import http_post, use_proxy
+from api.polymarket_api import PolymarketAPI, POLYMARKET_HOST, DATA_API_HOST
+from api.proxy import http_get, http_post, use_proxy
 from config import CATEGORY_QUERY_TAG
 
 results = []  # (级别, 名称, 说明)
+
+# 官方文档公开样例，不读本地钱包/DB，也不构造需要私钥的 PolymarketAPI 实例。
+# https://docs.polymarket.com/api-reference/data-api/overview
+_DATA_API_SAMPLE_USER = "0x983eedfbd75803602e4a6e6ea9aab6dc6b9c6748"
 
 
 def record(level, name, detail):
@@ -191,6 +196,76 @@ def check_precise_reward(sample):
         )
 
 
+def _check_data_api_page(endpoint, text_fields, number_fields, integer_fields=()):
+    """独立检查原始响应，不能让适配器的旧字段/默认值掩盖 v2 契约变化。
+
+    契约来源(2026-11-03 核对): https://data-api.polymarket.com/v2/openapi.json
+    每项只读公开样例的一页，不翻完整历史。空页只能证明路由/分页包裹可用，
+    不能证明行字段；报告 WARN 而不是假 PASS 或把合法空持仓判成 FAIL。
+    """
+    name = f"Data API v2 {endpoint}"
+    try:
+        resp = http_get(
+            f"{DATA_API_HOST}/v2/{endpoint}",
+            params={"user": _DATA_API_SAMPLE_USER, "limit": 1},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise ValueError("响应必须是含 data:list 的对象，不能是 v1 裸数组")
+        pagination = payload.get("pagination")
+        if not isinstance(pagination, dict) or "next_cursor" not in pagination:
+            raise ValueError("缺少 pagination.next_cursor")
+        cursor = pagination["next_cursor"]
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise ValueError("pagination.next_cursor 必须是非空字符串或 null")
+        has_more = pagination.get("has_more")
+        if type(has_more) is not bool or has_more != (cursor is not None):
+            raise ValueError("pagination.has_more 与 next_cursor 不一致")
+        rows = payload["data"]
+        for i, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ValueError(f"data[{i}] 必须是对象")
+            for field in text_fields:
+                # 文档允许未 enrichment 的标题、奖励活动的 token/condition 等为空串。
+                if not isinstance(row.get(field), str):
+                    raise ValueError(f"data[{i}].{field} 缺失或不是字符串")
+            for field in number_fields:
+                value = row.get(field)
+                if type(value) not in (int, float) or not math.isfinite(value):
+                    raise ValueError(f"data[{i}].{field} 缺失或不是有限 JSON 数值")
+            for field in integer_fields:
+                if type(row.get(field)) is not int:
+                    raise ValueError(f"data[{i}].{field} 缺失或不是整数")
+        if not rows:
+            record("WARN", name, "公开样例暂无记录；路由和分页结构正常，无法核对行字段")
+        else:
+            record("PASS", name, f"公开样例 {len(rows)} 条原始 v2 行字段及分页结构正常")
+    except Exception as e:
+        record("FAIL", name, f"原始响应契约核对失败: {e}")
+
+
+def check_data_api_positions():
+    """下单和离场都依赖持仓；v1 退役时旧自检全 PASS 却无法下单。"""
+    _check_data_api_page(
+        "positions",
+        ("proxy_wallet", "token_id", "condition_id", "title", "outcome"),
+        # current_size 才是当前份额；total_size 是终生买入份额，绝不能替代。
+        ("current_size", "avg_price", "current_price", "current_value"),
+    )
+
+
+def check_data_api_activity():
+    """奖励/返佣/赎回台账依赖活动流的真实金额及交易标识字段。"""
+    _check_data_api_page(
+        "activity",
+        ("proxy_wallet", "token_id", "condition_id", "type", "transaction_hash", "side"),
+        ("size", "usdc_size", "price"),
+        ("timestamp",),
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -203,6 +278,8 @@ def main():
             check_category_tags,
             check_gamma_tags_match_categories,
             check_resolution_field,
+            check_data_api_positions,
+            check_data_api_activity,
         ]
         sample = PolymarketAPI.get_rewards_markets(max_pages=1)[:50]
         if len(sample) < 50:

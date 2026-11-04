@@ -57,19 +57,18 @@ def test_network_failure_fails_open_returns_empty():
 
 def test_large_input_is_split_into_safe_batches():
     ids = [f"0xc{i}" for i in range(101)]
-    response = _resp([])
-    with patch("api.proxy.requests.get", return_value=response) as g:
+    with patch(
+        "api.proxy.requests.get", side_effect=_fake_gamma(dict.fromkeys(ids))
+    ) as g:
         out = PolymarketAPI.gamma_resolution_status(ids)
 
-    assert out == {}
+    assert out == dict.fromkeys(ids)
     assert g.call_count == 3
     batches = [
         [value for key, value in call.kwargs["params"] if key == "condition_ids"]
         for call in g.call_args_list
     ]
-    assert [len(batch) for batch in batches] == [50, 50, 1]
-    assert batches[0] == ids[:50]
-    assert batches[-1] == ids[-1:]
+    assert sorted(batches) == sorted([ids[:50], ids[50:100], ids[100:]])
 
 
 def _fake_gamma(statuses):
@@ -98,9 +97,35 @@ def test_full_batch_is_not_truncated_by_gamma_default_limit():
 def test_failed_batch_does_not_discard_successful_batches():
     ids = [f"0xc{i}" for i in range(51)]
     first = _resp([{"conditionId": "0xc0", "umaResolutionStatus": "proposed"}])
-    with patch(
-        "api.proxy.requests.get", side_effect=[first, Exception("timeout")]
-    ):
+
+    def get(_url, params, **_kwargs):
+        requested = [value for key, value in params if key == "condition_ids"]
+        if "0xc0" in requested:
+            return first
+        raise Exception("timeout")
+
+    with patch("api.proxy.requests.get", side_effect=get):
         out = PolymarketAPI.gamma_resolution_status(ids)
 
     assert out == {"0xc0": "proposed"}
+
+
+def test_closed_market_resolution_is_not_lost_when_default_lookup_omits_it():
+    with patch(
+        "api.proxy.requests.get",
+        side_effect=[
+            _resp([]),
+            _resp(
+                [
+                    {
+                        "conditionId": "closed",
+                        "closed": True,
+                        "umaResolutionStatus": "resolved",
+                    }
+                ]
+            ),
+        ],
+    ):
+        assert PolymarketAPI.gamma_resolution_status(["closed"]) == {
+            "closed": "resolved"
+        }

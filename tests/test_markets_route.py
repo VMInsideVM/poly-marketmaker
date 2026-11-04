@@ -213,6 +213,7 @@ def test_scan_status_from_manager(client, monkeypatch):
 
     mgr = MagicMock()
     mgr.scan_status = "scanning"
+    mgr.scan_progress = "核对各市场精确奖励…"
     mgr.scan_checked = 5
     mgr.scan_total = 20
     mgr.eligible_markets = [{"market_id": "a"}, {"market_id": "b"}]
@@ -220,6 +221,7 @@ def test_scan_status_from_manager(client, monkeypatch):
     monkeypatch.setattr(routes, "manager", mgr)
     d = client.get("/api/engine/scan-status").get_json()
     assert d["scan_status"] == "scanning"
+    assert d["scan_progress"] == mgr.scan_progress
     assert d["scan_checked"] == 5 and d["scan_total"] == 20
     assert d["found"] == 2
 

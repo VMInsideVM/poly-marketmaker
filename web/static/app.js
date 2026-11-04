@@ -136,7 +136,7 @@ function marketCell(name, conditionId, url) {
         el.style.display = 'block';
         el.textContent = t > 0
           ? `⟳ 扫描中 ${c}/${t} · 已找到 ${d.found || 0}`
-          : `⟳ 扫描中 · 已找到 ${d.found || 0}`;
+          : `⟳ ${d.scan_progress || '扫描中'} · 已找到 ${d.found || 0}`;
       } else {
         el.style.display = 'none';
       }

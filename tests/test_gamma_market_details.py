@@ -133,3 +133,82 @@ def test_returns_market_tag_slugs_and_asks_for_them():
         out = PolymarketAPI.gamma_market_details(["0xc1"])
     assert out["0xc1"]["tag_slugs"] == ["sports", "soccer"]
     assert ("include_tag", "true") in g.call_args.kwargs["params"]
+
+
+def test_missing_closed_market_is_recovered_without_requerying_open_market():
+    """奖励池仍有已关闭盘；默认 Gamma 隐藏它，不能误报其标签消失。"""
+    open_row = {"conditionId": "open", "tags": [{"slug": "politics"}]}
+    closed_row = {
+        "conditionId": "closed",
+        "closed": True,
+        "createdAt": "2026-10-25T00:00:00Z",
+        "endDate": "2026-11-03T00:00:00Z",
+        "tags": [{"slug": "elections"}],
+    }
+    with patch(
+        "api.proxy.requests.get", side_effect=[_resp([open_row]), _resp([closed_row])]
+    ) as get:
+        out = PolymarketAPI.gamma_market_details(["open", "closed"])
+    assert out["closed"] == {
+        "created_at": "2026-10-25T00:00:00Z",
+        "end_date": "2026-11-03T00:00:00Z",
+        "tag_slugs": ["elections"],
+    }
+    assert out["open"]["tag_slugs"] == ["politics"]
+    assert get.call_count == 2
+    second = get.call_args_list[1].kwargs["params"]
+    assert [v for k, v in second if k == "condition_ids"] == ["closed"]
+    assert ("closed", "true") in second
+    assert ("limit", 1) in second and ("include_tag", "true") in second
+
+
+def test_closed_lookup_failure_keeps_successful_open_rows_and_retries_once():
+    with patch(
+        "api.proxy.requests.get",
+        side_effect=[
+            _resp([{"conditionId": "open", "tags": [{"slug": "politics"}]}]),
+            RuntimeError("closed lookup unavailable"),
+            RuntimeError("still unavailable"),
+        ],
+    ) as get:
+        out = PolymarketAPI.gamma_market_details(["open", "closed"])
+    assert out == {"open": {"tag_slugs": ["politics"]}}
+    assert get.call_count == 3
+
+
+def test_complete_open_batch_does_not_make_closed_lookup():
+    with patch(
+        "api.proxy.requests.get",
+        return_value=_resp([{"conditionId": "open", "tags": [{"slug": "politics"}]}]),
+    ) as get:
+        assert PolymarketAPI.gamma_market_details(["open"]) == {
+            "open": {"tag_slugs": ["politics"]}
+        }
+    assert get.call_count == 1
+
+
+def test_failed_initial_read_does_not_double_network_failure_retries():
+    with patch("api.proxy.requests.get", side_effect=RuntimeError("offline")) as get:
+        assert PolymarketAPI.gamma_market_details(["closed"]) == {}
+    assert get.call_count == 2
+
+
+def test_closed_market_lookup_preserves_proxy_for_every_read():
+    from api.proxy import use_proxy
+
+    with patch(
+        "api.proxy.requests.get",
+        side_effect=[
+            _resp([]),
+            _resp([{"conditionId": "closed", "tags": [{"slug": "elections"}]}]),
+        ],
+    ) as get:
+        with use_proxy("http://proxy.test:1234"):
+            out = PolymarketAPI.gamma_market_details(["closed"])
+    assert out == {"closed": {"tag_slugs": ["elections"]}}
+    assert get.call_count == 2
+    assert all(
+        c.kwargs["proxies"]
+        == {"http": "http://proxy.test:1234", "https": "http://proxy.test:1234"}
+        for c in get.call_args_list
+    )
